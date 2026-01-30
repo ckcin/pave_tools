@@ -8,6 +8,7 @@
 #   Jan 14, 2026 nickc : initial implementation consisting of initial cli a basic diff dump
 #   Jan 16, 2026 nickc : initial implementation complete with initial set of report filters
 #   Jan 26, 2026 nickc : updated to use NCO's ncks command to get sorted metadata
+#   Jan 30, 2026 nickc : updated comparison of variables, now pull variable by variable to enable attribute sorting
 #######################################################################################################################
 # TODO:
 # - [YYYY-MM-DD] To-do template
@@ -76,7 +77,7 @@ function compare_group() {
 
   local differ=$(diff -q -w <(echo "$prem_group") <(echo "$gccs_group"))
   if [[ -n $differ ]]; then
-    debug $group_name they differ
+    debug members of $group_name differ
 
     local length=$(printf "%s\n" "${prem_group[@]} ${gccs_group[@]}" | wc -L); debug length=$length
     local width=$(($length * 2 + 3)); debug width=$width
@@ -101,9 +102,11 @@ function compare_group() {
           print "ERROR,"grp",GCCS ONLY,,"gccs",";
         }
       }')
-  fi
 
-  debug "results\n${group_results[@]}"
+    debug "results=\n${group_results[@]}"
+  else
+    debug "all entries matching for $group_name"
+  fi
 }
 
 function filter_report() {
@@ -132,8 +135,8 @@ function compare_dimensions() {
 
   verbose "comparing dimenions for: $prem vs $gccs"
 
-  local prem_dims=$(collect_group $dimensions $variables $prem); #debug prem: "\n$prem_dims"
-  local gccs_dims=$(collect_group $dimensions $variables $gccs); #debug gccs: "\n$gccs_dims"
+  local prem_dims=$(collect_group $dimensions $variables $prem); # debug prem: "\n$prem_dims"
+  local gccs_dims=$(collect_group $dimensions $variables $gccs); # debug gccs: "\n$gccs_dims"
 
   local -a results
   compare_group "$prod,${dimensions%?}" "prem_dims" "gccs_dims" "results"
@@ -141,19 +144,34 @@ function compare_dimensions() {
   filter_report $outfile "results"
 }
 
+function get_variable_list() {
+  ncks -qm $1 | sed -n '/variables:/,$p' | sed 's/([^(].*$//' | sed 's/:[^:].*$//' | awk '{print $2}' | sed -e '/^$/d' | grep -v "//"
+}
+
+function collect_variable() {
+  ncks -Cmv $1 $2 | grep $1: | sort
+}
+
 function compare_variables() {
   local prod=$1; local prem=$2; local gccs=$3; local outfile=$4
 
   verbose "comparing variables for: $prem vs $gccs"
 
-  local prem_vars=$(collect_group $variables $attributes $prem)
-  local gccs_vars=$(collect_group $variables $attributes $gccs)
+  local prem_vars=$(get_variable_list $prem); #debug prem_vars: "\n${prem_vars[@]}"
+  local gccs_vars=$(get_variable_list $prem); #debug prem_vars: "\n${prem_vars[@]}"
 
-  local -a results
-  compare_group "$prod,${variables%?}" "prem_vars" "gccs_vars" "results"
-  debug "${results[@]}"
-  filter_report $outfile "results"
+  for var in ${prem_vars[@]}; do
+    debug checking $var for metadata differences
+
+    local prem_var=$(collect_variable $var $prem); debug prem_var=${prem_var[@]}
+    local gccs_var=$(collect_variable $var $gccs); debug gccs_var=${gccs_var[@]}
+
+    local -a results=()
+    compare_group "$prod,$var" "prem_var" "gccs_var" "results"; debug "${results[@]}"
+    filter_report $outfile "results"
+  done
 }
+
 
 function compare_attributes() {
   local prod=$1; local prem=$2; local gccs=$3; local outfile=$4
