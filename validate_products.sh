@@ -1,7 +1,6 @@
 #! /usr/bin/env bash
 set -o errexit
 set -o pipefail
-set -o nounset
 #######################################################################################################################
 # FILE:           validate_products_v2.sh
 # DESCRIPTION:    Version 2 of PAVE collectoin and validation routines for GCCS
@@ -43,7 +42,7 @@ set -o nounset
 #######################################################################################################################
 
 # Paths to PAVE scripts/tools
-pave_bin=/data/hcarrasco/pave
+pave_bin=/data/to05/scripts
 glance_cfg=$pave_bin/glance_summarize/configuration
 analysis_path=$PWD/YYYYDDDhh
 
@@ -345,22 +344,6 @@ function get_on_prem_products() {
 }
 
 ####### ----- ANALYZE ---- #######
-function run_metadata_analysis_jason() {
-  verbose "Performing Metadata analysis"
-  # metadata script(s) created by Jason Garris
-  local analyzer=$pave_bin/metadata_scripts/Turn_The_Crank.sh
-
-  for product in $(find $gccs_path -type d -links 2 ! -empty); do
-    product=$(dirname $(dirname $product)) #remove yyyy/ddd
-    debug $analyzer $analysis_path $product ${product/gccs/prem}
-    $analyzer $analysis_path $product ${product/gccs/prem}
-  done
-
-  cat $(find $ncdump_path -name *results.csv) > $analysis_path/metadata_summary.csv
-
-  (cd $analysis_path; tar cfz ncdump.tar.gz ncdump; rm -rf $ncdump_path)
-}
-
 function run_metadata_analysis() {
   verbose "Performing Metadata Analysis"
 
@@ -373,7 +356,7 @@ function run_metadata_analysis() {
     product_dir=$(dirname $(dirname $product)); debug product_dir=$product_dir #remove yyyy/ddd
     product_rpt=$metadata_path/$(basename $product_dir).csv; debug product_rpt=$product_rpt
 
-    $analyzer --silent --overwrite $product_dir ${product_dir/prem/gccs} $product_rpt
+    $analyzer --overwrite $product_dir ${product_dir/prem/gccs} $product_rpt
   done
 
   # collect and cleanup
