@@ -193,6 +193,22 @@ ALLSTATS = {
            }
 # ---------------------------------------------------------------------------------------------------------------------
 
+# Regex to parse filename
+goes_regex = (
+    r"path: .*?/"                     # find path entry
+    r"[A-Z0-9]+(?:_[A-Z0-9])?_"       # Environment OR_ or OR_I_
+    r"(?P<sensor>[A-Z0-9]+)-"         # Instrument/Sensor (ABI,MAG,etc)
+    r"(?P<level>L1b|L2)-"             # Product Level
+    r"(?P<product>[A-Z0-9]+?)"        # Product name (Non-greedy)
+    r"(?P<scene>F|C|M1|M2)?"          # Scene [optional] (lazy match)
+    # Look for the channel inside the suffix, or just match the suffix
+    r"(?:-(?P<mode>[A-Z0-9]+)?(?P<channel>C\d{2})?)?_"
+    r"(?P<sat>G\d{2})_"               # Satellite ID ]G19|G18]
+    r"s(?P<start>\d{14})_"            # Start time
+    r"e(?P<end>\d{14})_"              # End time
+    r"c(?P<created>\d{14})"           # Creation time
+)
+
 def summarize_stats(label, file_glob, ofile):
     # useful constants
     STATS_NAME = 'Finite Data Statistics'
@@ -243,19 +259,24 @@ def summarize_stats(label, file_glob, ofile):
         variable_name = re.search(r'variable name: ([^\s]*)',
                                   sp_file.find(string=re.compile('variable name:')).text).group(1)
         for block in sp_file.find_all('blockquote'):
-            #if DEBUG: print(block)
-            filetimes = re.search(r'path: .*ABI-L2-(\w+)([CFM][12]*)-M\d([C0-9]*)_(G\d+)_s(\d+)_e(\d+)_c(\d+)\.nc',
-                                  block.text)
+            if DEBUG: print(block)
+            #filetimes = re.search(r'path: .*ABI-L2-(\w+)([CFM][12]*)-M\d([C0-9]*)_(G\d+)_s(\d+)_e(\d+)_c(\d+)\.nc',
+            fileinfo = re.search(goes_regex, block.text)
+            if DEBUG: print(fileinfo.groupdict())
             fileletter = re.search(r'md5sum for File ([AB]): ([^\s]*)', block.text)
-            if fileletter.group(1) == 'A' and filetimes:
+            if fileletter.group(1) == 'A' and fileinfo:
                 aFound = True
-                aAlg, aScn, aChn, aSat, aStart, aEnd, aCreat = filetimes.groups()
+                #aAlg, aScn, aChn, aSat, aStart, aEnd, aCreat = filetimes.groups()
+                aAlg, aScn, aChn, aSat = fileinfo['sensor'],fileinfo['scene'],fileinfo['channel'],fileinfo['sat']
+                aStart, aEnd, aCreat = fileinfo['start'],fileinfo['end'],fileinfo['created']
                 aCkSum = fileletter.group(2)
-            elif fileletter.group(1) == 'B' and filetimes:
+            elif fileletter.group(1) == 'B' and fileinfo:
                 bFound = True
-                bAlg, bScn, bChn, bSat, bStart, bEnd, bCreat = filetimes.groups()
+                #bAlg, bScn, bChn, bSat, bStart, bEnd, bCreat = filetimes.groups()
+                bAlg, bScn, bChn, bSat = fileinfo['sensor'],fileinfo['scene'],fileinfo['channel'],fileinfo['sat']
+                bStart, bEnd, bCreat = fileinfo['start'],fileinfo['end'],fileinfo['created']
                 bCkSum = fileletter.group(2)
-            elif not filetimes:
+            elif not fileinfo:
                 print("\nFatal Error: Could not parse pathname for File A or File B.")
                 print(block.text)
                 exit(1)
@@ -278,9 +299,9 @@ def summarize_stats(label, file_glob, ofile):
             print(f"\nFatal Error: Mismatch in File A and File B satellites {aSat} != {bSat}.")
             exit(1)
         #if (aCreat == bCreat) and flag_warning_equal_creation_times:
-        if (aCreat == bCreat):
-            print(f"\nWarning: File A and File B creation times are equal, which is unexpected but not impossible,",
-                  f"{aCreat} == {bCreat}.")
+        #if (aCreat == bCreat):
+        #    print(f"\nWarning: File A and File B creation times are equal, which is unexpected but not impossible,",
+        #          f"{aCreat} == {bCreat}.")
 
         pdAlg, pdScn, pdChn, pdSat = aAlg, SCENES_MAP[aScn], aChn, aSat  # assumes a = b values, some validated above
         if not pdChn: pdChn = 'n/a'  # for non-CMI algorithms
@@ -387,7 +408,6 @@ def getProductList(basepath):
     glance_path=basepath+"/glance_reports/*/*" #added extra folder depth to account for instr (hnc)
     if VERBOSE: print("getting product list from glance report folder: "+glance_path)
     prods=[os.path.basename(path).replace("-m6","") for path in glob.glob(glance_path)]
-    print(prods)
     return prods
 # end function getProductList
 
@@ -420,7 +440,6 @@ if __name__ == "__main__":
     for product in products:
         if not QUIET: print(f"processing: {product}")
 #        for prodvar in ALG_PRODUCTS.get(product.split("/")[0].split("_")[0].upper(), []):
-        print(re.split(r'[/_-]', product, maxsplit=1))
         for prodvar in ALG_PRODUCTS.get(re.split(r'[/_-]', product, maxsplit=1)[0].upper(), []):
             if DEBUG : print(f"prodvar is : {prodvar} for {product}")
             prodglob=f"{args.basepath}/glance_reports/**/{product}*/**/*report*/{prodvar}/index.html"
