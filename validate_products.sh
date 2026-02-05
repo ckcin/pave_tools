@@ -1,6 +1,4 @@
 #! /usr/bin/env bash
-set -o errexit
-set -o pipefail
 #######################################################################################################################
 # FILE:           validate_products_v2.sh
 # DESCRIPTION:    Version 2 of PAVE collectoin and validation routines for GCCS
@@ -22,7 +20,7 @@ set -o pipefail
 #######################################################################################################################
 # TODO:
 # [-] [YYYY-MM-DD] To-do template
-# [-] [YYYY-MM-DD] update some verbose messages to 'info' and add 'info' messages as needed
+# [-] [YYYY-MM-DD] update to use common shared utility script
 # [-] [YYYY-MM-DD] add feature to use multiple timestamps
 # [-] [YYYY-MM-DD] update to loop over all scenes for ABI L1, will need for CMIP too
 # [-] [YYYY-MM-DD] feature to pull previously stored IP data mounted archive bucket (/buckets/geotowr-proghost/IP_Data/)
@@ -69,7 +67,6 @@ function print_help {
   echo -e "\t --skip_gccs \t skip collection of gccs produced data"
   echo -e "\t --skip_prem \t skip collection of on-prem produced data"
   echo -e "\t --force_nodd \t force usage of NODD for on-prem produced data"
-#  echo -e "\t -1|--one_timeline \t only collect 1 timeline from the top of the hour, ABI only"
   echo
   echo -e "\t --report_only \t analyze previously collected data"
   echo -e "\t --skip_glance \t skip production of glance reports"
@@ -356,7 +353,8 @@ function run_metadata_analysis() {
     product_dir=$(dirname $(dirname $product)); debug product_dir=$product_dir #remove yyyy/ddd
     product_rpt=$metadata_path/$(basename $product_dir).csv; debug product_rpt=$product_rpt
 
-    $analyzer --overwrite $product_dir ${product_dir/prem/gccs} $product_rpt
+    debug $analyzer ${DEBUG:+"--debug"} --overwrite $product_dir ${product_dir/prem/gccs} $product_rpt
+    $analyzer ${DEBUG:+"--debug"} --overwrite $product_dir ${product_dir/prem/gccs} $product_rpt
   done
 
   # collect and cleanup
@@ -426,7 +424,6 @@ function run_glance_analysis() {
   verbose "Generating Glance Reports"
   glance=/data/glance/miniforge3/envs/glance_user/bin/glance
 
-
   for product in $(find $gccs_path -type d -links 2 ! -empty); do
     product=$(dirname $(dirname $product)) #remove yyyy/ddd
 
@@ -436,8 +433,9 @@ function run_glance_analysis() {
     if [[ "$(basename ${product,,})" =~ "dmw" ]]; then run_glance_collocation_analysis $product; continue; fi
 
     mkdir -p $glance_report
-    debug $glance report --fork --nolonlat $glance_flags -p $glance_report ${product/gccs/prem} $product --stripfromname e.*
-    $glance report --fork --nolonlat $glance_flags -p $glance_report ${product/gccs/prem} $product --stripfromname e.*
+    $DEBUG && local flag="--verbose"
+    debug $glance report $flag --fork --nolonlat $glance_flags -p $glance_report ${product/gccs/prem} $product --stripfromname e.*
+    $glance report $flag --fork --nolonlat $glance_flags -p $glance_report ${product/gccs/prem} $product --stripfromname e.*
   done
 
   verbose "Summarizing Glance Reports"
@@ -445,14 +443,7 @@ function run_glance_analysis() {
 
   debug $summarizer -t $analysis_path $analysis_path/glance_summary.csv
   $summarizer -t $analysis_path $analysis_path/glance_summary.csv
-
-# Disable per request of Katie
-#  (cd $analysis_path; tar cfz glance_reports.tar.gz glance_reports; rm -rf $glance_path)
 }
-
-######_vvvvvv LEGACY vvvvvvvv ########
-
-######_^^^^^^ LEGACY ^^^^^^^^ ########
 
 ####### ----- TEST ----- #######
 function set_test() {
@@ -474,7 +465,7 @@ run_metadata=true
 force_nodd=false
 glance_flags=""
 
-ARGS=$(getopt -o hvdt1 --long collect_only,skip_gccs,skip_prem,force_nodd,report_only,skip_glance,skip_metadata,glance_flags:,one_timeline,scene_list:,prefix:,tag:,help,verbose,debug,test -- "$@")
+ARGS=$(getopt -o hvdt1 --long collect_only,skip_gccs,skip_prem,force_nodd,report_only,skip_glance,skip_metadata,glance_flags:,scene_list:,prefix:,tag:,help,verbose,debug,test -- "$@")
 eval set -- ${ARGS}
 while :
 do
@@ -489,7 +480,6 @@ do
     --skip_metadata )      run_metadata=false; shift ;;
     --glance_flags  )      glance_flags=$2; shift 2 ;;
 
-#    -1 | --one_timeline )  ONE_TIMELINE=true; shift ;;
     --scene_list )         SCENE_LIST=$2; shift 2 ;;
 
     --prefix )             PREFIX=$2; shift 2 ;;
