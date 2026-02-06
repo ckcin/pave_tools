@@ -92,6 +92,10 @@ function print_help {
 ####### ----- UTILS ---- #######
 VERBOSE=false; DEBUG=false; TEST=false
 
+function info() {
+  echo -e "${FUNCNAME[1]}: $@"
+}
+
 function verbose() {
   if "$VERBOSE"; then
     echo "${FUNCNAME[1]}: $@"
@@ -208,7 +212,7 @@ function get_gccs() {
 }
 
 function get_gccs_products() {
-  verbose "starting collection of gccs produced products"
+  info "starting collection of gccs produced products"
   local start_path=$PWD; debug "start_path=$start_path"
   local timestamp=$1; debug "timestamp=$timestamp"
   local -n products=$2
@@ -236,7 +240,7 @@ function get_gccs_products() {
 
 function get_on_prem_products() {
   # retrieves on-prem products based on available products from gccs
-  verbose "starting collections of matching products from on-prem"
+  info "starting collections of matching products from on-prem"
   local start_path=$PWD; debug "start_path=$start_path"
   local timestamp=$1; debug "timestamp=$timestamp"
 
@@ -344,7 +348,7 @@ function get_on_prem_products() {
 
 ####### ----- ANALYZE ---- #######
 function run_metadata_analysis() {
-  verbose "Performing Metadata Analysis"
+  info "Performing Metadata Analysis"
 
   local analyzer=$pave_bin/metadata_scripts/analyze_metadata.sh
   [[ -x $analyzer ]] || { ERROR "$analyzer not found or executable" >&2; }
@@ -423,7 +427,7 @@ function run_glance_collocation_analysis() {
 }
 
 function run_glance_analysis() {
-  verbose "Generating Glance Reports"
+  info "Generating Glance Reports"
   glance=/data/glance/miniforge3/envs/glance_user/bin/glance
 
   for product in $(find $gccs_path -type d -links 2 ! -empty); do
@@ -458,6 +462,8 @@ function set_test() {
 
 ####### ----- MAIN ----- #######
 PROGRAM=$(basename "$0")
+
+info "Starting Product Validation"
 
 ####### ----- CLI  ----- #######
 #default values
@@ -522,4 +528,5 @@ if $run_prem; then get_on_prem_products $date_hour; fi
 if $run_metadata; then run_metadata_analysis $date_hour; fi
 if $run_glance; then run_glance_analysis $date_hour; fi
 
+info "... processing complete"
 # happy dance you are at the end :-P
