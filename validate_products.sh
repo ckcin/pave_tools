@@ -16,16 +16,18 @@
 #   Dec 08, 2025 nickc : disabled removal of glance reports
 #   Dec 12, 2025 nickc : updated glance to only use the "start time" to match files
 #   Dec 22, 2025 nickc : added tagging structure for folder names
-#   Jan 16, 2025 nickc : replaced metadata script with new "simpler" analyzer tool
+#   Jan 16, 2026 nickc : replaced metadata script with new "simpler" analyzer tool
+#   Jan 20, 2026 nickc : added routine to collocated DMW... will need to expand for GLM
+#   Feb 05, 2026 nickc : added basic ability to collected data for multiple timeframes separated with a ','
 #######################################################################################################################
 # TODO:
 # [-] [YYYY-MM-DD] To-do template
 # [-] [YYYY-MM-DD] update to use common shared utility script
-# [-] [YYYY-MM-DD] add feature to use multiple timestamps
-# [-] [YYYY-MM-DD] update to loop over all scenes for ABI L1, will need for CMIP too
+# [-] [YYYY-MM-DD] update to loop over all channels for ABI L1, will need for CMIP too - may be OBE
 # [-] [YYYY-MM-DD] feature to pull previously stored IP data mounted archive bucket (/buckets/geotowr-proghost/IP_Data/)
-# [-] [YYYY-MM-DD] implement specialized glance reporting for DWM (may be usable for GLM)
 #
+# [-] [2026-02-05] add feature to use multiple timestamps
+# [-] [2026-01-20] implement specialized glance reporting for DWM (may be usable for GLM)
 # [x] [2026-01-16] integrate new metadata analyzer
 # [x] [2025-12-22] add cli to apply tag and prefix to folder names for better tracking
 # [x] [2025-12-03] test and verify IP retrieval
@@ -73,7 +75,7 @@ function print_help {
   echo -e "\t --skip_metadata \t skip production of metadata reports"
   echo -e "\t --glance_flags \t added/use additional flags in glance run [eg:--glance_flags \"-e 0,5\""
   echo
-  echo -e "\t --scene_list [f c m1 m2] \n\t\t specific list of scenes to validate a produc for (quote list)"
+  echo -e "\t --scene_list [f c m1 m2] \n\t\t specific list of scenes to validate a product for (quote list)"
   echo
   echo -e "\t --prefix [PREFIX] \t <date_hour> is used as folder name, prefix used to help identify run"
   echo -e "\t --tag [TAG] \t used to add additional details to folder name, is appended"
@@ -443,6 +445,7 @@ function run_glance_analysis() {
 
   debug $summarizer -t $analysis_path $analysis_path/glance_summary.csv
   $summarizer -t $analysis_path $analysis_path/glance_summary.csv
+  (cd $analysis_path; tar cfz glance_reports.tar.gz glance_reports)
 }
 
 ####### ----- TEST ----- #######
@@ -495,7 +498,7 @@ do
   esac
 done
 # store positional arguments
-date_hour=${1:--999}; shift
+date_hour=${1:-""}; shift
 product_names=("$@"); debug "product list: ${product_names[@]}"
 
 # reset s3 progress if debug
@@ -505,12 +508,15 @@ if $DEBUG; then S3_PROGRESS=""; fi
 if $TEST; then set_test; fi
 ####### ----- TEST ----- #######
 
-if [ $date_hour -eq 999 ]; then echo -e "date_hour required\n"; print_help $PROGRAM; exit 1; fi
+if [[ -z $date_hour ]]; then echo -e "date_hour required\n"; print_help $PROGRAM; exit 1; fi
 if [ ${#product_names[@]} -eq 0 ]; then echo -e "include prod names to best knowledge\n"; print_help $PROGRAM; exit 1; fi
 
+IFS=',' read -ra dates <<< "$date_hour"; date_hour="${dates[0]}"
 set_paths $date_hour
 
-if $run_gccs; then get_gccs_products $date_hour "product_names"; fi
+for timestamp in ${dates[@]}; do
+  if $run_gccs; then get_gccs_products $timestamp "product_names"; fi
+done
 if $run_prem; then get_on_prem_products $date_hour; fi
 
 if $run_metadata; then run_metadata_analysis $date_hour; fi
