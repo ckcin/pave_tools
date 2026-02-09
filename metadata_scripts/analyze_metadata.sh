@@ -12,6 +12,7 @@
 #######################################################################################################################
 # TODO:
 # - [YYYY-MM-DD] To-do template
+# - [YYYY-MM-DD] update writer to wrap fields that include commas in quotes
 # - [2026-01-16] add start time value to rows and/or gccs filename
 #######################################################################################################################
 
@@ -84,7 +85,7 @@ function compare_group() {
 
     #group_results=$(
     readarray -t group_results < <(
-    diff --side-by-side --suppress-common-lines --expand-tabs --width=$width <(echo "$prem_group") <(echo "$gccs_group") |
+    diff --side-by-side --suppress-common-lines --expand-tabs --width=$width <(echo "$prem_group" | sed 's/.*/"&"/') <(echo "$gccs_group" | sed 's/.*/"&"/') |
       awk -v len="$length" -v grp="$group_name" '{
         prem = substr($0, 1, len); #print "[prem]"prem;
         mark = substr($0, len+1, 3); #print "[mark]"mark
