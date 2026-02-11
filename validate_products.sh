@@ -58,36 +58,34 @@ SCENE_LIST="f c m1 m2"
 
 ####### ----- HELP ----- #######
 function print_help {
+  printf "Usage: %s [options] <date_hour> <product(s)>\n" ${BASH_SOURCE[-1]}
+  printf "%s validates products produced by GCCS against on-prem products\n" $PROGRAM
 
-  echo -e "Usage:"
-  echo -e "$PROGRAM [options] <date_hour> <product(s)>"
-  echo
-  echo -e "Arguments:"
-  echo -e "\t <date_hour> \t date for data collection, format YYYYDDDHH[M], add M for single timeline"
-  echo -e "\t <product(s)> \t list of products to validate"
-  echo
-  echo -e "Options:"
-  echo -e "\t --collect_only \t only retrieve data, no reporting"
-  echo -e "\t --skip_gccs \t skip collection of gccs produced data"
-  echo -e "\t --skip_prem \t skip collection of on-prem produced data"
-  echo -e "\t --force_nodd \t force usage of NODD for on-prem produced data"
-  echo
-  echo -e "\t --report_only \t analyze previously collected data"
-  echo -e "\t --skip_glance \t skip production of glance reports"
-  echo -e "\t --skip_metadata \t skip production of metadata reports"
-  echo -e "\t --glance_flags \t added/use additional flags in glance run [eg:--glance_flags \"-e 0,5\""
-  echo
-  echo -e "\t --scene_list [f c m1 m2] \n\t\t specific list of scenes to validate a product for (quote list)"
-  echo
-  echo -e "\t --prefix [PREFIX] \t <date_hour> is used as folder name, prefix used to help identify run"
-  echo -e "\t --tag [TAG] \t used to add additional details to folder name, is appended"
-  echo
-  echo -e "\t -v|--verbose \t verbose messaging"
-  echo -e "\t -d|--debug \t debug messaging"
-  echo -e "\t -D|--tool_debug \t debug tools called by scritp"
-  echo -e "\t -h|--help \t prints this message"
+  printf "\nArguments:\n"
+  printf "  %-20s %s\n" "<date_hour>" "date for data collection, format YYYYDDDHH[M], add M for single timeline"
+  printf "  %-20s %s\n" "<product(s)>" "list of products to validate"
 
-  echo -e "\t -t|--test \t runs simple test routine with hardwired paramets"
+  printf "\nOptions:\n"
+  printf "  %-20s %s\n" "--collect_only" "only retrieve data, no reporting"
+  printf "  %-20s %s\n" "--skip_gccs" "skip collection of gccs produced data"
+  printf "  %-20s %s\n" "--skip_prem" "skip collection of on-prem produced data"
+  printf "  %-20s %s\n" "--force_nodd" "force usage of NODD for on-prem produced data"
+  printf "\n"
+  printf "  %-20s %s\n" "--report_only" "analyze previously collected data"
+  printf "  %-20s %s\n" "--skip_glance" "skip production of glance reports"
+  printf "  %-20s %s\n" "--skip_metadata" "skip production of metadata reports"
+  printf "  %-20s %s\n" "--glance_flags" "added/use additional flags in glance run [eg:--glance_flags \"-e 0,5\"]"
+  printf "\n"
+  printf "  %-20s %s\n" "--scene_list [f c m1 m2]" "specific list of scenes to validate a product for (quote list)"
+  printf "\n"
+  printf "  %-20s %s\n" "--prefix [PREFIX]" "<date_hour> is used as folder name, prefix used to help identify run"
+  printf "  %-20s %s\n" "--tag [TAG]" "used to add additional details to folder name, is appended"
+  printf "\n"
+  printf "  %-20s %s\n" "-t|--test" "runs simple test routine with hardwired paramets"
+  printf "  %-20s %s\n" "-v|--verbose" "verbose messaging"
+  printf "  %-20s %s\n" "-d|--debug" "debug messaging"
+  printf "  %-20s %s\n" "-D|--tool_debug" "debug tools called by script"
+  printf "  %-20s %s\n" "-h|--help" "prints this message"
 
   exit 0
 }
