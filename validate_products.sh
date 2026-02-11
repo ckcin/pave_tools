@@ -83,6 +83,7 @@ function print_help {
   echo
   echo -e "\t -v|--verbose \t verbose messaging"
   echo -e "\t -d|--debug \t debug messaging"
+  echo -e "\t -D|--tool_debug \t debug tools called by scritp"
   echo -e "\t -h|--help \t prints this message"
 
   echo -e "\t -t|--test \t runs simple test routine with hardwired paramets"
@@ -92,6 +93,7 @@ function print_help {
 
 ####### ----- UTILS ---- #######
 VERBOSE=false; DEBUG=false; TEST=false
+TOOL_DEBUG=false
 
 function msgdate() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')]"
@@ -113,8 +115,12 @@ function debug() {
   fi
 }
 
+function WARN() {
+  echo -e "$(msgdate) [WARN   ] ${FUNCNAME[1]}: $@"
+}
+
 function ERROR() {
-  echo ERROR: "${FUNCNAME[1]}: $@"
+  echo -e "$(msgdate) [ERROR  ] ${FUNCNAME[1]}: $@"
   exit 1
 }
 
@@ -168,6 +174,18 @@ function isL1() {
 ###### ^^^^^ PRODUCT MAP ^^^^^ ######
 
 ####### ----- RETREIVAL ---- #######
+# Regex Breakdown:
+# ([^-]+)        1. Instrument (ABI)
+# -([^-]+)       2. Level (L2)
+# -([^-]+)       3. Product (DMWF)
+# (-M[0-9]+)?    4. Optional Mode (-M6)
+# (C[0-9]+)?     5. Optional Channel (C07)
+# _G([0-9]+)     6. Satellite (18)
+# _s([0-9]+)     7. Start
+# _e([0-9]+)     8. End
+# _c([0-9]+)     9. Created
+GOES_FILE_PATTERN='^OR_([^-]+)-([^-]+)-([^-]+)(-M[0-9]+)?(C[0-9]+)?_G([0-9]+)_s([0-9]+)_e([0-9]+)_c([0-9]+)\.nc$'
+
 function get_gccs() {
   verbose "starting collection of gccs produced products"
   local start_path=$PWD; debug "start_path=$start_path"
@@ -180,7 +198,7 @@ function get_gccs() {
   # if only one timeline wanted for hour append 0 to get only data for first 10 minutes at top of hour, only for ABI and SUVI
 #  if [[ $ONE_TIMELINE && ($instrument == "ABI" || $instrument == "SUVI") ]]; then timestamp=${timestamp}0; fi
 
-  local dest=${gccs_path}/${instrument}/${product}; mkdir -p $dest
+  local dest=${gccs_path}/${instrument}/${product}; #mkdir -p $dest
 
   verbose "retrieving $product from instrument: $instrument for time:$timestamp from s3 bucket: $GCCS storing at: $dest"
   local prefix="${GCCS_BASE_PREFIX}/GOES-sat/$level/$instrument/$product"; #debug "prefix=$prefix"
@@ -196,11 +214,15 @@ function get_gccs() {
     debug "query=${query/sat/$sat}"
     aws s3api list-objects-v2 --profile geocloud --bucket $GCCS --prefix ${prefix/sat/$sat} --query "${query/sat/$sat}" --output json | jq -r '.[]?' |
     while read file; do
-      debug "retrieving $file from s3 bucket"
+      debug "retrieving $(basename $file) from s3 bucket"
+      [[ $(basename $file) =~ $GOES_FILE_PATTERN ]] || true; debug "parsed file: ${BASH_REMATCH[@]}"
+      local channel="${BASH_REMATCH[5]:-}"; debug channel=$channel
+
       local doy=$(basename $(dirname $file)); debug doy=$doy
       local year=$(basename $(dirname $(dirname $file))); debug year=$year
-      mkdir -p $dest/$year/$doy
-      aws s3 cp --profile geocloud s3://$GCCS/$file $dest/$year/$doy/ $S3_PROGRESS
+      local dated_dest=$dest${channel:+_$channel}/$year/$doy; debug dated_dest=$dated_dest
+      mkdir -p $dated_dest
+      aws s3 cp --profile geocloud s3://$GCCS/$file $dated_dest/ $S3_PROGRESS
     done
     if [[ $level = "L2" ]]; then #retrieve L2 IP
       verbose "retrieving L2 IP data for GOES-$sat"
@@ -364,8 +386,9 @@ function run_metadata_analysis() {
     product_dir=$(dirname $(dirname $product)); debug product_dir=$product_dir #remove yyyy/ddd
     product_rpt=$metadata_path/$(basename $product_dir).csv; debug product_rpt=$product_rpt
 
-    debug $analyzer ${DEBUG:+"--debug"} --overwrite $product_dir ${product_dir/prem/gccs} $product_rpt
-    $analyzer ${DEBUG:+"--debug"} --overwrite $product_dir ${product_dir/prem/gccs} $product_rpt
+    $TOOL_DEBUG && local flag="--verbose"
+    debug $analyzer $flag --overwrite $product_dir ${product_dir/prem/gccs} $product_rpt
+    $analyzer $flag --overwrite $product_dir ${product_dir/prem/gccs} $product_rpt
   done
 
   # collect and cleanup
@@ -381,12 +404,16 @@ function run_glance_collocation_analysis() {
   # prep data using glance collocate
   local tmp_dir=${gccs_path/gccs/tmp}; mkdir -p $tmp_dir
   local gccs_file=""
+  verbose "Collocating product: $product"
+  local collocated=false
   for gccs_file in $(find $product -type f); do
     debug gccs_file=$gccs_file
     local target=$(basename ${gccs_file%"_e"*}); debug target=$target
-    local channel=${target%_G*}; channel=${channel##*-}; debug channel=$channel
     local doy=$(basename $(dirname $gccs_file)); debug doy=$doy
     local year=$(basename $(dirname $(dirname $gccs_file))); debug year=$year
+
+#    [[ $(basename $gccs_file) =~ $GOES_FILE_PATTERN ]] || true; debug "parsed file: ${BASH_REMATCH[@]}"
+#    local channel="${BASH_REMATCH[5]:-}"; debug channel=$channel
 
     local prem_file=$(find $(dirname ${gccs_file/gccs/prem}) -name $target*); debug prem_file=$prem_file
 
@@ -394,17 +421,18 @@ function run_glance_collocation_analysis() {
     local NO_LON="\{0/Inf\}"
     local prem_lon=$(h5ls $prem_file/lon); debug prem_lon=$prem_lon
     local gccs_lon=$(h5ls $gccs_file/lon); debug gccs_lon=$gccs_lon
-    if [[ $prem_lon =~ $NO_LON || $gccs_lon =~ $NO_LON ]]; then  echo "WARNING: no winds reported in either $prem_file or $gccs_file"; continue; fi
+    if [[ $prem_lon =~ $NO_LON || $gccs_lon =~ $NO_LON ]]; then WARN "no winds reported in either $prem_file or $gccs_file"; continue; fi
 
     ## collocate
     verbose "Collocating $gccs_file with $prem_file"
     debug $glance collocate -c $glance_cfg/dmw_collocate.py -p $tmp_dir $gccs_file $prem_file
     local traceback=$( { $glance collocate -c $glance_cfg/dmw_collocate.py -p $tmp_dir $gccs_file $prem_file; } 3>&1 1>&2 2>&3 3>&- )
-    if (( $? == 1 )); then echo -e "Glance reported error:\nCaptured Traceback:\n$traceback"; fi
+    if (( $? == 1 )); then WARN "Glance reported error:\nCaptured Traceback:\n$traceback"; continue; fi
 
     ## mv to collocated folders
     verbose "moving collocated files"
-    local coll_path_gccs=$(dirname ${gccs_file/gccs/coll_gccs}); coll_path_gccs=${coll_path_gccs/\/$year/-$channel\/$year}; debug coll_path_gccs=$coll_path_gccs
+    #local coll_path_gccs=$(dirname ${gccs_file/gccs/coll_gccs}); coll_path_gccs=${coll_path_gccs/\/$year/-$channel\/$year}; debug coll_path_gccs=$coll_path_gccs
+    local coll_path_gccs=$(dirname ${gccs_file/gccs/coll_gccs}); debug coll_path_gccs=$coll_path_gccs
     mkdir -p $coll_path_gccs
     local coll_file_gccs=$(find $tmp_dir -name $(basename ${gccs_file/.nc/})*); debug coll_file_gccs=$coll_file_gccs
     mv $coll_file_gccs $coll_path_gccs/$(basename ${coll_file_gccs/-collocated/})
@@ -413,8 +441,11 @@ function run_glance_collocation_analysis() {
     mkdir -p $coll_path_prem
     local coll_file_prem=$(find $tmp_dir -name $(basename ${prem_file/.nc/})*); debug coll_file_prem=$coll_file_prem
     mv $coll_file_prem $coll_path_prem/$(basename ${coll_file_prem/-collocated/})
-
+    collocated=true
   done
+  verbose "Collocation complete for $product"
+
+  if [[ $collocated == false ]]; then WARN "no winds collocated for product: $product"; return 1; fi
 
   # run glance report providing collocated folders, nolatlon flag and specified variables
   for collocated in $(find $(dirname ${coll_path_prem})* -type d -links 2); do
@@ -424,8 +455,7 @@ function run_glance_collocation_analysis() {
     verbose "glance comparison: $coll_path_prem vs $coll_path_gccs to: $glance_report"
     debug $glance report -c $glance_cfg/dmw_report.py -p $glance_report --stripfromname e.* $collocated ${collocated/prem/gccs}
     traceback=$( { $glance report -c $glance_cfg/dmw_report.py -p $glance_report --stripfromname e.* $collocated ${collocated/prem/gccs}; } 3>&1 1>&2 2>&3 3>&- )
-    if (( $? == 1 )); then echo -e "Glance reported error:\nCaptured Traceback:\n$traceback"; fi
-    echo -e "glance debug:\n$traceback"
+    if (( $? == 1 )); then WARN "Glance reported error:\nCaptured Traceback:\n$traceback"; fi
   done
 
   rm -rf $tmp_dir
@@ -444,7 +474,7 @@ function run_glance_analysis() {
     if [[ "$(basename ${product,,})" =~ "dmw" ]]; then run_glance_collocation_analysis $product; continue; fi
 
     mkdir -p $glance_report
-    $DEBUG && local flag="--verbose"
+    $TOOL_DEBUG && local flag="--verbose"
     debug $glance report $flag --fork --nolonlat $glance_flags -p $glance_report ${product/gccs/prem} $product --stripfromname e.*
     $glance report $flag --fork --nolonlat $glance_flags -p $glance_report ${product/gccs/prem} $product --stripfromname e.*
   done
@@ -479,7 +509,7 @@ run_metadata=true
 force_nodd=false
 glance_flags=""
 
-ARGS=$(getopt -o hvdt1 --long collect_only,skip_gccs,skip_prem,force_nodd,report_only,skip_glance,skip_metadata,glance_flags:,scene_list:,prefix:,tag:,help,verbose,debug,test -- "$@")
+ARGS=$(getopt -o hvdtD --long collect_only,skip_gccs,skip_prem,force_nodd,report_only,skip_glance,skip_metadata,glance_flags:,scene_list:,prefix:,tag:,help,verbose,debug,test,tool_debug -- "$@")
 eval set -- ${ARGS}
 while :
 do
@@ -503,6 +533,8 @@ do
     -v | --verbose ) VERBOSE=true; shift ;;
     -d | --debug   ) DEBUG=true; VERBOSE=true; shift ;;
     -t | --test    ) TEST=true; DEBUG=true; VERBOSE=true; shift ;;
+
+    -D | --tool_debug ) TOOL_DEBUG=true; shift ;;
 
     -- ) shift; break ;;
     *  ) echo "invalid options: -$1"; print_help $prog ;;
