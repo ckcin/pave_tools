@@ -22,7 +22,8 @@
 #######################################################################################################################
 # TODO:
 # [-] [YYYY-MM-DD] To-do template
-# [-] [YYYY-MM-DD] Consider feature to add all retrieved GCCS files to an array so that on future pulls only new files are pulled from on-prem
+# [-] [YYYY-MM-DD] Consider feature to add all retrieved GCCS files to an array so that on future pulls only new files
+#                  are pulled from on-prem
 # [-] [YYYY-MM-DD] update to use common shared utility script
 # [-] [YYYY-MM-DD] update to loop over all channels for ABI L1, will need for CMIP too - may be OBE
 # [-] [YYYY-MM-DD] feature to pull previously stored IP data mounted archive bucket (/buckets/geotowr-proghost/IP_Data/)
