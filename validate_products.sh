@@ -26,7 +26,7 @@
 #                  are pulled from on-prem
 # [-] [YYYY-MM-DD] update to use common shared utility script
 # [-] [YYYY-MM-DD] update to loop over all channels for ABI L1, will need for CMIP too - may be OBE
-# [-] [YYYY-MM-DD] feature to pull previously stored IP data mounted archive bucket (/buckets/geotowr-proghost/IP_Data/)
+# [-] [YYYY-MM-DD] feature to pull previously stored IP mounted archive bucket (/buckets/geotowr-proghost/IP_Data/)
 #
 # [-] [2026-02-05] add feature to use multiple timestamps
 # [-] [2026-01-20] implement specialized glance reporting for DWM (may be usable for GLM)
@@ -43,10 +43,7 @@
 # [x] [2025-11-20] add cli
 #######################################################################################################################
 
-# Paths to PAVE scripts/tools
-pave_bin=/data/to05/scripts
-glance_cfg=$pave_bin/glance_summarize/configuration
-analysis_path=$PWD/YYYYDDDhh
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)
 
 # AWS S3 buckets:
 GCCS="gccs-products"; GCCS_IP="gccs-intermediate-products"; GCCS_BASE_PREFIX="GCCS/op"
@@ -211,6 +208,7 @@ function get_gccs() {
     # replace placeholder for satellite id
     debug "prefix=${prefix/sat/$sat}"
     debug "query=${query/sat/$sat}"
+
     aws s3api list-objects-v2 --profile geocloud --bucket $GCCS --prefix ${prefix/sat/$sat} --query "${query/sat/$sat}" --output json | jq -r '.[]?' |
     while read file; do
       debug "retrieving $(basename $file) from s3 bucket"
@@ -489,6 +487,8 @@ function run_glance_analysis() {
 ####### ----- TEST ----- #######
 function set_test() {
   DEBUG=true; VERBOSE=true
+  PREFIX=test
+  TAG=internal
   date_hour=202532111
   product_names=("acm" "ach" "mpsh" "geof")
   ONE_TIMELINE=true
@@ -496,8 +496,6 @@ function set_test() {
 
 ####### ----- MAIN ----- #######
 PROGRAM=$(basename "$0")
-
-info "Starting Product Validation"
 
 ####### ----- CLI  ----- #######
 #default values
@@ -508,7 +506,12 @@ run_metadata=true
 force_nodd=false
 glance_flags=""
 
-ARGS=$(getopt -o hvdtD --long collect_only,skip_gccs,skip_prem,force_nodd,report_only,skip_glance,skip_metadata,glance_flags:,scene_list:,prefix:,tag:,help,verbose,debug,test,tool_debug -- "$@")
+SHORT_OPTS="hvdtD"
+LONG_OPTS="collect_only,skip_gccs,skip_prem,force_nodd,\
+           report_only,skip_glance,skip_metadata,glance_flags:,\
+           scene_list:,prefix:,tag:,\
+           help,verbose,debug,test,tool_debug"
+ARGS=$(getopt -o "${SHORT_OPTS}" --long "${LONG_OPTS}" -- "$@")
 eval set -- ${ARGS}
 while :
 do
@@ -546,12 +549,22 @@ product_names=("$@"); debug "product list: ${product_names[@]}"
 # reset s3 progress if debug
 if $DEBUG; then S3_PROGRESS=""; fi
 
+info "Starting Product Validation"
+if [ -f  $SCRIPT_DIR/config.sh ]; then
+  source $SCRIPT_DIR/config.sh
+else
+  # Paths to PAVE scripts/tools
+  pave_bin=$SCRIPT_DIR
+  glance_cfg=$pave_bin/glance_summarize/configuration
+  analysis_path=$PWD/YYYYDDDhh
+fi
+
 ####### ----- TEST ----- #######
 if $TEST; then set_test; fi
 ####### ----- TEST ----- #######
 
-if [[ -z $date_hour ]]; then echo -e "date_hour required\n"; print_help $PROGRAM; exit 1; fi
-if [ ${#product_names[@]} -eq 0 ]; then echo -e "include prod names to best knowledge\n"; print_help $PROGRAM; exit 1; fi
+if [[ -z $date_hour ]]; then info "date_hour required\n"; print_help $PROGRAM; exit 1; fi
+if [ ${#product_names[@]} -eq 0 ]; then info "include prod names to best knowledge\n"; print_help; exit 1; fi
 
 IFS=',' read -ra dates <<< "$date_hour"; date_hour="${dates[0]}"
 set_paths $date_hour
