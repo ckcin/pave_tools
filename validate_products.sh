@@ -22,6 +22,7 @@
 #######################################################################################################################
 # TODO:
 # [-] [YYYY-MM-DD] To-do template
+# [-] [YYYY-MM-DD] update config of paths to scriptsa and tools to be in config file
 # [-] [YYYY-MM-DD] Consider feature to add all retrieved GCCS files to an array so that on future pulls only new files
 #                  are pulled from on-prem
 # [-] [YYYY-MM-DD] update to use common shared utility script
@@ -77,6 +78,8 @@ function print_help {
   printf "\n"
   printf "  %-20s %s\n" "--prefix [PREFIX]" "<date_hour> is used as folder name, prefix used to help identify run"
   printf "  %-20s %s\n" "--tag [TAG]" "used to add additional details to folder name, is appended"
+  printf "\n"
+  printf "  %-20s %s\n" "-c|--config" "use specified config file"
   printf "\n"
   printf "  %-20s %s\n" "-t|--test" "runs simple test routine with hardwired paramets"
   printf "  %-20s %s\n" "-v|--verbose" "verbose messaging"
@@ -506,10 +509,10 @@ run_metadata=true
 force_nodd=false
 glance_flags=""
 
-SHORT_OPTS="hvdtD"
+SHORT_OPTS="c:hvdtD"
 LONG_OPTS="collect_only,skip_gccs,skip_prem,force_nodd,\
            report_only,skip_glance,skip_metadata,glance_flags:,\
-           scene_list:,prefix:,tag:,\
+           scene_list:,prefix:,tag:,config:\
            help,verbose,debug,test,tool_debug"
 ARGS=$(getopt -o "${SHORT_OPTS}" --long "${LONG_OPTS}" -- "$@")
 eval set -- ${ARGS}
@@ -531,6 +534,8 @@ do
     --prefix )             PREFIX=$2; shift 2 ;;
     --tag    )             TAG=$2; shift 2 ;;
 
+    -c | --config )        confing=$2; shift 2 ;;
+
     -h | --help    ) print_help $prog ;;
     -v | --verbose ) VERBOSE=true; shift ;;
     -d | --debug   ) DEBUG=true; VERBOSE=true; shift ;;
@@ -550,7 +555,9 @@ product_names=("$@"); debug "product list: ${product_names[@]}"
 if $DEBUG; then S3_PROGRESS=""; fi
 
 info "Starting Product Validation"
-if [ -f  $SCRIPT_DIR/config.sh ]; then
+if [ -f $config ]; then
+  source $config
+elif [ -f  $SCRIPT_DIR/config.sh ]; then
   source $SCRIPT_DIR/config.sh
 else
   # Paths to PAVE scripts/tools
