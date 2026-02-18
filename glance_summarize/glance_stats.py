@@ -1,4 +1,5 @@
-#! /opt/isatss/noaapy/anaconda/bin/python
+#!/usr/bin/env python3
+# on ghost/opt/isatss/noaapy/anaconda/bin/python
 #######################################################################################################################
 # Script to pull statistics from the Glance results held in html files and summarize them.
 # 
