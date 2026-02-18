@@ -81,7 +81,7 @@ function print_help {
   printf "\n"
   printf "  %-20s %s\n" "-c|--config" "use specified config file"
   printf "\n"
-  printf "  %-20s %s\n" "-t|--test" "runs simple test routine with hardwired paramets"
+  printf "  %-20s %s\n" "--test" "runs simple test routine with hardwired paramets"
   printf "  %-20s %s\n" "-v|--verbose" "verbose messaging"
   printf "  %-20s %s\n" "-d|--debug" "debug messaging"
   printf "  %-20s %s\n" "-D|--tool_debug" "debug tools called by script"
@@ -166,10 +166,22 @@ INSTRUMENT['FE171']='SUVI'
 INSTRUMENT['FE195']='SUVI'
 INSTRUMENT['FE284']='SUVI'
 INSTRUMENT['HE303']='SUVI'
+INSTRUMENT['LCFA']='GLM'
+INSTRUMENT['FED']='GLM'
 
-function isL1() {
-  if [ "${INSTRUMENT[${1^^}]+_}" ]; then return 0; else return 1; fi
+function getInstrument() {
+  echo ${INSTRUMENT[${1^^}]:-"ABI"}
 }
+
+function getLevel() {
+  local prod=${1^^}
+  if [[ -v INSTRUMENT[$prod] && ${INSTRUMENT[$prod]} != "GLM" ]]; then echo "L1b"; else echo "L2"; fi
+}
+
+function isABI() {
+  [[ $(getInstrument $1) == "ABI" ]] && return 0 || return 1;
+}
+
 ###### ^^^^^ PRODUCT MAP ^^^^^ ######
 
 ####### ----- RETREIVAL ---- #######
@@ -187,15 +199,11 @@ GOES_FILE_PATTERN='^OR_([^-]+)-([^-]+)-([^-]+)(-M[0-9]+)?(C[0-9]+)?_G([0-9]+)_s(
 
 function get_gccs() {
   verbose "starting collection of gccs produced products"
-  local start_path=$PWD; debug "start_path=$start_path"
   local timestamp=$1
   local product=$2
   local instrument=${3:-"ABI"}
   local level=${4:-"L2"}
   debug "${FUNCNAME[0]}: instrument=$instrument, level=$level"
-
-  # if only one timeline wanted for hour append 0 to get only data for first 10 minutes at top of hour, only for ABI and SUVI
-#  if [[ $ONE_TIMELINE && ($instrument == "ABI" || $instrument == "SUVI") ]]; then timestamp=${timestamp}0; fi
 
   local dest=${gccs_path}/${instrument}/${product}; #mkdir -p $dest
 
@@ -239,25 +247,23 @@ function get_gccs() {
 }
 
 function get_gccs_products() {
-  info "starting collection of gccs produced products"
-  local start_path=$PWD; debug "start_path=$start_path"
-  local timestamp=$1; debug "timestamp=$timestamp"
+  info "starting gccs data collection"
+  local timestamp=$1; debug timestamp=$timestamp
   local -n products=$2
 
-  debug "gccs_path=$gccs_path"
+  debug analysis_path=$analysis_path
+  debug gccs_path=$gccs_path
+
   mkdir -p $gccs_path
 
   for product in "${products[@]}"; do
-    verbose "collecting gccs products for $product"
-    if isL1 $product; then
-      debug "retrieving L1b products"
-      get_gccs $timestamp $product ${INSTRUMENT[${product^^}]} "L1b"
-    else #L2
-      debug "retrieving L2 products"
-      for scene in $SCENE_LIST; do
-        get_gccs $timestamp $product$scene
-      done
-    fi
+    local instrument=$(getInstrument $product)
+    local level=$(getLevel $product)
+    verbose "collecting gccs data for $product"
+
+    debug "retrieving $product for instrument $instrument $level"
+    if ! isABI $product; then SCENE_LIST=""; fi
+    for scene in ${SCENE_LIST:-}; do get_gccs $timestamp $product$scene $instrument $level; done
 
     if [ -z "$(find $gccs_path/**/$product*/ -type f)" ]; then
       echo "WARNING: no products retrieved for product: $product"
@@ -431,7 +437,6 @@ function run_glance_collocation_analysis() {
 
     ## mv to collocated folders
     verbose "moving collocated files"
-    #local coll_path_gccs=$(dirname ${gccs_file/gccs/coll_gccs}); coll_path_gccs=${coll_path_gccs/\/$year/-$channel\/$year}; debug coll_path_gccs=$coll_path_gccs
     local coll_path_gccs=$(dirname ${gccs_file/gccs/coll_gccs}); debug coll_path_gccs=$coll_path_gccs
     mkdir -p $coll_path_gccs
     local coll_file_gccs=$(find $tmp_dir -name $(basename ${gccs_file/.nc/})*); debug coll_file_gccs=$coll_file_gccs
@@ -463,7 +468,7 @@ function run_glance_collocation_analysis() {
 
 function run_glance_analysis() {
   info "Generating Glance Reports"
-  glance=/data/glance/miniforge3/envs/glance_user/bin/glance
+  #glance=/data/glance/miniforge3/envs/glance_user/bin/glance
 
   for product in $(find $gccs_path -type d -links 2 ! -empty); do
     product=$(dirname $(dirname $product)) #remove yyyy/ddd
@@ -508,8 +513,9 @@ run_glance=true
 run_metadata=true
 force_nodd=false
 glance_flags=""
+config=""
 
-SHORT_OPTS="c:hvdtD"
+SHORT_OPTS="c:hvdD"
 LONG_OPTS="collect_only,skip_gccs,skip_prem,force_nodd,\
            report_only,skip_glance,skip_metadata,glance_flags:,\
            scene_list:,prefix:,tag:,config:\
@@ -534,12 +540,13 @@ do
     --prefix )             PREFIX=$2; shift 2 ;;
     --tag    )             TAG=$2; shift 2 ;;
 
-    -c | --config )        confing=$2; shift 2 ;;
+    -c | --config )        config=$2; shift 2 ;;
 
     -h | --help    ) print_help $prog ;;
     -v | --verbose ) VERBOSE=true; shift ;;
     -d | --debug   ) DEBUG=true; VERBOSE=true; shift ;;
-    -t | --test    ) TEST=true; DEBUG=true; VERBOSE=true; shift ;;
+
+    --test    ) TEST=true; DEBUG=true; VERBOSE=true; shift ;;
 
     -D | --tool_debug ) TOOL_DEBUG=true; shift ;;
 
@@ -555,9 +562,11 @@ product_names=("$@"); debug "product list: ${product_names[@]}"
 if $DEBUG; then S3_PROGRESS=""; fi
 
 info "Starting Product Validation"
-if [ -f $config ]; then
+if [[ -n $config && -f $config ]]; then
+  debug "sourcing config file: $config"
   source $config
 elif [ -f  $SCRIPT_DIR/config.sh ]; then
+  debug "sourcing config file: $config"
   source $SCRIPT_DIR/config.sh
 else
   # Paths to PAVE scripts/tools
