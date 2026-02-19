@@ -6,6 +6,9 @@ export pave_bin=$SCRIPT_DIR
 # base path for analysis work
 export analysis_path=$PWD/YYYYDDDhh
 
+# threads
+export MAXTHREADS=2
+
 # glance paths
 export glance=/data/glance/miniforge3/envs/glance_user/bin/glance
 export glance_cfg=$pave_bin/glance_summarize/configuration
