@@ -19,6 +19,7 @@
 #   Jan 16, 2026 nickc : replaced metadata script with new "simpler" analyzer tool
 #   Jan 20, 2026 nickc : added routine to collocated DMW... will need to expand for GLM
 #   Feb 05, 2026 nickc : added basic ability to collected data for multiple timeframes separated with a ','
+#   Feb 19, 2026 nickc : added basic threading to aws calls
 #######################################################################################################################
 # TODO:
 # [-] [YYYY-MM-DD] To-do template
@@ -29,6 +30,7 @@
 # [-] [YYYY-MM-DD] update to loop over all channels for ABI L1, will need for CMIP too - may be OBE
 # [-] [YYYY-MM-DD] feature to pull previously stored IP mounted archive bucket (/buckets/geotowr-proghost/IP_Data/)
 #
+# [-] [2026-02-19] update to use threads when retrieving s3 data
 # [-] [2026-02-05] add feature to use multiple timestamps
 # [-] [2026-01-20] implement specialized glance reporting for DWM (may be usable for GLM)
 # [x] [2026-01-16] integrate new metadata analyzer
@@ -220,8 +222,10 @@ function get_gccs() {
     debug "prefix=${prefix/sat/$sat}"
     debug "query=${query/sat/$sat}"
 
+    local thread_count=0
     aws s3api list-objects-v2 --profile geocloud --bucket $GCCS --prefix ${prefix/sat/$sat} --query "${query/sat/$sat}" --output json | jq -r '.[]?' |
     while read file; do
+      (
       debug "retrieving $(basename $file) from s3 bucket"
       [[ $(basename $file) =~ $GOES_FILE_PATTERN ]] || true; debug "parsed file: ${BASH_REMATCH[@]}"
       local channel="${BASH_REMATCH[5]:-}"; debug channel=$channel
@@ -231,19 +235,29 @@ function get_gccs() {
       local dated_dest=$dest${channel:+_$channel}/$year/$doy; debug dated_dest=$dated_dest
       mkdir -p $dated_dest
       aws s3 cp --profile geocloud s3://$GCCS/$file $dated_dest/ $S3_PROGRESS
+      ) &
+      ((thread_count++))
+      if [[ $thread_count -ge $MAXTHREADS ]]; then wait -n; ((thread_count--)); fi
     done
     if [[ $level = "L2" ]]; then #retrieve L2 IP
       verbose "retrieving L2 IP data for GOES-$sat"
       aws s3api list-objects-v2 --profile geocloud --bucket $GCCS_IP --prefix ${prefix/sat/$sat} --query "${query/sat/$sat}" --output json | jq -r '.[]?' |
       while read file; do
+        (
         debug "retrieving $file from s3 bucket"
         local doy=$(basename $(dirname $file)); debug doy=$doy
         local year=$(basename $(dirname $(dirname $file))); debug year=$year
         aws s3 cp --profile geocloud s3://$GCCS_IP/$file $dest/$year/$doy/ $S3_PROGRESS
+        ) &
+        ((thread_count++))
+        if [[ $thread_count -ge $MAXTHREADS ]]; then wait -n; ((thread_count--)); fi
       done
     fi
   done
 
+  # wait for any remaining threads
+  wait
+  verbose "all gccs retrieval threads compmlete"
 }
 
 function get_gccs_products() {
@@ -280,8 +294,11 @@ function get_on_prem_products() {
   debug "gccs_path=$gccs_path"
   debug "prem_path=$prem_path"
 
+  local thread_count=0
+
   # retrieve matching files for non-IP data
   for gccs_file in $(find $gccs_path -type f ! -name "*I_ABI*"); do
+    (
     verbose "${FUNCNAME[0]}: current gccs_file for matching: $gccs_file"
 
     local dest=$(dirname ${gccs_file/gccs/prem}); debug "dest=$dest"
@@ -332,8 +349,16 @@ function get_on_prem_products() {
     else
       echo "ERROR: no matching file found for pattern: $pattern"
     fi
+    ) &
+
+    ((thread_count++))
+    if [[ $thread_count -ge $MAXTHREADS ]]; then wait -n; ((thread_count--)); fi
 
   done # end retrieval of matching ops products (non-IP)
+
+  # wait for any remaining threads
+  wait
+  verbose "all gccs retrieval threads compmlete"
 
   # retrieve matching ABI IP products
   local ip_tarballs_not_retrieved=true
@@ -360,8 +385,9 @@ function get_on_prem_products() {
       verbose "retrieving IP tarballs"
       local g18ip="s3://geoegress/egresout/DOE1L2IP/GOES-18"
       local g19ip="s3://geoegress/egresout/DOE1L2IP/GOES-19"
-      aws s3 cp --profile geocloud $g18ip/$g18ip_file $prem_path $S3_PROGRESS
-      aws s3 cp --profile geocloud $g19ip/$g19ip_file $prem_path $S3_PROGRESS
+      aws s3 cp --profile geocloud $g18ip/$g18ip_file $prem_path $S3_PROGRESS &
+      aws s3 cp --profile geocloud $g19ip/$g19ip_file $prem_path $S3_PROGRESS &
+      wait
       ip_tarballs_not_retrieved=false
     fi
 
@@ -573,6 +599,7 @@ else
   pave_bin=$SCRIPT_DIR
   glance_cfg=$pave_bin/glance_summarize/configuration
   analysis_path=$PWD/YYYYDDDhh
+  MAXTHREADS=2
 fi
 
 ####### ----- TEST ----- #######
