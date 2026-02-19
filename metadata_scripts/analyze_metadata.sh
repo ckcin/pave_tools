@@ -113,8 +113,8 @@ function compare_group() {
 function filter_report() {
   local filename=$1; local -n reports=$2
 
-  local warning_strings=(":data_name" ":production_site" ":dataset_name")
-  local ignore_strings=(":date_created" ":id")
+  local warning_strings=(":data_name" ":dataset_name")
+  local ignore_strings=(":date_created" ":id" ":production_site")
   local known_strings=("algorithm_dynamic_input_data_container:")
 
   local warn_pattern=$(IFS="|"; echo "${warning_strings[*]}"); debug warn_pattern=$warn_pattern
