@@ -25,8 +25,11 @@ setOfVariables['pressure'] = { constants.VARIABLE_TECH_NAME_KEY: 'pressure', }
 setOfVariables['height'] = { constants.VARIABLE_TECH_NAME_KEY: 'height', }
 # diag list
 setOfVariables['forecast'] = { constants.VARIABLE_TECH_NAME_KEY: 'forecast', }
-setOfVariables['u_component'] = { constants.VARIABLE_TECH_NAME_KEY: 'u_component', }
-setOfVariables['v_component'] = { constants.VARIABLE_TECH_NAME_KEY: 'v_component', }
+setOfVariables['u_component_of_vector1'] = { constants.VARIABLE_TECH_NAME_KEY: 'u_component_of_vector1', }
+setOfVariables['v_component_of_vector1'] = { constants.VARIABLE_TECH_NAME_KEY: 'v_component_of_vector1', }
+setOfVariables['u_component_of_vector2'] = { constants.VARIABLE_TECH_NAME_KEY: 'u_component_of_vector2', }
+setOfVariables['v_component_of_vector2'] = { constants.VARIABLE_TECH_NAME_KEY: 'v_component_of_vector2', }
+setOfVariables['vertical_wind_shear'] = { constants.VARIABLE_TECH_NAME_KEY: 'vertical_wind_shear', }
 # pqi list
 setOfVariables['direction_consistency_test'] = { constants.VARIABLE_TECH_NAME_KEY: 'direction_consistency_test', }
 setOfVariables['forecast_consistency_test'] = { constants.VARIABLE_TECH_NAME_KEY: 'forecast_consistency_test', }
