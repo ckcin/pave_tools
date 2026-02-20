@@ -29,8 +29,11 @@ setOfVariables['pressure'] = { constants.VARIABLE_TECH_NAME_KEY: 'pressure-collo
 setOfVariables['height'] = { constants.VARIABLE_TECH_NAME_KEY: 'height-collocated', }
 # diag list
 setOfVariables['forecast'] = { constants.VARIABLE_TECH_NAME_KEY: 'forecast-collocated', }
-setOfVariables['u_component'] = { constants.VARIABLE_TECH_NAME_KEY: 'u_component-collocated', }
-setOfVariables['v_component'] = { constants.VARIABLE_TECH_NAME_KEY: 'v_component-collocated', }
+setOfVariables['u_component_of_vector1'] = { constants.VARIABLE_TECH_NAME_KEY: 'u_component_of_vector1-collocated', }
+setOfVariables['v_component_of_vector1'] = { constants.VARIABLE_TECH_NAME_KEY: 'v_component_of_vector1-collocated', }
+setOfVariables['u_component_of_vector2'] = { constants.VARIABLE_TECH_NAME_KEY: 'u_component_of_vector2-collocated', }
+setOfVariables['v_component_of_vector2'] = { constants.VARIABLE_TECH_NAME_KEY: 'v_component_of_vector2-collocated', }
+setOfVariables['vertical_wind_shear'] = { constants.VARIABLE_TECH_NAME_KEY: 'vertical_wind_shear-collocated', }
 # pqi list
 setOfVariables['direction_consistency_test'] = { constants.VARIABLE_TECH_NAME_KEY: 'direction_consistency_test-collocated', }
 setOfVariables['forecast_consistency_test'] = { constants.VARIABLE_TECH_NAME_KEY: 'forecast_consistency_test-collocated', }
@@ -41,6 +44,6 @@ setOfVariables['vector_consistency_test'] = { constants.VARIABLE_TECH_NAME_KEY: 
 # vector plotting
 setOfVariables['Wind Vectors, colored by Air Pressure'] = {
     constants.VARIABLE_TECH_NAME_KEY: 'pressure-collocated',
-    constants.MAGNITUDE_VAR_NAME_KEY:     'wind_speed-collocated',
-    constants.DIRECTION_VAR_NAME_KEY:     'wind_direction-collocated',
+    constants.MAGNITUDE_VAR_NAME_KEY: 'wind_speed-collocated',
+    constants.DIRECTION_VAR_NAME_KEY: 'wind_direction-collocated',
 }
