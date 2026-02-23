@@ -431,6 +431,7 @@ function run_metadata_analysis() {
 function run_glance_collocation_analysis() {
   product=$1
   debug dmw processing $product
+  $TOOL_DEBUG && local debug_flag="--verbose"
 
   local prod=${product##*/}; debug prod=$prod
   # prep data using glance collocate
@@ -457,8 +458,8 @@ function run_glance_collocation_analysis() {
 
     ## collocate
     verbose "Collocating $gccs_file with $prem_file"
-    debug $glance collocate -c $glance_cfg/dmw_collocate.py -p $tmp_dir $gccs_file $prem_file
-    local traceback=$( { $glance collocate -c $glance_cfg/dmw_collocate.py -p $tmp_dir $gccs_file $prem_file; } 3>&1 1>&2 2>&3 3>&- )
+    debug $glance collocate $debug_flag -c $glance_cfg/dmw_collocate.py -p $tmp_dir $gccs_file $prem_file
+    local traceback=$( { $glance collocate $debug_flag -c $glance_cfg/dmw_collocate.py -p $tmp_dir $gccs_file $prem_file; } 3>&1 1>&2 2>&3 3>&- )
     if (( $? == 1 )); then WARN "Glance reported error:\nCaptured Traceback:\n$traceback"; continue; fi
 
     ## mv to collocated folders
@@ -484,8 +485,8 @@ function run_glance_collocation_analysis() {
     debug collocated=$collocated
     glance_report=${collocated/coll_prem/glance_reports}; debug glance_report=$glance_report; mkdir -p $glance_report
     verbose "glance comparison: $coll_path_prem vs $coll_path_gccs to: $glance_report"
-    debug $glance report -c $glance_cfg/dmw_report.py -p $glance_report --stripfromname e.* $collocated ${collocated/prem/gccs}
-    traceback=$( { $glance report -c $glance_cfg/dmw_report.py -p $glance_report --stripfromname e.* $collocated ${collocated/prem/gccs}; } 3>&1 1>&2 2>&3 3>&- )
+    debug $glance report $debug_flag -c $glance_cfg/dmw_report.py -p $glance_report --stripfromname e.* $collocated ${collocated/prem/gccs}
+    traceback=$( { $glance report $debug_flag -c $glance_cfg/dmw_report.py -p $glance_report --stripfromname e.* $collocated ${collocated/prem/gccs}; } 3>&1 1>&2 2>&3 3>&- )
     if (( $? == 1 )); then WARN "Glance reported error:\nCaptured Traceback:\n$traceback"; fi
   done
 
@@ -505,8 +506,8 @@ function run_glance_analysis() {
     if [[ "$(basename ${product,,})" =~ "dmw" ]]; then run_glance_collocation_analysis $product; continue; fi
 
     mkdir -p $glance_report
-    $TOOL_DEBUG && local flag="--verbose"
-    debug $glance report $flag --fork --nolonlat $glance_flags -p $glance_report ${product/gccs/prem} $product --stripfromname e.*
+    $TOOL_DEBUG && local debug_flag="--verbose"
+    debug $glance report $debug_flag --fork --nolonlat $glance_flags -p $glance_report ${product/gccs/prem} $product --stripfromname e.*
     $glance report $flag --fork --nolonlat $glance_flags -p $glance_report ${product/gccs/prem} $product --stripfromname e.*
   done
 
