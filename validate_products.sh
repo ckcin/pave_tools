@@ -52,8 +52,15 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)
 GCCS="gccs-products"; GCCS_IP="gccs-intermediate-products"; GCCS_BASE_PREFIX="GCCS/op"
 PREM="geoproducts-ops"; PREM_BASE_PREFIX="op"
 NODD="noaa-goes##" # ## to be replaced with sat number inline
-ONE_TIMELINE=false
+
+# AWS configuration
+aws configure set default.s3.max_concurrent_requests 20
+aws configure set default.s3.max_queue_size 10000
+aws configure set default.s3.multipart_threshold 64MB
 S3_PROGRESS="--no-progress"
+MAXTHREADS_S3=4
+
+# assitive globals
 SCENE_LIST="f c m1 m2"
 
 ####### ----- HELP ----- #######
@@ -199,7 +206,7 @@ function isABI() {
 # _c([0-9]+)     9. Created
 GOES_FILE_PATTERN='^OR_([^-]+)-([^-]+)-([^-]+)(-M[0-9]+)?(C[0-9]+)?_G([0-9]+)_s([0-9]+)_e([0-9]+)_c([0-9]+)\.nc$'
 
-function get_gccs() {
+function deprecated_get_gccs() {
   verbose "starting collection of gccs produced products"
   local timestamp=$1
   local product=$2
@@ -260,7 +267,7 @@ function get_gccs() {
   verbose "all gccs retrieval threads compmlete"
 }
 
-function get_gccs_products() {
+function deprecated_get_gccs_products() {
   info "starting gccs data collection"
   local timestamp=$1; debug timestamp=$timestamp
   local -n products=$2
@@ -285,7 +292,76 @@ function get_gccs_products() {
   done
 }
 
-function get_on_prem_products() {
+function get_gccs_products() {
+  local timestamp=$1
+  local -n products_ref=$2 
+  local thread_count=0
+  
+  for prod in "${products_ref[@]}"; do
+    local inst=$(getInstrument "$prod")
+    local lvl=$(getLevel "$prod")
+
+    # Scene list only applies if it's ABI and the product isn't already scene-specific
+    local current_scenes=""
+    if isABI "$prod"; then current_scenes=${SCENE_LIST:-}; fi
+
+    # If product list contains "ach", we check "achf", "achc", etc.
+    # Each specific iteration (e.g., achf) gets its own destination.
+    for scene in ${current_scenes:-""}; do
+      local full_prod="${prod}${scene}"
+      local dest="${gccs_path}/${inst}/${full_prod}"
+
+      for sat in 18 19; do
+        (
+        # Prefix narrows down to the specific product folder in S3
+        local root_prefix="${GCCS_BASE_PREFIX}/GOES-${sat}/${lvl}/${inst}/${full_prod,,}/"
+        local prod_pattern="*${full_prod^^}*G${sat}_s${timestamp}*"
+
+        # # L1b special case: L1b products often don't have a subfolder in the bucket
+        # if [[ $lvl == "L1b" ]]; then
+            # root_prefix="${GCCS_BASE_PREFIX}/GOES-${sat}/${lvl}/${inst}/"
+        # fi
+
+        verbose "Syncing GOES-${sat} product: ${full_prod} to ${dest}"
+        # make directory for storing sync
+        mkdir -p $dest
+
+        debug "s3 query: s3://<bucket>/$root_prefix file include: *${prod_pattern}*"
+
+        # Sync command: only includes files matching product, sat, and timestamp
+        aws s3 sync "s3://${GCCS}/${root_prefix}" "$dest" \
+          --profile geocloud \
+          --exclude "*" \
+          --include "*${prod_pattern}*" \
+          --no-progress \
+          $S3_PROGRESS
+
+        # Sync Intermediate Products if L2
+        if [[ "$lvl" == "L2" ]]; then
+          aws s3 sync "s3://${GCCS_IP}/${root_prefix}" "$dest" \
+            --profile geocloud \
+            --exclude "*" \
+            --include "*${prod_pattern}*" \
+            --no-progress \
+            $S3_PROGRESS
+        fi
+        ) &
+
+        # Throttle the number of concurrent S3 Sync processes
+        ((thread_count++))
+        if [[ $thread_count -ge $MAXTHREADS_S3 ]]; then
+          wait -n
+          ((thread_count--))
+        fi
+      done
+    done
+  done
+
+  # Cleanup any empty directories created by discovery
+  find "$gccs_path" -type d -empty -delete
+}
+
+function deprecated_get_on_prem_products() {
   # retrieves on-prem products based on available products from gccs
   info "starting collections of matching products from on-prem"
   local start_path=$PWD; debug "start_path=$start_path"
@@ -405,6 +481,139 @@ function get_on_prem_products() {
   done # end retrieval of matching ABI IP products
 }
 
+function get_on_prem_products() {
+  info "Starting collections of matching products from On-Prem"
+  local timestamp=$1
+  local thread_count=0
+  
+  # Create a unique temporary directory for this specific process instance
+  TMP_DIR=$(mktemp -d -t $(basename ${BASH_SOURCE[-1]})-XXXXXXXXXX)
+  debug "TMP_DIR=$TMP_DIR"
+  local manifest_dir="$TMP_DIR/manifests"
+  mkdir -p "$manifest_dir"
+  
+  # --- STEP 1: BATCH MANIFEST GENERATION ---
+  info "Building local S3 manifests for matching..."
+  declare -A seen_prefixes
+  
+  for gccs_file in $(find "$gccs_path" -type f); do
+      local filename=$(basename "$gccs_file")
+      
+      if [[ $filename =~ $GOES_FILE_PATTERN ]]; then
+          local instr="${BASH_REMATCH[1]}"
+          local lvl="${BASH_REMATCH[2]}"
+          local sat_num="${BASH_REMATCH[6]}"
+          local sat_id="GOES-$sat_num"
+          local s_time="${BASH_REMATCH[7]}"
+          
+          [[ $filename == *"I_"* ]] && continue
+
+          local year=${s_time:0:4}
+          local doy=${s_time:4:3}
+          local date_str=$(date --date="jan 1 + $doy days - 1 days" +"%b/%Y%m%d" | tr '[:upper:]' '[:lower:]')
+          
+          local prefix="op/$sat_id/${lvl,,}/${instr}/$year/$date_str"
+          
+          if [[ -z ${seen_prefixes[$prefix]} ]]; then
+              local m_file="$manifest_dir/${sat_id}_${instr}_${lvl}_${year}${doy}.txt"
+              seen_prefixes[$prefix]="$m_file"
+              
+              (
+                debug "Scanning On-Prem: s3://$PREM/$prefix"
+                timeout 120s aws s3 ls "s3://$PREM/$prefix" --recursive --profile geocloud | awk '{print $NF}' > "$m_file"
+                
+                if [[ ! -s "$m_file" ]]; then
+                    debug "Prefix empty, attempting broader search for $instr"
+                    local broad_prefix="op/$sat_id/${lvl,,}/"
+                    timeout 120s aws s3 ls "s3://$PREM/$broad_prefix" --recursive --profile geocloud | grep "$instr" | grep "$year" | grep "$date_str" | awk '{print $NF}' > "$m_file"
+                fi
+              ) &
+              
+              ((thread_count++))
+              if [[ $thread_count -ge 5 ]]; then wait -n; ((thread_count--)); fi
+          fi
+      fi
+  done
+  wait 
+  thread_count=0 
+
+  # --- STEP 2: PARALLEL RETRIEVAL (Standard Products) ---
+  info "Retrieving matching standard products..."
+  for gccs_file in $(find "$gccs_path" -type f ! -name "*I_*"); do
+    (
+      local filename=$(basename "$gccs_file")
+      local search_pattern=$(echo "$filename" | grep -oP "^.*?_s\d{14}")
+      local dest=$(dirname "${gccs_file/gccs/prem}")
+      mkdir -p "$dest"
+
+      [[ $filename =~ $GOES_FILE_PATTERN ]]
+      local sat_id="GOES-${BASH_REMATCH[6]}"
+      local instr="${BASH_REMATCH[1]}"
+      local lvl="${BASH_REMATCH[2]}"
+      local s_time="${BASH_REMATCH[7]}"
+      local m_file="$manifest_dir/${sat_id}_${instr}_${lvl}_${s_time:0:4}${s_time:4:3}.txt"
+
+      local s3file=$(grep "$search_pattern" "$m_file" 2>/dev/null | head -n 1)
+
+      if [[ -n $s3file ]]; then
+        debug "Retrieving $(basename "$s3file") from GPAS"
+        aws s3 cp --profile geocloud "s3://$PREM/$s3file" "$dest/" $S3_PROGRESS
+      else
+        local bucket=$([[ "${BASH_REMATCH[6]}" == "19" ]] && echo "noaa-goes19" || echo "noaa-goes18")
+        local nodd_prefix="${instr}-${lvl}-${BASH_REMATCH[3]^^}/${s_time:0:4}/${s_time:4:3}/${s_time:7:2}"
+        local nodd_file=$(aws s3api list-objects-v2 --no-sign-request --bucket "$bucket" --prefix "$nodd_prefix" \
+                          --query "Contents[?contains(Key, '$search_pattern')].Key" --output text | awk '{print $1}')
+        
+        [[ -n $nodd_file ]] && aws s3 cp --no-sign-request "s3://$bucket/$nodd_file" "$dest/" $S3_PROGRESS
+      fi
+    ) &
+
+    ((thread_count++))
+    if [[ $thread_count -ge $MAXTHREADS ]]; then wait -n; ((thread_count--)); fi
+  done
+  wait
+
+  # --- STEP 3: INTERMEDIATE PRODUCT (IP) TARBALLS ---
+  info "Processing Intermediate Product tarballs..."
+  local -A tarballs_downloaded
+  for gccs_file in $(find "$gccs_path" -type f -name "*I_*"); do
+    local filename=$(basename "$gccs_file")
+    [[ $filename =~ _s([0-9]{14}) ]] && local s_time=${BASH_REMATCH[1]}
+    [[ $filename =~ _G([0-9]{2}) ]] && local sat_id="GOES-${BASH_REMATCH[1]}"
+    [[ $filename =~ I_([A-Z0-9]+)- ]] && local instr="${BASH_REMATCH[1]}"
+    
+    local tar_name="${sat_id}_${instr}_L2_IntermediateProducts_day${s_time:4:3}_hour${s_time:7:2}.tar"
+
+    if [[ -z ${tarballs_downloaded[$tar_name]} ]]; then
+      local egress_prefix="s3://geoegress/egresout/DOE1L2IP/$sat_id"
+      aws s3 cp --profile geocloud "$egress_prefix/$tar_name" "$prem_path/" $S3_PROGRESS &
+      tarballs_downloaded[$tar_name]=1
+    fi
+  done
+  wait
+
+  # --- STEP 4: TARGETED TAR EXTRACTION ---
+  local ip_temp="$TMP_DIR/ip_extract"
+  mkdir -p "$ip_temp"
+  for gccs_file in $(find "$gccs_path" -type f -name "*I_*"); do
+    local dest=$(dirname "${gccs_file/gccs/prem}")
+    local filename=$(basename "$gccs_file")
+    local search_pattern=$(echo "$filename" | grep -oP "^.*?_s\d{14}")
+    
+    for tarball in $(find "$prem_path" -name "*.tar"); do
+       local match_in_tar=$(tar -tf "$tarball" | grep "$search_pattern" | head -n 1)
+       if [[ -n $match_in_tar ]]; then
+          tar -xf "$tarball" -C "$ip_temp" "$match_in_tar" 2>/dev/null
+          mv "$ip_temp/$match_in_tar" "$dest/"
+          break
+       fi
+    done
+  done
+
+  # Final Cleanup
+  rm -rf "$TMP_DIR"
+  info "... On-Prem matching complete"
+}
 ####### ----- ANALYZE ---- #######
 function run_metadata_analysis() {
   info "Performing Metadata Analysis"
@@ -524,9 +733,9 @@ function set_test() {
   DEBUG=true; VERBOSE=true
   PREFIX=test
   TAG=internal
-  date_hour=202532111
+  date_hour=202601010
   product_names=("acm" "ach" "mpsh" "geof")
-  ONE_TIMELINE=true
+  S3_PROGRESS=""
 }
 
 ####### ----- MAIN ----- #######
