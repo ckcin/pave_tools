@@ -58,7 +58,6 @@ aws configure set default.s3.max_concurrent_requests 20
 aws configure set default.s3.max_queue_size 10000
 aws configure set default.s3.multipart_threshold 64MB
 S3_PROGRESS="--no-progress"
-MAXTHREADS_S3=4
 
 # assitive globals
 SCENE_LIST="f c m1 m2"
@@ -293,6 +292,7 @@ function deprecated_get_gccs_products() {
 }
 
 function get_gccs_products() {
+  info "Starting GCCS Retrieval"
   local timestamp=$1
   local -n products_ref=$2
   local thread_count=0
@@ -349,7 +349,7 @@ function get_gccs_products() {
 
         # Throttle the number of concurrent S3 Sync processes
         ((thread_count++))
-        if [[ $thread_count -ge $MAXTHREADS_S3 ]]; then
+        if [[ $thread_count -ge $MAXTHREADS ]]; then
           wait -n
           ((thread_count--))
         fi
@@ -618,11 +618,12 @@ function deprecated_v2_get_on_prem_products() {
 }
 
 function get_on_prem_products() {
-  info "Starting On-Prem sync"
+  info "Starting On-Prem Retrieval"
   local timestamp=$1
   local -n products_ref=$2
+  local thread_count=0
 
-  # Step 1: Group products by Instrument/Level for prefix efficiency
+  # 1. Group products by Instrument/Level
   declare -A groups
   for prod in "${products_ref[@]}"; do
     local inst=$(getInstrument "$prod")
@@ -631,109 +632,80 @@ function get_on_prem_products() {
     groups["$key"]+="${prod} "
   done
 
-  # Step 2: Process groups
+  # 2. Process groups
   for key in "${!groups[@]}"; do
     local inst=${key%|*}
     local lvl=${key#*|}
     local -a current_prods=(${groups[$key]})
-
-    # Destination matches the GCCS structure: prem/<INSTR>/
-    local base_dest="${prem_path}/${inst}"
-
+    
     for sat_num in 18 19; do
       local sat_id="GOES-${sat_num}"
-
-      # --- INFER PREFIXES ---
-      # 1. GPAS (On-Prem) Prefix Inference
-      # Pattern: op/GOES-18/l2/abi/2026/mar/2026058
       local year=${timestamp:0:4}
       local doy=${timestamp:4:3}
+      # Structure: YYYY/mon/YYYYMMDD (e.g. 2026/mar/2026058)
       local date_str=$(date --date="jan 1 + $doy days - 1 days" +"%b/%Y%m%d" | tr '[:upper:]' '[:lower:]')
-      local gpas_prefix="op/${sat_id}/${lvl,,}/${inst/SEIS/SEISS}/${year}/${date_str}/"
 
-      # 2. NODD Prefix Inference
-      # Pattern: ABI-L2-CMIPF/2026/058/12/
-      # Since products are in different root folders on NODD, we sync per product here
-
-      # Build inclusion filters
-      local sync_args=("--exclude" "*")
+      # 3. Parallelize at the Product Level
       for p in "${current_prods[@]}"; do
-        if isABI "$p"; then
-          for scene in ${SCENE_LIST:-}; do
-            sync_args+=("--include" "*${p^^}${scene^^}*G${sat_num}_s${timestamp}*")
-          done
-        else
-          sync_args+=("--include" "*${p^^}*G${sat_num}_s${timestamp}*")
-        fi
-      done
+        local current_scenes=""
+        [[ "$inst" == "ABI" ]] && current_scenes=${SCENE_LIST:-}
 
-      # --- EXECUTE SYNC ---
-      
-      # Attempt GPAS Sync first (Primary)
-      verbose "Syncing GPAS: s3://$PREM/$gpas_prefix"
-      aws s3 sync "s3://${PREM}/${gpas_prefix}" "$base_dest" \
-        --profile geocloud "${sync_args[@]}" --no-progress $S3_PROGRESS
+        for scene in ${current_scenes:-""}; do
+          (
+            local full_prod="${p}${scene}"
+            local folder_name="${full_prod,,}"
 
-      # Check if we got anything; if not, or if forced, check NODD
-      # (Note: NODD requires per-product root folders)
-      if [[ -z "$(find "$base_dest" -name "*G${sat_num}_s${timestamp}*" -type f)" ]] || $force_nodd; then
-        verbose "Primary empty or forced, checking NODD for GOES-${sat_num}"
-        local nodd_bucket="noaa-goes${sat_num}"
+            # --- RESTORED PATH LOGIC ---
+            # Explicitly append year and doy to the destination path
+            local sat_dest="${prem_path}/${inst}/${folder_name}/${year}/${doy}"
+            mkdir -p "$sat_dest"
 
-        for p in "${current_prods[@]}"; do
-          # NODD structure: <Product>-<Level>-<ShortName>/<Year>/<DOY>/<Hour>/
-          # We sync from the Year level to capture the full day or specific hours
-          local nodd_prefix="${inst}-${lvl}-${p^^}/${year}/${doy}/"
-          aws s3 sync "s3://${nodd_bucket}/${nodd_prefix}" "${base_dest}/${p^^}" \
-            --no-sign-request "${sync_args[@]}" --no-progress $S3_PROGRESS
+            # GPAS Search Pattern
+            local gpas_prefix="op/${sat_id}/${lvl,,}/${inst/SEIS/SEISS}/${year}/${date_str}/"
+            local include_pattern="*${full_prod^^}*G${sat_num}_s${timestamp}*"
+            
+            verbose "Parallel Sync [Started]: GOES-${sat_num} ${folder_name} -> ${year}/${doy}"
+
+            
+
+            # GPAS Primary Sync
+            # We sync "to" the specific year/doy folder to ensure files land there exactly
+            aws s3 sync "s3://${PREM}/${gpas_prefix}" "$sat_dest" \
+              --profile geocloud \
+              --exclude "*" \
+              --include "$include_pattern" \
+              --no-progress $S3_PROGRESS
+
+            # NODD Fallback
+            if [[ -z "$(find "$sat_dest" -name "$include_pattern" -type f 2>/dev/null)" ]] || $force_nodd; then
+              debug "GPAS match failed for ${folder_name}, checking NODD..."
+              local nodd_bucket="noaa-goes${sat_num}"
+              # NODD structure: <Product>-<Level>-<ShortName>/<Year>/<DOY>/<Hour>/
+              local nodd_prefix="${inst}-${lvl}-${p^^}/${year}/${doy}/"
+              
+              aws s3 sync "s3://${nodd_bucket}/${nodd_prefix}" "$sat_dest" \
+                --no-sign-request \
+                --exclude "*" \
+                --include "$include_pattern" \
+                --no-progress $S3_PROGRESS
+            fi
+          ) &
+
+          # --- THREAD MANAGEMENT ---
+          ((thread_count++))
+          if [[ $thread_count -ge $MAXTHREADS ]]; then
+            wait -n
+            ((thread_count--))
+          fi
         done
-      fi
+      done
     done
   done
   
-  # --- STEP 3: INTERMEDIATE PRODUCT (IP) TARBALLS ---
-  info "Processing Intermediate Product tarballs..."
-  local -A tarballs_downloaded
-  for gccs_file in $(find "$gccs_path" -type f -name "*I_*"); do
-    local filename=$(basename "$gccs_file")
-    [[ $filename =~ _s([0-9]{14}) ]] && local s_time=${BASH_REMATCH[1]}
-    [[ $filename =~ _G([0-9]{2}) ]] && local sat_id="GOES-${BASH_REMATCH[1]}"
-    [[ $filename =~ I_([A-Z0-9]+)- ]] && local instr="${BASH_REMATCH[1]}"
-
-    local tar_name="${sat_id}_${instr}_L2_IntermediateProducts_day${s_time:4:3}_hour${s_time:7:2}.tar"
-
-    if [[ -z ${tarballs_downloaded[$tar_name]} ]]; then
-      local egress_prefix="s3://geoegress/egresout/DOE1L2IP/$sat_id"
-      aws s3 cp --profile geocloud "$egress_prefix/$tar_name" "$prem_path/" $S3_PROGRESS &
-      tarballs_downloaded[$tar_name]=1
-    fi
-  done
   wait
-
-  # --- STEP 4: TARGETED TAR EXTRACTION ---
-  local ip_temp="$TMP_DIR/ip_extract"
-  mkdir -p "$ip_temp"
-  for gccs_file in $(find "$gccs_path" -type f -name "*I_*"); do
-    local dest=$(dirname "${gccs_file/gccs/prem}")
-    local filename=$(basename "$gccs_file")
-    local search_pattern=$(echo "$filename" | grep -oP "^.*?_s\d{14}")
-
-    for tarball in $(find "$prem_path" -name "*.tar"); do
-       local match_in_tar=$(tar -tf "$tarball" | grep "$search_pattern" | head -n 1)
-       if [[ -n $match_in_tar ]]; then
-          tar -xf "$tarball" -C "$ip_temp" "$match_in_tar" 2>/dev/null
-          mkdir -p $dest
-          mv "$ip_temp/$match_in_tar" "$dest/"
-          break
-       fi
-    done
-  done
-
-
-  # Final Cleanup
-  rm -rf "$TMP_DIR"
-  info "... On-Prem matching complete"
- }
+  find "$prem_path" -type d -empty -delete
+  info "On-Prem retrieval complete with full directory hierarchy."
+}
 
 ####### ----- ANALYZE ---- #######
 function run_metadata_analysis() {
@@ -744,6 +716,7 @@ function run_metadata_analysis() {
 
   mkdir -p $metadata_path
 
+  debug prem_path=$prem_path
   for product in $(find $prem_path -type d -links 2 ! -empty); do
     product_dir=$(dirname $(dirname $product)); debug product_dir=$product_dir #remove yyyy/ddd
     product_rpt=$metadata_path/$(basename $product_dir).csv; debug product_rpt=$product_rpt
@@ -958,8 +931,8 @@ for timestamp in ${dates[@]}; do
 done
 if $run_prem; then get_on_prem_products $date_hour "product_names"; fi
 
-if $run_metadata; then run_metadata_analysis $date_hour; fi
-if $run_glance; then run_glance_analysis $date_hour; fi
+if $run_metadata; then run_metadata_analysis; fi
+if $run_glance; then run_glance_analysis; fi
 
 info "... processing complete"
 # happy dance you are at the end :-P
