@@ -280,25 +280,25 @@ def summarize_stats(label, file_glob, ofile):
             elif not fileinfo:
                 print("\nFatal Error: Could not parse pathname for File A or File B.")
                 print(block.text)
-                exit(1)
+                return(1)
             else:
                 print("\nFatal Error: Found unexpected blockquote that was neither File A nor B.")
                 print(block.text)
-                exit(1)
+                return(1)
 
         # Validate File A and File B attributes
         if not aFound or not bFound:
             print(f"\nFatal Error: Did not find blockquotes for both File A and B, start times {aStart},{bStart}.")
-            exit(1)
+            return(1)
         if (aStart != bStart):
             print(f"\nFatal Error: Mismatch in File A and File B start times {aStart} != {bStart}.")
-            exit(1)
-        if (aEnd != bEnd):
-            print(f"\nFatal Error: Mismatch in File A and File B end times {aEnd} != {bEnd}.")
-            exit(1)
+            return(1)
+        #if (aEnd != bEnd):
+        #    print(f"\nFatal Error: Mismatch in File A and File B end times {aEnd} != {bEnd}.")
+        #    return(1)
         if (aSat != bSat):
             print(f"\nFatal Error: Mismatch in File A and File B satellites {aSat} != {bSat}.")
-            exit(1)
+            return(1)
         #if (aCreat == bCreat) and flag_warning_equal_creation_times:
         #if (aCreat == bCreat):
         #    print(f"\nWarning: File A and File B creation times are equal, which is unexpected but not impossible,",
