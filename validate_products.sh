@@ -491,44 +491,44 @@ function get_on_prem_products() {
   debug "TMP_DIR=$TMP_DIR"
   local manifest_dir="$TMP_DIR/manifests"
   mkdir -p "$manifest_dir"
-  
+
   # --- STEP 1: BATCH MANIFEST GENERATION ---
   info "Building local S3 manifests for matching..."
   declare -A seen_prefixes
-  
+
   for gccs_file in $(find "$gccs_path" -type f); do
       local filename=$(basename "$gccs_file")
-      
+
       if [[ $filename =~ $GOES_FILE_PATTERN ]]; then
           local instr="${BASH_REMATCH[1]}"
           local lvl="${BASH_REMATCH[2]}"
           local sat_num="${BASH_REMATCH[6]}"
           local sat_id="GOES-$sat_num"
           local s_time="${BASH_REMATCH[7]}"
-          
+
           [[ $filename == *"I_"* ]] && continue
 
           local year=${s_time:0:4}
           local doy=${s_time:4:3}
           local date_str=$(date --date="jan 1 + $doy days - 1 days" +"%b/%Y%m%d" | tr '[:upper:]' '[:lower:]')
-          
+
           local prefix="op/$sat_id/${lvl,,}/${instr}/$year/$date_str"
-          
+
           if [[ -z ${seen_prefixes[$prefix]} ]]; then
               local m_file="$manifest_dir/${sat_id}_${instr}_${lvl}_${year}${doy}.txt"
               seen_prefixes[$prefix]="$m_file"
-              
+
               (
                 debug "Scanning On-Prem: s3://$PREM/$prefix"
                 timeout 120s aws s3 ls "s3://$PREM/$prefix" --recursive --profile geocloud | awk '{print $NF}' > "$m_file"
-                
+
                 if [[ ! -s "$m_file" ]]; then
                     debug "Prefix empty, attempting broader search for $instr"
                     local broad_prefix="op/$sat_id/${lvl,,}/"
                     timeout 120s aws s3 ls "s3://$PREM/$broad_prefix" --recursive --profile geocloud | grep "$instr" | grep "$year" | grep "$date_str" | awk '{print $NF}' > "$m_file"
                 fi
               ) &
-              
+
               ((thread_count++))
               if [[ $thread_count -ge 5 ]]; then wait -n; ((thread_count--)); fi
           fi
@@ -563,7 +563,7 @@ function get_on_prem_products() {
         local nodd_prefix="${instr}-${lvl}-${BASH_REMATCH[3]^^}/${s_time:0:4}/${s_time:4:3}/${s_time:7:2}"
         local nodd_file=$(aws s3api list-objects-v2 --no-sign-request --bucket "$bucket" --prefix "$nodd_prefix" \
                           --query "Contents[?contains(Key, '$search_pattern')].Key" --output text | awk '{print $1}')
-        
+
         [[ -n $nodd_file ]] && aws s3 cp --no-sign-request "s3://$bucket/$nodd_file" "$dest/" $S3_PROGRESS
       fi
     ) &
@@ -581,7 +581,7 @@ function get_on_prem_products() {
     [[ $filename =~ _s([0-9]{14}) ]] && local s_time=${BASH_REMATCH[1]}
     [[ $filename =~ _G([0-9]{2}) ]] && local sat_id="GOES-${BASH_REMATCH[1]}"
     [[ $filename =~ I_([A-Z0-9]+)- ]] && local instr="${BASH_REMATCH[1]}"
-    
+
     local tar_name="${sat_id}_${instr}_L2_IntermediateProducts_day${s_time:4:3}_hour${s_time:7:2}.tar"
 
     if [[ -z ${tarballs_downloaded[$tar_name]} ]]; then
@@ -599,16 +599,18 @@ function get_on_prem_products() {
     local dest=$(dirname "${gccs_file/gccs/prem}")
     local filename=$(basename "$gccs_file")
     local search_pattern=$(echo "$filename" | grep -oP "^.*?_s\d{14}")
-    
+
     for tarball in $(find "$prem_path" -name "*.tar"); do
        local match_in_tar=$(tar -tf "$tarball" | grep "$search_pattern" | head -n 1)
        if [[ -n $match_in_tar ]]; then
           tar -xf "$tarball" -C "$ip_temp" "$match_in_tar" 2>/dev/null
+          mkdir -p $dest
           mv "$ip_temp/$match_in_tar" "$dest/"
           break
        fi
     done
   done
+
 
   # Final Cleanup
   rm -rf "$TMP_DIR"
@@ -704,20 +706,30 @@ function run_glance_collocation_analysis() {
 
 function run_glance_analysis() {
   info "Generating Glance Reports"
-  #glance=/data/glance/miniforge3/envs/glance_user/bin/glance
+  local thread_count=0
 
   for product in $(find $gccs_path -type d -links 2 ! -empty); do
     product=$(dirname $(dirname $product)) #remove yyyy/ddd
 
     glance_report=${product/gccs/glance_reports}; debug glance_report=$glance_report
+    # skip if already run
+#    [[ -d "$glance_report" && "$(ls -A "$glance_report")" ]] && continue
 
+    (
     # execute specialized glance procedures for dmw
     if [[ "$(basename ${product,,})" =~ "dmw" ]]; then run_glance_collocation_analysis $product; continue; fi
 
     mkdir -p $glance_report
     $TOOL_DEBUG && local debug_flag="--verbose"
-    debug $glance report $debug_flag --fork --nolonlat $glance_flags -p $glance_report ${product/gccs/prem} $product --stripfromname e.*
-    $glance report $flag --fork --nolonlat $glance_flags -p $glance_report ${product/gccs/prem} $product --stripfromname e.*
+    debug $glance report $debug_flag --nolonlat $glance_flags -p $glance_report ${product/gccs/prem} $product --stripfromname e.*
+    $glance report $flag --nolonlat $glance_flags -p $glance_report ${product/gccs/prem} $product --stripfromname e.*
+    ) &
+
+    ((thread_count++))
+    if [[ $thread_count -ge $MAXTHREADS ]]; then
+      wait -n
+      ((thread_count--))
+    fi
   done
 
   verbose "Summarizing Glance Reports"
