@@ -59,9 +59,6 @@ aws configure set default.s3.max_queue_size 10000
 aws configure set default.s3.multipart_threshold 64MB
 S3_PROGRESS="--no-progress"
 
-# assitive globals
-SCENE_LIST="f c m1 m2"
-
 ####### ----- HELP ----- #######
 function print_help {
   printf "Usage: %s [options] <date_hour> <product(s)>\n" ${BASH_SOURCE[-1]}
@@ -157,7 +154,7 @@ function set_paths {
   metadata_path=$analysis_path/metadata; debug "metadata_path=$metadata_path"
 }
 
-####### vvvvv PRODUCT MAP vvvvv ######
+####### vvvvv PRODUCT MAPS vvvvv ######
 #Instrument Map, matching products to instrument
 declare -A INSTRUMENT
 INSTRUMENT['RAD']='ABI'
@@ -190,7 +187,11 @@ function isABI() {
   [[ $(getInstrument $1) == "ABI" ]] && return 0 || return 1;
 }
 
-###### ^^^^^ PRODUCT MAP ^^^^^ ######
+# ABI Scenes
+ABI_SCENE_LIST="f c m1 m2"
+ABI_CHANNEL_LIST==( {01..16} )
+
+###### ^^^^^ PRODUCT MAPS ^^^^^ ######
 
 ####### ----- RETREIVAL ---- #######
 # Regex Breakdown:
@@ -205,7 +206,7 @@ function isABI() {
 # _c([0-9]+)     9. Created
 GOES_FILE_PATTERN='^OR_([^-]+)-([^-]+)-([^-]+)(-M[0-9]+)?(C[0-9]+)?_G([0-9]+)_s([0-9]+)_e([0-9]+)_c([0-9]+)\.nc$'
 
-function deprecated_get_gccs() {
+function legacy_get_gccs() {
   verbose "starting collection of gccs produced products"
   local timestamp=$1
   local product=$2
@@ -266,7 +267,7 @@ function deprecated_get_gccs() {
   verbose "all gccs retrieval threads compmlete"
 }
 
-function deprecated_get_gccs_products() {
+function legacy_get_gccs_products() {
   info "starting gccs data collection"
   local timestamp=$1; debug timestamp=$timestamp
   local -n products=$2
@@ -282,8 +283,8 @@ function deprecated_get_gccs_products() {
     verbose "collecting gccs data for $product"
 
     debug "retrieving $product for instrument $instrument $level"
-    if ! isABI $product; then SCENE_LIST=""; fi
-    for scene in ${SCENE_LIST:-}; do get_gccs $timestamp $product$scene $instrument $level; done
+    if ! isABI $product; then ABI_SCENE_LIST=""; fi
+    for scene in ${ABI_SCENE_LIST:-}; do get_gccs $timestamp $product$scene $instrument $level; done
 
     if [ -z "$(find $gccs_path/**/$product*/ -type f)" ]; then
       echo "WARNING: no products retrieved for product: $product"
@@ -292,98 +293,99 @@ function deprecated_get_gccs_products() {
 }
 
 function get_gccs_products() {
-  info "Starting GCCS Retrieval (Lowercase Folders / Original Filenames)"
-  local timestamp=$1       # YYYYdddhhm
-  local -n products_ref=$2  # Array of base products
+  info "Starting GCCS Retrieval (Standard & IP Co-located)"
+  local timestamp=$1
+  local -n products_ref=$2
   local thread_count=0
-
   local year=${timestamp:0:4}
-  local doy=${timestamp:4:3}
+  local day_of_year=${timestamp:4:3}
 
-  for sat_num in 18 19; do
-    local sat_id="GOES-${sat_num}"
+  # Numeric channel list (e.g., "02 07 14")
+  local channel_filter="${ABI_CHANNEL_LIST[@]}"
 
-    for prod in "${products_ref[@]}"; do
-      local inst=$(getInstrument "$prod")
-      local lvl=$(getLevel "$prod")
+  for satellite_number in 18 19; do
+    local satellite_id="GOES-${satellite_number}"
+
+    for product in "${products_ref[@]}"; do
+      local instrument=$(getInstrument "$product")
+      local level=$(getLevel "$product")
 
       local current_scenes=""
-      if isABI "$prod"; then current_scenes=${SCENE_LIST:-}; fi
+      if isABI "$product"; then
+        current_scenes=${ABI_SCENE_LIST:-""}
+      fi
 
       for scene in ${current_scenes:-""}; do
-        # Prefix Discovery: e.g., ops/GOES-18/L2/ABI/dmwf
-        local s_prefix="${GCCS_BASE_PREFIX}/${sat_id}/${lvl}/${inst}/${prod,,}${scene,,}"
+        # Prefix for discovery: GCCS/op/GOES-18/L2/ABI/dmwf
+        local s3_prefix="${GCCS_BASE_PREFIX}/${satellite_id}/${level}/${instrument}/${product,,}${scene,,}"
 
-        # 1. NATIVE DISCOVERY
-        local matching_keys=$(aws s3api list-objects-v2 --profile geocloud \
-          --bucket "$GCCS" --prefix "$s_prefix" \
-          --query "Contents[?contains(Key, '_s${timestamp}')].Key" \
-          --output text)
+        # JMESPath query for discovery
+        local query="Contents[?contains(Key, '_s${timestamp}')"
+        if [[ -n "$channel_filter" ]]; then
+            local channel_query=""
+            for num in $channel_filter; do
+                channel_query+="${channel_query:+ || }contains(Key, 'C${num}')"
+            done
+            query+=" && (${channel_query})"
+        fi
+        query+="].Key"
 
-        if [[ -z "$matching_keys" || "$matching_keys" == "None" ]]; then continue; fi
+        # Discovery phase
+        local matching_keys
+        matching_keys=$(aws s3api list-objects-v2 --profile geocloud \
+          --bucket "$GCCS" --prefix "$s3_prefix" \
+          --query "$query" \
+          --output text | tr '\t' '\n')
 
-        # 2. DYNAMIC PATH MAPPING
-        declare -A processed_dirs
-        read -ra keys_array <<< "$matching_keys"
+        [[ -z "$matching_keys" || "$matching_keys" == "None" ]] && continue
 
-        for s3_key in "${keys_array[@]}"; do
-          local s3_dir=$(dirname "$s3_key")
+        declare -A processed_s3_directories
 
-          if [[ -z ${processed_dirs["$s3_dir"]} ]]; then
-            # Extract folder segment from S3 path
-            local after_inst="${s3_key#*/${inst}/}"
-            local s3_folder="${after_inst%%/*}"
+        while read -r s3_key; do
+          [[ -z "$s3_key" ]] && continue
+          local s3_directory=$(dirname "$s3_key")
 
-            # --- FOLDER NAMING LOGIC ---
-            # Everything in the path is forced to lowercase
-            local folder_name="${s3_folder,,}"
-
-            # Convert _C02 to -c02 in the folder name
-            if [[ "$s3_folder" == *"_"* ]]; then
-                local base_p="${s3_folder%_*}"
-                local chan_p="${s3_folder#*_}"
-                folder_name="${base_p,,}-c${chan_p#C}"
-            # Catch channel in filename for flat L1b structures
-            elif [[ "$s3_key" =~ C([0-9]{2}) ]]; then
-                local chan_num="${BASH_REMATCH[1]}"
-                [[ ! "$folder_name" == *"-c${chan_num}"* ]] && folder_name="${folder_name}-c${chan_num}"
+          if [[ -z ${processed_s3_directories["$s3_directory"]} ]]; then
+            # Build local folder name (e.g., dmwf-c02)
+            local folder_name="${product,,}${scene,,}"
+            if [[ "$s3_key" =~ C([0-9]{2}) ]]; then
+                folder_name="${folder_name}-c${BASH_REMATCH[1]}"
             fi
 
-            # Final Local Destination: .../gccs/ABI/dmwf-c02/2026/014
-            local dest="${gccs_path}/${inst}/${folder_name}/${year}/${doy}"
-
-
+            local local_destination="${gccs_path}/${instrument}/${folder_name}/${year}/${day_of_year}"
 
             (
-              mkdir -p "$dest"
+              mkdir -p "$local_destination"
+              verbose "Syncing GCCS: ${satellite_id} ${folder_name}"
 
-              # SURGICAL SYNC
-              # Note: Filenames are NOT changed by sync; they remain Uppercase as on S3.
-              aws s3 sync "s3://${GCCS}/${s3_dir}/" "$dest/" \
+              # 1. Sync Standard Bucket
+              aws s3 sync "s3://${GCCS}/${s3_directory}/" "$local_destination/" \
                 --profile geocloud --exclude "*" --include "*_s${timestamp}*" \
-                --no-progress $S3_PROGRESS
+                $S3_PROGRESS > /dev/null
 
-              # IP SYNC (Mapping Ops directory structure to IP bucket)
-              local ip_dir="${s3_dir/${GCCS_BASE_PREFIX}/${GCCS_IP_PREFIX}}"
-              aws s3 sync "s3://${GCCS_IP}/${ip_dir}/" "$dest/" \
+              # 2. Sync IP Bucket
+              # Assuming GCCS_IP mirrors the folder structure of GCCS
+              aws s3 sync "s3://${GCCS_IP}/${s3_directory}/" "$local_destination/" \
                 --profile geocloud --exclude "*" --include "*_s${timestamp}*" \
-                --no-progress $S3_PROGRESS 2>/dev/null
+                $S3_PROGRESS > /dev/null 2>/dev/null
             ) &
 
-            processed_dirs["$s3_dir"]=1
+            processed_s3_directories["$s3_directory"]=1
             ((thread_count++))
             if [[ $thread_count -ge $MAXTHREADS ]]; then wait -n; ((thread_count--)); fi
           fi
-        done
-        unset processed_dirs
+        done <<< "$matching_keys"
+        unset processed_s3_directories
       done
     done
   done
   wait
+
   find "$gccs_path" -type d -empty -delete
+  info "GCCS retrieval complete."
 }
 
-function deprecated_get_on_prem_products() {
+function legacy_get_on_prem_products() {
   # retrieves on-prem products based on available products from gccs
   info "starting collections of matching products from on-prem"
   local start_path=$PWD; debug "start_path=$start_path"
@@ -503,7 +505,7 @@ function deprecated_get_on_prem_products() {
   done # end retrieval of matching ABI IP products
 }
 
-function deprecated_v2_get_on_prem_products() {
+function legacy_v2_get_on_prem_products() {
   info "Starting collections of matching products from On-Prem"
   local timestamp=$1
   local thread_count=0
@@ -640,93 +642,114 @@ function deprecated_v2_get_on_prem_products() {
 }
 
 function get_on_prem_products() {
-  info "Starting On-Prem Retrieval"
+  info "Starting On-Prem Retrieval (Mirroring GCCS structure 1-to-1)"
   local timestamp=$1
-  local -n products_ref=$2
   local thread_count=0
 
-  # 1. Group products by Instrument/Level
-  declare -A groups
-  for prod in "${products_ref[@]}"; do
-    local inst=$(getInstrument "$prod")
-    local lvl=$(getLevel "$prod")
-    local key="${inst}|${lvl}"
-    groups["$key"]+="${prod} "
-  done
+  # Step 1: Find all GCCS 'leaf' directories (YYYY/DDD) to mirror
+  local gccs_leaf_directories
+  gccs_leaf_directories=$(find "$gccs_path" -type d -links 2)
 
-  # 2. Process groups
-  for key in "${!groups[@]}"; do
-    local inst=${key%|*}
-    local lvl=${key#*|}
-    local -a current_prods=(${groups[$key]})
+  if [[ -z "$gccs_leaf_directories" ]]; then
+    WARN "No GCCS data found in $gccs_path. Skipping On-Prem retrieval."
+    return
+  fi
 
-    for sat_num in 18 19; do
-      local sat_id="GOES-${sat_num}"
-      local year=${timestamp:0:4}
-      local doy=${timestamp:4:3}
-      # Structure: YYYY/mon/YYYYMMDD (e.g. 2026/mar/2026058)
-      local date_str=$(date --date="jan 1 + $doy days - 1 days" +"%b/%Y%m%d" | tr '[:upper:]' '[:lower:]')
+  for gccs_dir in $gccs_leaf_directories; do
+    (
+      # Extract relative path (e.g., ABI/dmwf-c02/2026/059)
+      local relative_path=${gccs_dir#$gccs_path/}
 
-      # 3. Parallelize at the Product Level
-      for p in "${current_prods[@]}"; do
-        local current_scenes=""
-        [[ "$inst" == "ABI" ]] && current_scenes=${SCENE_LIST:-}
+      # Mirror the path exactly in the 'prem' folder for Glance 1-to-1 compatibility
+      local prem_destination="${prem_path}/${relative_path}"
+      mkdir -p "$prem_destination"
 
-        for scene in ${current_scenes:-""}; do
-          (
-            local full_prod="${p}${scene}"
-            local folder_name="${full_prod,,}"
+      # Parse the folder structure for S3 search parameters
+      local instrument=$(echo "$relative_path" | cut -d/ -f1)
+      local folder_name=$(echo "$relative_path" | cut -d/ -f2)
+      local year=$(echo "$relative_path" | cut -d/ -f3)
+      local day_of_year=$(echo "$relative_path" | cut -d/ -f4)
 
-            # --- RESTORED PATH LOGIC ---
-            # Explicitly append year and doy to the destination path
-            local sat_dest="${prem_path}/${inst}/${folder_name}/${year}/${doy}"
-            mkdir -p "$sat_dest"
+      # --- PATTERN PARSING ---
+      # folder_name: 'dmwf-c02' -> product_base: 'DMWF', channel_part: 'C02'
+      local channel_part=""
+      [[ "$folder_name" == *"-c"* ]] && channel_part="C${folder_name#*-c}"
 
-            # GPAS Search Pattern
-            local gpas_prefix="op/${sat_id}/${lvl,,}/${inst/SEIS/SEISS}/${year}/${date_str}/"
-            local include_pattern="*${full_prod^^}*G${sat_num}_s${timestamp}*"
+      local product_base="${folder_name%%-*}"
+      product_base=${product_base^^}
 
-            verbose "Parallel Sync [Started]: GOES-${sat_num} ${folder_name} -> ${year}/${doy}"
+      # --- 1. RETRIEVE STANDARD PRODUCTS (ABI-L2-...) ---
+      local gpas_date_string
+      gpas_date_string=$(date --date="jan 1 + $day_of_year days - 1 days" +"%b/%Y%m%d" | tr '[:upper:]' '[:lower:]')
 
+      for satellite_number in 18 19; do
+        local satellite_id="GOES-${satellite_number}"
+        local standard_include="*ABI-L2-${product_base}*${channel_part}*G${satellite_number}_s${timestamp}*"
+        local gpas_prefix="op/${satellite_id}/${lvl:-l2}/${instrument/SEIS/SEISS}/${year}/${gpas_date_string}/"
 
+        verbose "Syncing Standard On-Prem: ${satellite_id} ${folder_name}"
+        aws s3 sync "s3://${PREM}/${gpas_prefix}" "$prem_destination" \
+          --profile geocloud --exclude "*" --include "$standard_include" \
+          $S3_PROGRESS > /dev/null
 
-            # GPAS Primary Sync
-            # We sync "to" the specific year/doy folder to ensure files land there exactly
-            aws s3 sync "s3://${PREM}/${gpas_prefix}" "$sat_dest" \
-              --profile geocloud \
-              --exclude "*" \
-              --include "$include_pattern" \
-              --no-progress $S3_PROGRESS
+        # Fallback to NODD for Standard Products
+        if [[ -z "$(ls -A "$prem_destination" | grep "ABI-L2")" ]] || $force_nodd; then
+          local product_short_name="${product_base%[FCM12]*}"
+          local nodd_prefix="${instrument}-${lvl:-L2}-${product_short_name}/${year}/${day_of_year}/"
+          aws s3 sync "s3://noaa-goes${satellite_number}/${nodd_prefix}" "$prem_destination" \
+            --no-sign-request --exclude "*" --include "$standard_include" \
+            --no-progress $S3_PROGRESS > /dev/null
+        fi
 
-            # NODD Fallback
-            if [[ -z "$(find "$sat_dest" -name "$include_pattern" -type f 2>/dev/null)" ]] || $force_nodd; then
-              debug "GPAS match failed for ${folder_name}, checking NODD..."
-              local nodd_bucket="noaa-goes${sat_num}"
-              # NODD structure: <Product>-<Level>-<ShortName>/<Year>/<DOY>/<Hour>/
-              local nodd_prefix="${inst}-${lvl}-${p^^}/${year}/${doy}/"
+        # --- 2. RETRIEVE INTERMEDIATE PRODUCTS (I_ABI-L2-...) ---
+        # Only process IP if we are dealing with ABI L2 context
+        if [[ "$instrument" == "ABI" ]]; then
+          local hour_part=${timestamp:7:2}
+          local tar_name="${satellite_id}_ABI_L2_IntermediateProducts_day${day_of_year}_hour${hour_part}.tar"
+          local egress_url="s3://geoegress/egresout/DOE1L2IP/${satellite_id}/${tar_name}"
 
-              aws s3 sync "s3://${nodd_bucket}/${nodd_prefix}" "$sat_dest" \
-                --no-sign-request \
-                --exclude "*" \
-                --include "$include_pattern" \
-                --no-progress $S3_PROGRESS
-            fi
-          ) &
-
-          # --- THREAD MANAGEMENT ---
-          ((thread_count++))
-          if [[ $thread_count -ge $MAXTHREADS ]]; then
-            wait -n
-            ((thread_count--))
+          # Download tarball once to the root prem folder to share across threads
+          if [[ ! -f "$prem_path/$tar_name" ]]; then
+             aws s3 cp --profile geocloud "$egress_url" "$prem_path/" $S3_PROGRESS > /dev/null 2>&1
           fi
-        done
+
+          if [[ -f "$prem_path/$tar_name" ]]; then
+            local ip_include="*I_ABI-L2-${product_base}*${channel_part}*G${satellite_number}_s${timestamp}*"
+            # Convert glob to regex for grep
+            local grep_pattern=$(echo "$ip_include" | sed 's/\*/.*/g')
+            local matched_file_path=$(tar -tf "$prem_path/$tar_name" | grep -m 1 -E "$grep_pattern")
+
+            if [[ -n "$matched_file_path" ]]; then
+              debug "Extracting IP file $matched_file_path into $folder_name"
+
+              # Calculate how many directories to strip from the internal tar path
+              local component_count=$(echo "$matched_file_path" | tr -cd '/' | wc -c)
+
+              # Extract specifically that file and chop all internal directories
+              tar -xf "$prem_path/$tar_name" \
+                -C "$prem_destination" \
+                --strip-components="$component_count" \
+                "$matched_file_path"
+            fi
+          fi
+        fi
       done
-    done
+    ) &
+
+    # Thread management (Semaphore)
+    ((thread_count++))
+    if [[ $thread_count -ge $MAXTHREADS ]]; then
+      wait -n
+      ((thread_count--))
+    fi
   done
 
   wait
-  find "$prem_path" -type d -empty -delete
-  info "On-Prem retrieval complete with full directory hierarchy."
+
+  # Final count and cleanup
+  local total_prem_files
+  total_prem_files=$(find "$prem_path" -type f | wc -l)
+  info "On-Prem retrieval complete. Standard and IP files are co-located. Total files: $total_prem_files"
 }
 
 ####### ----- ANALYZE ---- #######
@@ -897,7 +920,7 @@ do
     --skip_metadata )      run_metadata=false; shift ;;
     --glance_flags  )      glance_flags=$2; shift 2 ;;
 
-    --scene_list )         SCENE_LIST=$2; shift 2 ;;
+    --scene_list )         ABI_SCENE_LIST=$2; shift 2 ;;
 
     --prefix )             PREFIX=$2; shift 2 ;;
     --tag    )             TAG=$2; shift 2 ;;
