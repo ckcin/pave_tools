@@ -292,72 +292,94 @@ function deprecated_get_gccs_products() {
 }
 
 function get_gccs_products() {
-  info "Starting GCCS Retrieval"
-  local timestamp=$1
-  local -n products_ref=$2
+  info "Starting GCCS Retrieval (Lowercase Folders / Original Filenames)"
+  local timestamp=$1       # YYYYdddhhm
+  local -n products_ref=$2  # Array of base products
   local thread_count=0
-  
-  for prod in "${products_ref[@]}"; do
-    local inst=$(getInstrument "$prod")
-    local lvl=$(getLevel "$prod")
 
-    # Scene list only applies if it's ABI and the product isn't already scene-specific
-    local current_scenes=""
-    if isABI "$prod"; then current_scenes=${SCENE_LIST:-}; fi
+  local year=${timestamp:0:4}
+  local doy=${timestamp:4:3}
 
-    # If product list contains "ach", we check "achf", "achc", etc.
-    # Each specific iteration (e.g., achf) gets its own destination.
-    for scene in ${current_scenes:-""}; do
-      local full_prod="${prod}${scene}"
-      local dest="${gccs_path}/${inst}/${full_prod}"
+  for sat_num in 18 19; do
+    local sat_id="GOES-${sat_num}"
 
-      for sat in 18 19; do
-        (
-        # Prefix narrows down to the specific product folder in S3
-        local root_prefix="${GCCS_BASE_PREFIX}/GOES-${sat}/${lvl}/${inst}/${full_prod,,}/"
-        local prod_pattern="*${full_prod^^}*G${sat}_s${timestamp}*"
+    for prod in "${products_ref[@]}"; do
+      local inst=$(getInstrument "$prod")
+      local lvl=$(getLevel "$prod")
 
-        # # L1b special case: L1b products often don't have a subfolder in the bucket
-        # if [[ $lvl == "L1b" ]]; then
-            # root_prefix="${GCCS_BASE_PREFIX}/GOES-${sat}/${lvl}/${inst}/"
-        # fi
+      local current_scenes=""
+      if isABI "$prod"; then current_scenes=${SCENE_LIST:-}; fi
 
-        verbose "Syncing GOES-${sat} product: ${full_prod} to ${dest}"
-        # make directory for storing sync
-        mkdir -p $dest
+      for scene in ${current_scenes:-""}; do
+        # Prefix Discovery: e.g., ops/GOES-18/L2/ABI/dmwf
+        local s_prefix="${GCCS_BASE_PREFIX}/${sat_id}/${lvl}/${inst}/${prod,,}${scene,,}"
 
-        debug "s3 query: s3://<bucket>/$root_prefix file include: *${prod_pattern}*"
+        # 1. NATIVE DISCOVERY
+        local matching_keys=$(aws s3api list-objects-v2 --profile geocloud \
+          --bucket "$GCCS" --prefix "$s_prefix" \
+          --query "Contents[?contains(Key, '_s${timestamp}')].Key" \
+          --output text)
 
-        # Sync command: only includes files matching product, sat, and timestamp
-        aws s3 sync "s3://${GCCS}/${root_prefix}" "$dest" \
-          --profile geocloud \
-          --exclude "*" \
-          --include "*${prod_pattern}*" \
-          --no-progress \
-          $S3_PROGRESS
+        if [[ -z "$matching_keys" || "$matching_keys" == "None" ]]; then continue; fi
 
-        # Sync Intermediate Products if L2
-        if [[ "$lvl" == "L2" ]]; then
-          aws s3 sync "s3://${GCCS_IP}/${root_prefix}" "$dest" \
-            --profile geocloud \
-            --exclude "*" \
-            --include "*${prod_pattern}*" \
-            --no-progress \
-            $S3_PROGRESS
-        fi
-        ) &
+        # 2. DYNAMIC PATH MAPPING
+        declare -A processed_dirs
+        read -ra keys_array <<< "$matching_keys"
 
-        # Throttle the number of concurrent S3 Sync processes
-        ((thread_count++))
-        if [[ $thread_count -ge $MAXTHREADS ]]; then
-          wait -n
-          ((thread_count--))
-        fi
+        for s3_key in "${keys_array[@]}"; do
+          local s3_dir=$(dirname "$s3_key")
+
+          if [[ -z ${processed_dirs["$s3_dir"]} ]]; then
+            # Extract folder segment from S3 path
+            local after_inst="${s3_key#*/${inst}/}"
+            local s3_folder="${after_inst%%/*}"
+
+            # --- FOLDER NAMING LOGIC ---
+            # Everything in the path is forced to lowercase
+            local folder_name="${s3_folder,,}"
+
+            # Convert _C02 to -c02 in the folder name
+            if [[ "$s3_folder" == *"_"* ]]; then
+                local base_p="${s3_folder%_*}"
+                local chan_p="${s3_folder#*_}"
+                folder_name="${base_p,,}-c${chan_p#C}"
+            # Catch channel in filename for flat L1b structures
+            elif [[ "$s3_key" =~ C([0-9]{2}) ]]; then
+                local chan_num="${BASH_REMATCH[1]}"
+                [[ ! "$folder_name" == *"-c${chan_num}"* ]] && folder_name="${folder_name}-c${chan_num}"
+            fi
+
+            # Final Local Destination: .../gccs/ABI/dmwf-c02/2026/014
+            local dest="${gccs_path}/${inst}/${folder_name}/${year}/${doy}"
+
+
+
+            (
+              mkdir -p "$dest"
+
+              # SURGICAL SYNC
+              # Note: Filenames are NOT changed by sync; they remain Uppercase as on S3.
+              aws s3 sync "s3://${GCCS}/${s3_dir}/" "$dest/" \
+                --profile geocloud --exclude "*" --include "*_s${timestamp}*" \
+                --no-progress $S3_PROGRESS
+
+              # IP SYNC (Mapping Ops directory structure to IP bucket)
+              local ip_dir="${s3_dir/${GCCS_BASE_PREFIX}/${GCCS_IP_PREFIX}}"
+              aws s3 sync "s3://${GCCS_IP}/${ip_dir}/" "$dest/" \
+                --profile geocloud --exclude "*" --include "*_s${timestamp}*" \
+                --no-progress $S3_PROGRESS 2>/dev/null
+            ) &
+
+            processed_dirs["$s3_dir"]=1
+            ((thread_count++))
+            if [[ $thread_count -ge $MAXTHREADS ]]; then wait -n; ((thread_count--)); fi
+          fi
+        done
+        unset processed_dirs
       done
     done
   done
-
-  # Cleanup any empty directories created by discovery
+  wait
   find "$gccs_path" -type d -empty -delete
 }
 
@@ -418,7 +440,7 @@ function deprecated_get_on_prem_products() {
 
     verbose "attempting retrieval of s3file: $s3file"
     debug "basename is: $(basename $s3file)"
-    if [[ -n $s3file && ! -f $dest/$(basename $s3file) ]]; then 
+    if [[ -n $s3file && ! -f $dest/$(basename $s3file) ]]; then
       aws s3 cp $profile s3://$bucket/$s3file $dest $sign_request $S3_PROGRESS
     elif [[ -f $dest/$(basename $s3file) ]]; then
       debug "WARNING: $(basename $s3file) previously retrieved"
@@ -485,7 +507,7 @@ function deprecated_v2_get_on_prem_products() {
   info "Starting collections of matching products from On-Prem"
   local timestamp=$1
   local thread_count=0
-  
+
   # Create a unique temporary directory for this specific process instance
   TMP_DIR=$(mktemp -d -t $(basename ${BASH_SOURCE[-1]})-XXXXXXXXXX)
   debug "TMP_DIR=$TMP_DIR"
@@ -534,8 +556,8 @@ function deprecated_v2_get_on_prem_products() {
           fi
       fi
   done
-  wait 
-  thread_count=0 
+  wait
+  thread_count=0
 
   # --- STEP 2: PARALLEL RETRIEVAL (Standard Products) ---
   info "Retrieving matching standard products..."
@@ -637,7 +659,7 @@ function get_on_prem_products() {
     local inst=${key%|*}
     local lvl=${key#*|}
     local -a current_prods=(${groups[$key]})
-    
+
     for sat_num in 18 19; do
       local sat_id="GOES-${sat_num}"
       local year=${timestamp:0:4}
@@ -663,10 +685,10 @@ function get_on_prem_products() {
             # GPAS Search Pattern
             local gpas_prefix="op/${sat_id}/${lvl,,}/${inst/SEIS/SEISS}/${year}/${date_str}/"
             local include_pattern="*${full_prod^^}*G${sat_num}_s${timestamp}*"
-            
+
             verbose "Parallel Sync [Started]: GOES-${sat_num} ${folder_name} -> ${year}/${doy}"
 
-            
+
 
             # GPAS Primary Sync
             # We sync "to" the specific year/doy folder to ensure files land there exactly
@@ -682,7 +704,7 @@ function get_on_prem_products() {
               local nodd_bucket="noaa-goes${sat_num}"
               # NODD structure: <Product>-<Level>-<ShortName>/<Year>/<DOY>/<Hour>/
               local nodd_prefix="${inst}-${lvl}-${p^^}/${year}/${doy}/"
-              
+
               aws s3 sync "s3://${nodd_bucket}/${nodd_prefix}" "$sat_dest" \
                 --no-sign-request \
                 --exclude "*" \
@@ -701,7 +723,7 @@ function get_on_prem_products() {
       done
     done
   done
-  
+
   wait
   find "$prem_path" -type d -empty -delete
   info "On-Prem retrieval complete with full directory hierarchy."
@@ -838,7 +860,7 @@ function set_test() {
   PREFIX=test
   TAG=internal
   date_hour=2026059100
-  product_names=("acm" "ach" "mpsh" "geof")
+  product_names=("acm" "ach" "dmw" "dmwvpqi" "mpsh" "geof") # TODO: add CMI
   S3_PROGRESS=""
 }
 
@@ -913,7 +935,7 @@ else
   pave_bin=$SCRIPT_DIR
   glance_cfg=$pave_bin/glance_summarize/configuration
   analysis_path=$PWD/YYYYDDDhh
-  MAXTHREADS=2
+  MAXTHREADS=4
 fi
 
 ####### ----- TEST ----- #######
