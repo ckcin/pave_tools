@@ -137,6 +137,7 @@ function catch() {
 }
 
 ####### ----- script functions ----- ######
+
 # analysis directory setup
 function set_paths {
   # prepend directory name with tag
@@ -155,6 +156,7 @@ function set_paths {
 }
 
 ####### vvvvv PRODUCT MAPS vvvvv ######
+
 #Instrument Map, matching products to instrument
 declare -A INSTRUMENT
 INSTRUMENT['RAD']='ABI'
@@ -194,7 +196,8 @@ ABI_CHANNEL_LIST==( {01..16} )
 ###### ^^^^^ PRODUCT MAPS ^^^^^ ######
 
 ####### ----- RETREIVAL ---- #######
-# Regex Breakdown:
+
+# GOES File Regex Breakdown:
 # ([^-]+)        1. Instrument (ABI)
 # -([^-]+)       2. Level (L2)
 # -([^-]+)       3. Product (DMWF)
