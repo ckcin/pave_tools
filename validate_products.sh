@@ -80,6 +80,7 @@ function print_help {
   printf "  %-20s %s\n" "--glance_flags" "added/use additional flags in glance run [eg:--glance_flags \"-e 0,5\"]"
   printf "\n"
   printf "  %-20s %s\n" "--scene_list [f c m1 m2]" "specific list of scenes to validate a product for (quote list)"
+  printf "  %-20s %s\n" "--channel_list [00 - 16]" "specific list of channels to validate a product for (quote list)"
   printf "\n"
   printf "  %-20s %s\n" "--prefix [PREFIX]" "<date_hour> is used as folder name, prefix used to help identify run"
   printf "  %-20s %s\n" "--tag [TAG]" "used to add additional details to folder name, is appended"
@@ -296,7 +297,7 @@ function legacy_get_gccs_products() {
 }
 
 function get_gccs_products() {
-  info "Starting GCCS Retrieval (Standard & IP Co-located)"
+  info "Starting GCCS Retrieval (Base Product Discovery)"
   local timestamp=$1
   local -n products_ref=$2
   local thread_count=0
@@ -309,83 +310,97 @@ function get_gccs_products() {
   for satellite_number in 18 19; do
     local satellite_id="GOES-${satellite_number}"
 
-    for product in "${products_ref[@]}"; do
-      local instrument=$(getInstrument "$product")
-      local level=$(getLevel "$product")
+    for product_base in "${products_ref[@]}"; do
+      local instrument=$(getInstrument "$product_base")
+      local level=$(getLevel "$product_base")
 
-      local current_scenes=""
-      if isABI "$product"; then
-        current_scenes=${ABI_SCENE_LIST:-""}
+      # --- 1. DISCOVERY BEFORE SCENE APPENDING ---
+      # Search at the product level (e.g., GCCS/op/GOES-18/L2/ABI/dmw)
+      # Note: We use ${product_base,,} to match the common lowercase S3 prefix convention
+      local s3_discovery_prefix="${GCCS_BASE_PREFIX}/${satellite_id}/${level}/${instrument}/${product_base,,}"
+
+      verbose "Discovering files for $product_base on $satellite_id (Prefix: $s3_discovery_prefix)"
+
+      # Build the query to find files matching the timestamp and (optional) channels
+      local query="Contents[?contains(Key, '_s${timestamp}')"
+      if [[ -n "$channel_filter" ]]; then
+          local channel_query=""
+          for num in $channel_filter; do
+              channel_query+="${channel_query:+ || }contains(Key, 'C${num}')"
+          done
+          query+=" && (${channel_query})"
+      fi
+      query+="].Key"
+
+      # Discovery call to see what files actually exist for this base product
+      local matching_keys
+      matching_keys=$(aws s3api list-objects-v2 --profile geocloud \
+        --bucket "$GCCS" --prefix "$s3_discovery_prefix" \
+        --query "$query" \
+        --output text | tr '\t' '\n')
+
+      if [[ -z "$matching_keys" || "$matching_keys" == "None" ]]; then
+        debug "No files found for base product $product_base at $timestamp"
+        continue
       fi
 
-      for scene in ${current_scenes:-""}; do
-        # Prefix for discovery: GCCS/op/GOES-18/L2/ABI/dmwf
-        local s3_prefix="${GCCS_BASE_PREFIX}/${satellite_id}/${level}/${instrument}/${product,,}${scene,,}"
+      # --- 2. PARALLEL SYNC FOR DISCOVERED FILES ---
+      declare -A processed_s3_directories
 
-        # JMESPath query for discovery
-        local query="Contents[?contains(Key, '_s${timestamp}')"
-        if [[ -n "$channel_filter" ]]; then
-            local channel_query=""
-            for num in $channel_filter; do
-                channel_query+="${channel_query:+ || }contains(Key, 'C${num}')"
-            done
-            query+=" && (${channel_query})"
-        fi
-        query+="].Key"
+      while read -r s3_key; do
+        [[ -z "$s3_key" ]] && continue
+        local s3_directory=$(dirname "$s3_key")
 
-        # Discovery phase
-        local matching_keys
-        matching_keys=$(aws s3api list-objects-v2 --profile geocloud \
-          --bucket "$GCCS" --prefix "$s3_prefix" \
-          --query "$query" \
-          --output text | tr '\t' '\n')
+        if [[ -z ${processed_s3_directories["$s3_directory"]} ]]; then
+          # Extract the filename to determine the scene and channel
+          local filename=$(basename "$s3_key")
 
-        [[ -z "$matching_keys" || "$matching_keys" == "None" ]] && continue
-
-        declare -A processed_s3_directories
-
-        while read -r s3_key; do
-          [[ -z "$s3_key" ]] && continue
-          local s3_directory=$(dirname "$s3_key")
-
-          if [[ -z ${processed_s3_directories["$s3_directory"]} ]]; then
-            # Build local folder name (e.g., dmwf-c02)
-            local folder_name="${product,,}${scene,,}"
-            if [[ "$s3_key" =~ C([0-9]{2}) ]]; then
-                folder_name="${folder_name}-c${BASH_REMATCH[1]}"
-            fi
-
-            local local_destination="${gccs_path}/${instrument}/${folder_name}/${year}/${day_of_year}"
-
-            (
-              mkdir -p "$local_destination"
-              verbose "Syncing GCCS: ${satellite_id} ${folder_name}"
-
-              # 1. Sync Standard Bucket
-              aws s3 sync "s3://${GCCS}/${s3_directory}/" "$local_destination/" \
-                --profile geocloud --exclude "*" --include "*_s${timestamp}*" \
-                $S3_PROGRESS > /dev/null
-
-              # 2. Sync IP Bucket
-              # Assuming GCCS_IP mirrors the folder structure of GCCS
-              aws s3 sync "s3://${GCCS_IP}/${s3_directory}/" "$local_destination/" \
-                --profile geocloud --exclude "*" --include "*_s${timestamp}*" \
-                $S3_PROGRESS > /dev/null 2>/dev/null
-            ) &
-
-            processed_s3_directories["$s3_directory"]=1
-            ((thread_count++))
-            if [[ $thread_count -ge $MAXTHREADS ]]; then wait -n; ((thread_count--)); fi
+          # Parse the specific product name from the filename (e.g., DMWF, DMWC)
+          # This ensures the local folder name includes the scene (f, c, m1, etc.)
+          local full_product_name
+          if [[ $filename =~ OR_([^-]+)-([^-]+)-([^-]+)(-M[0-9]+)?(C[0-9]+)?_G ]]; then
+              full_product_name="${BASH_REMATCH[3],,}"
+          else
+              # Fallback if regex fails: use the base product name
+              full_product_name="${product_base,,}"
           fi
-        done <<< "$matching_keys"
-        unset processed_s3_directories
-      done
+
+          # Append channel suffix if applicable (e.g., dmwf-c02)
+          local local_folder_name="$full_product_name"
+          if [[ "$filename" =~ C([0-9]{2}) ]]; then
+              local_folder_name="${full_product_name}-c${BASH_REMATCH[1]}"
+          fi
+
+          local local_destination="${gccs_path}/${instrument}/${local_folder_name}/${year}/${day_of_year}"
+
+          (
+            mkdir -p "$local_destination"
+            verbose "Syncing discovered GCCS files: $filename -> $local_folder_name"
+
+            # A. Sync Standard Products
+            aws s3 sync "s3://${GCCS}/${s3_directory}/" "$local_destination/" \
+              --profile geocloud --exclude "*" --include "*_s${timestamp}*" \
+              $S3_PROGRESS > /dev/null
+
+            # B. Sync Intermediate Products (IP)
+            # Pulling from GCCS_IP using the same directory structure discovered in GCCS
+            aws s3 sync "s3://${GCCS_IP}/${s3_directory}/" "$local_destination/" \
+              --profile geocloud --exclude "*" --include "*_s${timestamp}*" \
+              $S3_PROGRESS > /dev/null 2>/dev/null
+          ) &
+
+          processed_s3_directories["$s3_directory"]=1
+          ((thread_count++))
+          if [[ $thread_count -ge $MAXTHREADS ]]; then wait -n; ((thread_count--)); fi
+        fi
+      done <<< "$matching_keys"
+      unset processed_s3_directories
     done
   done
   wait
 
   find "$gccs_path" -type d -empty -delete
-  info "GCCS retrieval complete."
+  info "GCCS retrieval complete with co-located Standard and IP files."
 }
 
 function legacy_get_on_prem_products() {
@@ -906,7 +921,8 @@ config=""
 SHORT_OPTS="c:hvdD"
 LONG_OPTS="collect_only,skip_gccs,skip_prem,force_nodd,\
            report_only,skip_glance,skip_metadata,glance_flags:,\
-           scene_list:,prefix:,tag:,config:\
+           scene_list:,channel_list:,\
+           prefix:,tag:,config:\
            help,verbose,debug,test,tool_debug"
 ARGS=$(getopt -o "${SHORT_OPTS}" --long "${LONG_OPTS}" -- "$@")
 eval set -- ${ARGS}
@@ -924,6 +940,7 @@ do
     --glance_flags  )      glance_flags=$2; shift 2 ;;
 
     --scene_list )         ABI_SCENE_LIST=$2; shift 2 ;;
+    --channel_list  )      ABI_CHANNEL_LIST=$2; shift 2 ;;
 
     --prefix )             PREFIX=$2; shift 2 ;;
     --tag    )             TAG=$2; shift 2 ;;
