@@ -159,23 +159,24 @@ function set_paths {
 ####### vvvvv PRODUCT MAPS vvvvv ######
 
 #Instrument Map, matching products to instrument
-declare -A INSTRUMENT
-INSTRUMENT['RAD']='ABI'
-INSTRUMENT['GEOF']='MAG'
-INSTRUMENT['SFEU']='EXIS'
-INSTRUMENT['SFXR']='EXIS'
-INSTRUMENT['EHIS']='SEIS'
-INSTRUMENT['MPSL']='SEIS'
-INSTRUMENT['MPSH']='SEIS'
-INSTRUMENT['SGPS']='SEIS'
-INSTRUMENT['FE093']='SUVI'
-INSTRUMENT['FE131']='SUVI'
-INSTRUMENT['FE171']='SUVI'
-INSTRUMENT['FE195']='SUVI'
-INSTRUMENT['FE284']='SUVI'
-INSTRUMENT['HE303']='SUVI'
-INSTRUMENT['LCFA']='GLM'
-INSTRUMENT['FED']='GLM'
+declare -A INSTRUMENT=( \
+  ['RAD']='ABI' \
+  ['GEOF']='MAG' \
+  ['SFEU']='EXIS' \
+  ['SFXR']='EXIS' \
+  ['EHIS']='SEIS' \
+  ['MPSL']='SEIS' \
+  ['MPSH']='SEIS' \
+  ['SGPS']='SEIS' \
+  ['FE093']='SUVI' \
+  ['FE131']='SUVI' \
+  ['FE171']='SUVI' \
+  ['FE195']='SUVI' \
+  ['FE284']='SUVI' \
+  ['HE303']='SUVI' \
+  ['LCFA']='GLM' \
+  ['FED']='GLM' \
+)
 
 function getInstrument() {
   echo ${INSTRUMENT[${1^^}]:-"ABI"}
@@ -669,115 +670,97 @@ function legacy_v2_get_on_prem_products() {
 }
 
 function get_on_prem_products() {
-  info "Starting On-Prem Retrieval (Mirroring GCCS structure 1-to-1)"
+  info "Starting On-Prem Retrieval (Mapping 1-to-1 with GCCS)"
   local timestamp=$1
   local thread_count=0
+  local hour_part=${timestamp:7:2}
 
-  # Step 1: Find all GCCS 'leaf' directories (YYYY/DDD) to mirror
+  # --- STEP 1: PRE-DOWNLOAD TARBALLS (SEQUENTIAL) ---
+  # We identify all unique Sat/Day combinations needed from the GCCS folders
+  info "Checking for required IP tarballs..."
+  declare -A required_tarballs
+
+  while read -r gccs_leaf; do
+    local rel_path=${gccs_leaf#$gccs_path/}
+    local instrument=$(echo "$rel_path" | cut -d/ -f1)
+    [[ "$instrument" != "ABI" ]] && continue
+
+    local day_of_year=$(echo "$rel_path" | cut -d/ -f4)
+
+    for satellite_number in 18 19; do
+      local satellite_id="GOES-${satellite_number}"
+      local tar_name="${satellite_id}_ABI_L2_IntermediateProducts_day${day_of_year}_hour${hour_part}.tar"
+      required_tarballs["$tar_name"]="$satellite_id"
+    done
+  done < <(find "$gccs_path" -type d -links 2)
+
+  for tar_name in "${!required_tarballs[@]}"; do
+    if [[ ! -f "$prem_path/$tar_name" ]]; then
+      local satellite_id=${required_tarballs[$tar_name]}
+      local egress_url="s3://geoegress/egresout/DOE1L2IP/${satellite_id}/${tar_name}"
+      verbose "Downloading IP Tarball: $tar_name"
+      aws s3 cp --profile geocloud "$egress_url" "$prem_path/" $S3_PROGRESS > /dev/null 2>&1
+    else
+      debug "Tarball $tar_name already exists, skipping download."
+    fi
+  done
+
+  # --- STEP 2: PARALLEL RETRIEVAL & EXTRACTION ---
+  info "Mirroring folders and extracting files..."
   local gccs_leaf_directories
   gccs_leaf_directories=$(find "$gccs_path" -type d -links 2)
 
-  if [[ -z "$gccs_leaf_directories" ]]; then
-    WARN "No GCCS data found in $gccs_path. Skipping On-Prem retrieval."
-    return
-  fi
-
   for gccs_dir in $gccs_leaf_directories; do
     (
-      # Extract relative path (e.g., ABI/dmwf-c02/2026/059)
       local relative_path=${gccs_dir#$gccs_path/}
-
-      # Mirror the path exactly in the 'prem' folder for Glance 1-to-1 compatibility
       local prem_destination="${prem_path}/${relative_path}"
       mkdir -p "$prem_destination"
 
-      # Parse the folder structure for S3 search parameters
       local instrument=$(echo "$relative_path" | cut -d/ -f1)
       local folder_name=$(echo "$relative_path" | cut -d/ -f2)
       local year=$(echo "$relative_path" | cut -d/ -f3)
       local day_of_year=$(echo "$relative_path" | cut -d/ -f4)
 
-      # --- PATTERN PARSING ---
-      # folder_name: 'dmwf-c02' -> product_base: 'DMWF', channel_part: 'C02'
       local channel_part=""
       [[ "$folder_name" == *"-c"* ]] && channel_part="C${folder_name#*-c}"
-
       local product_base="${folder_name%%-*}"
       product_base=${product_base^^}
 
-      # --- 1. RETRIEVE STANDARD PRODUCTS (ABI-L2-...) ---
-      local gpas_date_string
-      gpas_date_string=$(date --date="jan 1 + $day_of_year days - 1 days" +"%b/%Y%m%d" | tr '[:upper:]' '[:lower:]')
-
       for satellite_number in 18 19; do
         local satellite_id="GOES-${satellite_number}"
+
+        # 1. Standard Product Sync
+        local gpas_date_string=$(date --date="jan 1 + $day_of_year days - 1 days" +"%b/%Y%m%d" | tr '[:upper:]' '[:lower:]')
         local standard_include="*ABI-L2-${product_base}*${channel_part}*G${satellite_number}_s${timestamp}*"
         local gpas_prefix="op/${satellite_id}/${lvl:-l2}/${instrument/SEIS/SEISS}/${year}/${gpas_date_string}/"
 
-        verbose "Syncing Standard On-Prem: ${satellite_id} ${folder_name}"
         aws s3 sync "s3://${PREM}/${gpas_prefix}" "$prem_destination" \
           --profile geocloud --exclude "*" --include "$standard_include" \
           $S3_PROGRESS > /dev/null
 
-        # Fallback to NODD for Standard Products
-        if [[ -z "$(ls -A "$prem_destination" | grep "ABI-L2")" ]] || $force_nodd; then
-          local product_short_name="${product_base%[FCM12]*}"
-          local nodd_prefix="${instrument}-${lvl:-L2}-${product_short_name}/${year}/${day_of_year}/"
-          aws s3 sync "s3://noaa-goes${satellite_number}/${nodd_prefix}" "$prem_destination" \
-            --no-sign-request --exclude "*" --include "$standard_include" \
-            --no-progress $S3_PROGRESS > /dev/null
-        fi
-
-        # --- 2. RETRIEVE INTERMEDIATE PRODUCTS (I_ABI-L2-...) ---
-        # Only process IP if we are dealing with ABI L2 context
+        # 2. IP Extraction (Uses the tarballs downloaded in Step 1)
         if [[ "$instrument" == "ABI" ]]; then
-          local hour_part=${timestamp:7:2}
           local tar_name="${satellite_id}_ABI_L2_IntermediateProducts_day${day_of_year}_hour${hour_part}.tar"
-          local egress_url="s3://geoegress/egresout/DOE1L2IP/${satellite_id}/${tar_name}"
-
-          # Download tarball once to the root prem folder to share across threads
-          if [[ ! -f "$prem_path/$tar_name" ]]; then
-             verbose "Retrieving $tar_name from $egress_url"
-             aws s3 cp --profile geocloud "$egress_url" "$prem_path/" $S3_PROGRESS > /dev/null 2>&1
-          fi
-
           if [[ -f "$prem_path/$tar_name" ]]; then
             local ip_include="*I_ABI-L2-${product_base}*${channel_part}*G${satellite_number}_s${timestamp}*"
-            # Convert glob to regex for grep
             local grep_pattern=$(echo "$ip_include" | sed 's/\*/.*/g')
             local matched_file_path=$(tar -tf "$prem_path/$tar_name" | grep -m 1 -E "$grep_pattern")
 
             if [[ -n "$matched_file_path" ]]; then
-              debug "Extracting IP file $matched_file_path into $folder_name"
-
-              # Calculate how many directories to strip from the internal tar path
               local component_count=$(echo "$matched_file_path" | tr -cd '/' | wc -c)
-
-              # Extract specifically that file and chop all internal directories
-              tar -xf "$prem_path/$tar_name" \
-                -C "$prem_destination" \
-                --strip-components="$component_count" \
-                "$matched_file_path"
+              tar -xf "$prem_path/$tar_name" -C "$prem_destination" --strip-components="$component_count" "$matched_file_path"
             fi
           fi
         fi
       done
     ) &
 
-    # Thread management (Semaphore)
     ((thread_count++))
-    if [[ $thread_count -ge $MAXTHREADS ]]; then
-      wait -n
-      ((thread_count--))
-    fi
+    if [[ $thread_count -ge $MAXTHREADS ]]; then wait -n; ((thread_count--)); fi
   done
 
   wait
-
-  # Final count and cleanup
-  local total_prem_files
-  total_prem_files=$(find "$prem_path" -type f | wc -l)
-  info "On-Prem retrieval complete. Standard and IP files are co-located. Total files: $total_prem_files"
+  info "On-Prem retrieval complete."
 }
 
 ####### ----- ANALYZE ---- #######
@@ -804,7 +787,7 @@ function run_metadata_analysis() {
   (cd $analysis_path; tar cfz metadata.tar.gz metadata; rm -rf $metadata_path)
 }
 
-function run_glance_collocation_analysis() {
+function legacy_run_glance_collocation_analysis() {
   product=$1
   debug dmw processing $product
   $TOOL_DEBUG && local debug_flag="--verbose"
@@ -869,7 +852,114 @@ function run_glance_collocation_analysis() {
   rm -rf $tmp_dir
 }
 
-function run_glance_analysis() {
+function run_glance_collocation_analysis() {
+  local product_path=$1
+  info "Starting Glance Collocation Analysis for: $(basename "$product_path")"
+
+  local thread_count=0
+  local tool_debug_flag=""
+  $TOOL_DEBUG && tool_debug_flag="--verbose"
+
+  # 1. Setup temporary workspace
+  # We use the product folder name to keep temp files separated
+  local product_folder_name=$(basename "$product_path")
+  local collocation_tmp_dir="${gccs_path/gccs/tmp_coll}/${product_folder_name}"
+  mkdir -p "$collocation_tmp_dir"
+
+  # Find every .nc file in the GCCS product directory
+  # Note: find is used to get the full path to files in year/doy subdirs
+  while read -r gccs_file; do
+    (
+      debug "Processing GCCS file: $(basename "$gccs_file")"
+
+      # 2. Identify the matching On-Prem file
+      # We look for a file with the same base naming convention (up to the end time)
+      local file_basename=$(basename "$gccs_file")
+      local search_target="${file_basename%"_e"*}"
+
+      # Mirroring the 1-to-1 path logic we built earlier
+      local prem_dir=$(dirname "${gccs_file/gccs/prem}")
+      local prem_file=$(find "$prem_dir" -name "${search_target}*" -type f | head -n 1)
+
+      if [[ -z "$prem_file" ]]; then
+        WARN "No matching On-Prem file found for $search_target in $prem_dir"
+        return
+      fi
+
+      # 3. Pre-check for Winds (h5ls)
+      # Optimization: Skip collocation if files are empty/corrupt to save subshell time
+      local no_winds_pattern="\{0/Inf\}"
+      if [[ $(h5ls "$prem_file/lon" 2>/dev/null) =~ $no_winds_pattern || \
+            $(h5ls "$gccs_file/lon" 2>/dev/null) =~ $no_winds_pattern ]]; then
+        WARN "No winds reported in either $(basename "$prem_file") or $(basename "$gccs_file")"
+        return
+      fi
+
+      # 4. Execute Glance Collocate
+      verbose "Collocating $(basename "$gccs_file") with $(basename "$prem_file")"
+
+      local collocate_output
+      collocate_output=$($glance collocate $tool_debug_flag \
+        -c "$glance_cfg/dmw_collocate.py" \
+        -p "$collocation_tmp_dir" \
+        "$gccs_file" "$prem_file" 2>&1)
+
+      if (( $? != 0 )); then
+        WARN "Glance collocate failed for $(basename "$gccs_file"):\n$collocate_output"
+        return
+      fi
+
+      # 5. Move collocated files to structured directories
+      # We move them to a 'coll' tree that mirrors the 'gccs'/'prem' tree
+      local collocated_gccs_dest=$(dirname "${gccs_file/gccs/coll_gccs}")
+      local collocated_prem_dest=$(dirname "${gccs_file/gccs/coll_prem}")
+      mkdir -p "$collocated_gccs_dest" "$collocated_prem_dest"
+
+      # Glance appends '-collocated' to the filename; we find and move them
+      local collocated_gccs_file=$(find "$collocation_tmp_dir" -name "$(basename "${gccs_file/.nc/}")-collocated.nc")
+      local collocated_prem_file=$(find "$collocation_tmp_dir" -name "$(basename "${prem_file/.nc/}")-collocated.nc")
+
+      [[ -f "$collocated_gccs_file" ]] && mv "$collocated_gccs_file" "$collocated_gccs_dest/${file_basename}"
+      [[ -f "$collocated_prem_file" ]] && mv "$collocated_prem_file" "$collocated_prem_dest/$(basename "$prem_file")"
+
+    ) &
+
+    # Thread management
+    ((thread_count++))
+    if [[ $thread_count -ge $MAXTHREADS ]]; then wait -n; ((thread_count--)); fi
+  done < <(find "$product_path" -type f -name "*.nc")
+
+  wait
+
+  # 6. Run Final Glance Report on Collocated Folders
+  # We look for the newly created 'coll_prem' leaf directories
+  local leaf_dirs
+  leaf_dirs=$(find "${product_path/gccs/coll_prem}" -type d -links 2 2>/dev/null)
+
+  for prem_coll_dir in $leaf_dirs; do
+    local gccs_coll_dir="${prem_coll_dir/coll_prem/coll_gccs}"
+    local report_dest="${prem_coll_dir/coll_prem/glance_reports}"
+    mkdir -p "$report_dest"
+
+    verbose "Generating DMW Glance report: $report_dest"
+
+    local report_output
+    report_output=$($glance report $tool_debug_flag \
+      -c "$glance_cfg/dmw_report.py" \
+      -p "$report_dest" \
+      --stripfromname "e.*" \
+      "$prem_coll_dir" "$gccs_coll_dir" 2>&1)
+
+    if (( $? != 0 )); then
+      WARN "Glance report failed for $report_dest:\n$report_output"
+    fi
+  done
+
+  # Cleanup temp files for this product
+  rm -rf "$collocation_tmp_dir"
+}
+
+function legacy_run_glance_analysis() {
   info "Generating Glance Reports"
   local thread_count=0
 
@@ -877,8 +967,6 @@ function run_glance_analysis() {
     product=$(dirname $(dirname $product)) #remove yyyy/ddd
 
     glance_report=${product/gccs/glance_reports}; debug glance_report=$glance_report
-    # skip if already run
-#    [[ -d "$glance_report" && "$(ls -A "$glance_report")" ]] && continue
 
     (
     # execute specialized glance procedures for dmw
@@ -903,6 +991,79 @@ function run_glance_analysis() {
   debug $summarizer -t $analysis_path $analysis_path/glance_summary.csv
   $summarizer -t $analysis_path $analysis_path/glance_summary.csv
   (cd $analysis_path; tar cfz glance_reports.tar.gz glance_reports)
+}
+
+function run_glance_analysis() {
+  info "Generating Glance Reports"
+  local thread_count=0
+  export MPLBACKEND=Agg # Force non-interactive backend to save resources
+
+  # Track products already handled by specialized logic to avoid redundant calls
+  declare -A specialized_processed
+
+  # Find all leaf directories in GCCS (the YYYY/DDD folders)
+  while read -r gccs_product_dir; do
+    # Example: gccs_product_dir is .../gccs/ABI/dmwf-c02/2026/059
+    # We navigate up to get the base product path: .../gccs/ABI/dmwf-c02
+    local product_base_path=$(dirname $(dirname "$gccs_product_dir"))
+    local product_name=$(basename "$product_base_path")
+
+    # --- 1. SPECIALIZED DMW HANDLING ---
+    if [[ "${product_name,,}" =~ "dmw" ]]; then
+      # If we haven't launched the collocation for this whole product yet, do it now
+      if [[ -z "${specialized_processed[$product_base_path]}" ]]; then
+        ( run_glance_collocation_analysis "$product_base_path" ) &
+        specialized_processed["$product_base_path"]=1
+
+        ((thread_count++))
+        if [[ $thread_count -ge $MAXTHREADS ]]; then wait -n; ((thread_count--)); fi
+      fi
+      # Skip standard report processing for this specific leaf directory
+      continue
+    fi
+
+    # --- 2. STANDARD PRODUCT HANDLING (ACM, ACH, etc.) ---
+    (
+      local report_dest="${gccs_product_dir/gccs/glance_reports}"
+      local prem_source_dir="${gccs_product_dir/gccs/prem}"
+      mkdir -p "$report_dest"
+
+      verbose "Running Standard Glance Report: $product_name (Process Isolated)"
+
+      # Use env to isolate the python environment and avoid figure-limit errors
+      # Redirect output to null to keep the terminal clean per your earlier preference
+      local report_err
+      report_err=$(env MPLBACKEND=Agg $glance report $tool_debug_flag \
+        --nolonlat $glance_flags \
+        -p "$report_dest" \
+        "$prem_source_dir" "$gccs_product_dir" \
+        --stripfromname "e.*" 2>&1)
+
+      if [[ $? -ne 0 ]]; then
+        WARN "Glance report failed for $product_name at $(basename "$gccs_product_dir"):\n$report_err"
+      fi
+    ) &
+
+    ((thread_count++))
+    if [[ $thread_count -ge $MAXTHREADS ]]; then
+      wait -n
+      ((thread_count--))
+      # Small sleep to let the OS clear file handles/memory after a batch
+      sleep 1
+    fi
+  done < <(find "$gccs_path" -type d -links 2 ! -empty)
+
+  wait
+
+  # 3. SUMMARY AND PACKAGING
+  verbose "Summarizing Glance Reports"
+  local summarizer=$pave_bin/glance_summarize/glance_stats.py
+
+  # Ensure the summarizer is called on the overall analysis path
+  $summarizer -t "$analysis_path" "$analysis_path/glance_summary.csv"
+
+  (cd "$analysis_path" && tar cfz glance_reports.tar.gz glance_reports)
+  info "Glance analysis complete. Summary created at $analysis_path/glance_summary.csv"
 }
 
 ####### ----- TEST ----- #######
@@ -977,6 +1138,8 @@ product_names=("$@"); debug "product list: ${product_names[@]}"
 if $DEBUG; then S3_PROGRESS=""; fi
 
 info "Starting Product Validation"
+
+# read in config
 if [[ -n $config && -f $config ]]; then
   debug "sourcing config file: $config"
   source $config
@@ -991,9 +1154,9 @@ else
   MAXTHREADS=4
 fi
 
-####### ----- TEST ----- #######
+####### -----INTERNAL TEST ----- #######
 if $TEST; then set_test; fi
-####### ----- TEST ----- #######
+####### -----INTERNAL TEST ----- #######
 
 if [[ -z $date_hour ]]; then info "date_hour required\n"; print_help $PROGRAM; exit 1; fi
 if [ ${#product_names[@]} -eq 0 ]; then info "include prod names to best knowledge\n"; print_help; exit 1; fi
@@ -1001,9 +1164,8 @@ if [ ${#product_names[@]} -eq 0 ]; then info "include prod names to best knowled
 IFS=',' read -ra dates <<< "$date_hour"; date_hour="${dates[0]}"
 set_paths $date_hour
 
-for timestamp in ${dates[@]}; do
-  if $run_gccs; then get_gccs_products $timestamp "product_names"; fi
-done
+# only the retrieval of the gccs data requires to loop through timestamps, remaining functions driven by collected data
+if $run_gccs; then for timestamp in ${dates[@]}; do get_gccs_products $timestamp "product_names"; done; fi
 if $run_prem; then get_on_prem_products $date_hour "product_names"; fi
 
 if $run_metadata; then run_metadata_analysis; fi
