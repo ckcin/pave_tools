@@ -670,94 +670,121 @@ function legacy_v2_get_on_prem_products() {
 }
 
 function get_on_prem_products() {
-  info "Starting On-Prem Retrieval (Mapping 1-to-1 with GCCS)"
-  local timestamp=$1
+  info "Starting On-Prem Retrieval (File-by-File Mirroring with Existence Checks)"
+  local date_hour=$1
   local thread_count=0
-  local hour_part=${timestamp:7:2}
-
-  # --- STEP 1: PRE-DOWNLOAD TARBALLS (SEQUENTIAL) ---
-  # We identify all unique Sat/Day combinations needed from the GCCS folders
+  
+  # --- STEP 1: PRE-DOWNLOAD TARBALLS (SEQUENTIAL & PROTECTED) ---
+  # We identify unique tarballs needed and only download if they are missing/empty.
   info "Checking for required IP tarballs..."
   declare -A required_tarballs
 
-  while read -r gccs_leaf; do
-    local rel_path=${gccs_leaf#$gccs_path/}
-    local instrument=$(echo "$rel_path" | cut -d/ -f1)
-    [[ "$instrument" != "ABI" ]] && continue
+  # Discovery loop for tarball requirements
+  while read -r gccs_file; do
+    local filename=$(basename "$gccs_file")
+    if [[ "$filename" =~ $GOES_FILE_PATTERN ]]; then
+      local satellite_number="${BASH_REMATCH[6]}"
+      local start_time="${BASH_REMATCH[7]}"
+      local day_of_year="${start_time:4:3}"
+      local hour_part="${start_time:7:2}"
+      local tar_name="GOES-${satellite_number}_ABI_L2_IntermediateProducts_day${day_of_year}_hour${hour_part}.tar"
+      required_tarballs["$tar_name"]="GOES-${satellite_number}"
+    fi
+  done < <(find "$gccs_path" -type f -name "*I_ABI*")
 
-    local day_of_year=$(echo "$rel_path" | cut -d/ -f4)
-
-    for satellite_number in 18 19; do
-      local satellite_id="GOES-${satellite_number}"
-      local tar_name="${satellite_id}_ABI_L2_IntermediateProducts_day${day_of_year}_hour${hour_part}.tar"
-      required_tarballs["$tar_name"]="$satellite_id"
-    done
-  done < <(find "$gccs_path" -type d -links 2)
-
+  # Manual "Sync" logic for specific tarball files
   for tar_name in "${!required_tarballs[@]}"; do
-    if [[ ! -f "$prem_path/$tar_name" ]]; then
-      local satellite_id=${required_tarballs[$tar_name]}
-      local egress_url="s3://geoegress/egresout/DOE1L2IP/${satellite_id}/${tar_name}"
-      verbose "Downloading IP Tarball: $tar_name"
-      aws s3 cp --profile geocloud "$egress_url" "$prem_path/" $S3_PROGRESS > /dev/null 2>&1
-    else
-      debug "Tarball $tar_name already exists, skipping download."
+    local local_tar_path="${prem_path}/${tar_name}"
+    
+    # Check if file exists and is not 0 bytes
+    if [[ -s "$local_tar_path" ]]; then
+      debug "IP Tarball already exists: $tar_name (Skipping download)"
+      continue
+    fi
+
+    local satellite_id=${required_tarballs[$tar_name]}
+    local egress_url="s3://geoegress/egresout/DOE1L2IP/${satellite_id}/${tar_name}"
+    
+    verbose "Downloading missing IP Tarball: $tar_name"
+    mkdir -p "$prem_path"
+    aws s3 cp --profile geocloud "$egress_url" "$local_tar_path" $S3_PROGRESS > /dev/null 2>&1
+    
+    if [[ $? -ne 0 ]]; then
+      WARN "Failed to retrieve tarball from $egress_url. IP matching for this hour may fail."
     fi
   done
 
-  # --- STEP 2: PARALLEL RETRIEVAL & EXTRACTION ---
-  info "Mirroring folders and extracting files..."
-  local gccs_leaf_directories
-  gccs_leaf_directories=$(find "$gccs_path" -type d -links 2)
-
-  for gccs_dir in $gccs_leaf_directories; do
+  # --- STEP 2: PARALLEL FILE-BY-FILE MATCHING ---
+  info "Matching On-Prem files to GCCS local inventory..."
+  while read -r gccs_file; do
     (
-      local relative_path=${gccs_dir#$gccs_path/}
-      local prem_destination="${prem_path}/${relative_path}"
+      local filename=$(basename "$gccs_file")
+      [[ "$filename" =~ $GOES_FILE_PATTERN ]] || return
+      
+      local instrument="${BASH_REMATCH[1]}"
+      local level="${BASH_REMATCH[2]}"
+      local product_base="${BASH_REMATCH[3]}"
+      local satellite_number="${BASH_REMATCH[6]}"
+      local start_time="${BASH_REMATCH[7]}"
+      
+      # Determine destination by mirroring GCCS relative path
+      local relative_dir=$(dirname "${gccs_file#$gccs_path/}")
+      local prem_destination="${prem_path}/${relative_dir}"
       mkdir -p "$prem_destination"
 
-      local instrument=$(echo "$relative_path" | cut -d/ -f1)
-      local folder_name=$(echo "$relative_path" | cut -d/ -f2)
-      local year=$(echo "$relative_path" | cut -d/ -f3)
-      local day_of_year=$(echo "$relative_path" | cut -d/ -f4)
+      # Existence Check: Skip if the file already exists locally
+      local search_target="${filename%"_e"*}"
+      if ls "${prem_destination}/${search_target}"* 1> /dev/null 2>&1; then
+        debug "On-Prem file pair already exists for $search_target (Skipping)"
+        return
+      fi
 
-      local channel_part=""
-      [[ "$folder_name" == *"-c"* ]] && channel_part="C${folder_name#*-c}"
-      local product_base="${folder_name%%-*}"
-      product_base=${product_base^^}
+      local satellite_id="GOES-${satellite_number}"
+      
+      # --- CASE 1: Intermediate Product (I_ABI) ---
+      if [[ "$filename" == *"I_ABI"* ]]; then
+        local day_of_year="${start_time:4:3}"
+        local hour_part="${start_time:7:2}"
+        local tar_name="${satellite_id}_ABI_L2_IntermediateProducts_day${day_of_year}_hour${hour_part}.tar"
+        local local_tar_path="${prem_path}/${tar_name}"
+        
+        if [[ -f "$local_tar_path" ]]; then
+          local grep_pattern=$(echo "${search_target}*" | sed 's/\*/.*/g')
+          local matched_file_path=$(tar -tf "$local_tar_path" | grep -m 1 -E "$grep_pattern")
 
-      for satellite_number in 18 19; do
-        local satellite_id="GOES-${satellite_number}"
+          if [[ -n "$matched_file_path" ]]; then
+            local component_count=$(echo "$matched_file_path" | tr -cd '/' | wc -c)
+            tar -xf "$local_tar_path" -C "$prem_destination" --strip-components="$component_count" "$matched_file_path"
+          fi
+        fi
 
-        # 1. Standard Product Sync
-        local gpas_date_string=$(date --date="jan 1 + $day_of_year days - 1 days" +"%b/%Y%m%d" | tr '[:upper:]' '[:lower:]')
-        local standard_include="*ABI-L2-${product_base}*${channel_part}*G${satellite_number}_s${timestamp}*"
-        local gpas_prefix="op/${satellite_id}/${lvl:-l2}/${instrument/SEIS/SEISS}/${year}/${gpas_date_string}/"
+      # --- CASE 2: Standard Product ---
+      else
+        local year="${start_time:0:4}"
+        local day_of_year="${start_time:4:3}"
+        local gpas_date=$(date --date="jan 1 + $day_of_year days - 1 days" +"%b/%Y%m%d" | tr '[:upper:]' '[:lower:]')
+        
+        local standard_include="${search_target}*"
+        local gpas_prefix="op/${satellite_id}/${level,,}/${instrument/SEIS/SEISS}/${year}/${gpas_date}/"
 
         aws s3 sync "s3://${PREM}/${gpas_prefix}" "$prem_destination" \
           --profile geocloud --exclude "*" --include "$standard_include" \
           $S3_PROGRESS > /dev/null
 
-        # 2. IP Extraction (Uses the tarballs downloaded in Step 1)
-        if [[ "$instrument" == "ABI" ]]; then
-          local tar_name="${satellite_id}_ABI_L2_IntermediateProducts_day${day_of_year}_hour${hour_part}.tar"
-          if [[ -f "$prem_path/$tar_name" ]]; then
-            local ip_include="*I_ABI-L2-${product_base}*${channel_part}*G${satellite_number}_s${timestamp}*"
-            local grep_pattern=$(echo "$ip_include" | sed 's/\*/.*/g')
-            local matched_file_path=$(tar -tf "$prem_path/$tar_name" | grep -m 1 -E "$grep_pattern")
-
-            if [[ -n "$matched_file_path" ]]; then
-              local component_count=$(echo "$matched_file_path" | tr -cd '/' | wc -c)
-              tar -xf "$prem_path/$tar_name" -C "$prem_destination" --strip-components="$component_count" "$matched_file_path"
-            fi
-          fi
+        # Fallback to NODD
+        if [[ -z "$(ls -A "$prem_destination" 2>/dev/null | grep "$search_target")" ]] || $force_nodd; then
+          local product_short="${product_base%[FCM12]*}"
+          local nodd_prefix="${instrument}-${level}-${product_short}/${year}/${day_of_year}/"
+          aws s3 sync "s3://noaa-goes${satellite_number}/${nodd_prefix}" "$prem_destination" \
+            --no-sign-request --exclude "*" --include "$standard_include" \
+            --no-progress $S3_PROGRESS > /dev/null
         fi
-      done
+      fi
     ) &
 
     ((thread_count++))
     if [[ $thread_count -ge $MAXTHREADS ]]; then wait -n; ((thread_count--)); fi
-  done
+  done < <(find "$gccs_path" -type f -name "*.nc")
 
   wait
   info "On-Prem retrieval complete."
