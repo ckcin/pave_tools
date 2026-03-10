@@ -67,7 +67,8 @@ function debug() {
 ####### ----- comparison utils ----- #######
 function collect_group() {
 #  ncdump -h $3 | sed -n "/$1/,/$2/{/$1/!{/$2/!p}}" | sort
-  ncks -mM $3 | sed -n "/$1/,/$2/{/$1/!{/$2/!p}}"
+#  ncks -mM $3 | sed -n "/$1/,/$2/{/$1/!{/$2/!p}}"
+  ncdump -h "$3" | sed -n "/$1/,/$2/{/$1/!{/$2/!p}}" | sed 's/^[[:space:]]*//' | grep -v '^$' | sort
 }
 
 function compare_group() {
@@ -76,7 +77,7 @@ function compare_group() {
   local -n gccs_group=$3
   local -n group_results=$4
 
-  local differ=$(diff -q -w <(echo "$prem_group") <(echo "$gccs_group"))
+  local differ=$(diff -q -w <(echo -e "$prem_group" | sort -t'=' -k1) <(echo -e "$gccs_group" | sort -t'=' -k1))
   if [[ -n $differ ]]; then
     debug members of $group_name differ
 
@@ -150,7 +151,8 @@ function get_variable_list() {
 }
 
 function collect_variable() {
-  ncks -Cmv $1 $2 | grep $1: | sort
+#  ncks -Cmv $1 $2 | grep $1: | sort
+  ncdump -h "$2" | grep "^[[:space:]]*$1:" | sed 's/^[[:space:]]*//' | sort
 }
 
 function compare_variables() {
@@ -234,7 +236,7 @@ function collect_metadata() {
 PROGRAM=$(basename "$0")
 OVERWRITE=false
 
-ARGS=$(getopt -o OhvdSt --long overwrite,help,vebose,debug,silent,test -- "$@")
+ARGS=$(getopt -o OhvdSt --long overwrite,help,verbose,debug,silent,test -- "$@")
 eval set -- ${ARGS}
 while :
 do
@@ -242,7 +244,7 @@ do
     -O | --overwrite ) OVERWRITE=true; shift ;;
 
     -h | --help   ) print_help $prog ;;
-    -v | --vebose ) VERBOSE=true; shift ;;
+    -v | --verbose ) VERBOSE=true; shift ;;
     -d | --debug  ) DEBUG=true; VERBOSE=true; shift ;;
     -S | --silent ) SILENT=true; VERBOSE=false; DEBUG=false; shift ;;
     -t | --test   ) TEST=true; DEBUG=true; VERBOSE=true; shift ;;
