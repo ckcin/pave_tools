@@ -114,7 +114,7 @@ base_alg_products = {
     "SWRU": ["SFC_Up","SFC_Up_IC","SFC_Up_OS","SFC_Up_SF","SFC_Up_WC","TOA_Up_IC","TOA_Up_OS","TOA_Up_SF","TOA_Up_WC"],
     "TPW": ["DQF_Overall","DQF_Retrieval","DQF_SkinTemp","TPW"],
 
-#    "RAD": [],
+    "RAD": ["RAD", "DQF"],
     "GEOF": ["DQF","IB_data","IB_mag_ACRF","IB_mag_BRF","IB_mag_ECI","IB_mag_EPN","OB_data","OB_mag_ACRF","OB_mag_BRF","OB_mag_ECI","OB_mag_EPN","total_mag_ACRF"],
 #    "SFEU": [],
 #    "SFXR": [].
