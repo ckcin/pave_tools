@@ -1167,6 +1167,7 @@ if $DEBUG; then S3_PROGRESS=""; fi
 info "Starting Product Validation"
 
 # read in config
+debug "processing config $config or checking $SCRIPT_DIR"
 if [[ -n $config && -f $config ]]; then
   debug "sourcing config file: $config"
   source $config
@@ -1174,11 +1175,15 @@ elif [ -f  $SCRIPT_DIR/config.sh ]; then
   debug "sourcing config file: $config"
   source $SCRIPT_DIR/config.sh
 else
+  hostname=$(uname -n)
+  if [ -f $SCRIPT_DIR/$hostname.sh ]; then 
+    source  $SCRIPT_DIR/$hostname.sh
+  fi
   # Paths to PAVE scripts/tools
-  pave_bin=$SCRIPT_DIR
-  glance_cfg=$pave_bin/glance_summarize/configuration
-  analysis_path=$PWD/YYYYDDDhh
-  MAXTHREADS=4
+#  pave_bin=$SCRIPT_DIR
+#  glance_cfg=$pave_bin/glance_summarize/configuration
+#  analysis_path=$PWD/YYYYDDDhh
+#  MAXTHREADS=4
 fi
 
 ####### -----INTERNAL TEST ----- #######
