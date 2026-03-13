@@ -312,8 +312,8 @@ function get_gccs_products() {
     local satellite_id="GOES-${satellite_number}"
 
     for product_base in "${products_ref[@]}"; do
-      local instrument=$(getInstrument "$product_base")
-      local level=$(getLevel "$product_base")
+      local instrument=$(getInstrument "$product_base"); debug instrument=$instrument
+      local level=$(getLevel "$product_base"); debug level=$level
 
       # Prefix for discovery: GCCS/op/GOES-18/L2/ABI/dmw
       local s3_discovery_prefix="${GCCS_BASE_PREFIX}/${satellite_id}/${level}/${instrument}/${product_base,,}"
