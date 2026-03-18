@@ -65,7 +65,7 @@ function print_help {
   printf "%s validates products produced by GCCS against on-prem products\n" $PROGRAM
 
   printf "\nArguments:\n"
-  printf "  %-20s %s\n" "<date_hour>" "date for data collection, format YYYYDDDHH[M], add M for single timeline"
+  printf "  %-20s %s\n" "<date_hour[,date_hour,more]>" "date for data collection, format YYYYDDDHH[M], add M for single timeline"
   printf "  %-20s %s\n" "<product(s)>" "list of products to validate"
 
   printf "\nOptions:\n"
@@ -138,6 +138,17 @@ function catch() {
 }
 
 ####### ----- script functions ----- ######
+
+# clean up util
+function prune_empty_folders() {
+  local target_dir=$1
+  if [[ -d "$target_dir" ]]; then
+    verbose "Pruning empty directories in $target_dir"
+    # Find directories, sort by depth (deepest first) to ensure parent
+    # directories are caught if their children were the only things in them.
+    find "$target_dir" -type d -empty -delete
+  fi
+}
 
 # analysis directory setup
 function set_paths {
@@ -297,7 +308,7 @@ function legacy_get_gccs_products() {
   done
 }
 
-function get_gccs_products() {
+function legacy_v2_get_gccs_products() {
   info "Starting GCCS Retrieval (Standard & IP Discovery for L2)"
   local timestamp=$1
   local -n products_ref=$2
@@ -410,6 +421,73 @@ function get_gccs_products() {
   wait
 
   find "$gccs_path" -type d -empty -delete
+  info "GCCS retrieval complete."
+}
+
+function get_gccs_products() {
+  info "Starting GCCS Retrieval (Process-Safe Discovery)"
+  local timestamp=$1
+  local -n products_ref=$2
+  local year=${timestamp:0:4}
+  local day_of_year=${timestamp:4:3}
+
+  for satellite_number in 18 19; do
+    local satellite_id="GOES-${satellite_number}"
+    for product_base in "${products_ref[@]}"; do
+      local instrument=$(getInstrument "$product_base")
+      local level=$(getLevel "$product_base")
+
+      local discovery_root="${GCCS_BASE_PREFIX}/${satellite_id}/${level}/${instrument}/"
+
+      # Step 1: Discover scenes
+      local matched_scenes
+      matched_scenes=$(aws s3api list-objects-v2 --profile geocloud \
+        --bucket "$GCCS" --prefix "$discovery_root${product_base,,}" \
+        --delimiter "/" --query "CommonPrefixes[].Prefix" --output text | tr '\t' '\n')
+
+      [[ -z "$matched_scenes" || "$matched_scenes" == "None" ]] && continue
+
+      for scene_prefix in $matched_scenes; do
+        local full_product_name=$(basename "$scene_prefix")
+        local channels=("none")
+        [[ "$full_product_name" == *"cmi"* ]] && channels=( ${ABI_CHANNEL_LIST[@]} )
+
+        for chan in "${channels[@]}"; do
+          local remote_prefix="$scene_prefix"
+          local local_folder="$full_product_name"
+
+          if [[ "$chan" != "none" ]]; then
+            remote_prefix="${scene_prefix}${full_product_name}-c${chan}/"
+            local_folder="${full_product_name}-c${chan}"
+          fi
+
+          # Sync to the product root folder to avoid YYYY/ddd/YYYY/ddd duplication
+          local sync_dest="${gccs_path}/${instrument}/${local_folder}"
+          local local_dest="${sync_dest}/${year}/${day_of_year}"
+          mkdir -p "$local_dest"
+
+          (
+            verbose "Syncing GCCS: $local_folder -> $local_dest"
+            aws s3 sync "s3://${GCCS}/${remote_prefix}" "$sync_dest/" \
+              --profile geocloud --exclude "*" --include "*_s${timestamp}*" \
+              $S3_PROGRESS > /dev/null
+
+            if [[ "$level" == "L2" ]]; then
+              aws s3 sync "s3://${GCCS_IP}/${remote_prefix}" "$sync_dest/" \
+                --profile geocloud --exclude "*" --include "*_s${timestamp}*" \
+                $S3_PROGRESS > /dev/null 2>/dev/null
+            fi
+          ) &
+
+          if [[ $(jobs -r | wc -l) -ge $MAXTHREADS ]]; then wait -n; fi
+        done
+      done
+    done
+  done
+
+  # THE REAPER: This wait is now in the same shell as the (&) processes above
+  wait
+  prune_empty_folders "$gccs_path"
   info "GCCS retrieval complete."
 }
 
@@ -669,11 +747,11 @@ function legacy_v2_get_on_prem_products() {
   info "... On-Prem matching complete"
 }
 
-function get_on_prem_products() {
+function legacy_v3_get_on_prem_products() {
   info "Starting On-Prem Retrieval (File-by-File Mirroring with Existence Checks)"
   local date_hour=$1
   local thread_count=0
-  
+
   # --- STEP 1: PRE-DOWNLOAD TARBALLS (SEQUENTIAL & PROTECTED) ---
   # We identify unique tarballs needed and only download if they are missing/empty.
   info "Checking for required IP tarballs..."
@@ -695,7 +773,7 @@ function get_on_prem_products() {
   # Manual "Sync" logic for specific tarball files
   for tar_name in "${!required_tarballs[@]}"; do
     local local_tar_path="${prem_path}/${tar_name}"
-    
+
     # Check if file exists and is not 0 bytes
     if [[ -s "$local_tar_path" ]]; then
       debug "IP Tarball already exists: $tar_name (Skipping download)"
@@ -704,11 +782,11 @@ function get_on_prem_products() {
 
     local satellite_id=${required_tarballs[$tar_name]}
     local egress_url="s3://geoegress/egresout/DOE1L2IP/${satellite_id}/${tar_name}"
-    
+
     verbose "Downloading missing IP Tarball: $tar_name"
     mkdir -p "$prem_path"
     aws s3 cp --profile geocloud "$egress_url" "$local_tar_path" $S3_PROGRESS > /dev/null 2>&1
-    
+
     if [[ $? -ne 0 ]]; then
       WARN "Failed to retrieve tarball from $egress_url. IP matching for this hour may fail."
     fi
@@ -720,13 +798,13 @@ function get_on_prem_products() {
     (
       local filename=$(basename "$gccs_file")
       [[ "$filename" =~ $GOES_FILE_PATTERN ]] || return
-      
+
       local instrument="${BASH_REMATCH[1]}"
       local level="${BASH_REMATCH[2]}"
       local product_base="${BASH_REMATCH[3]}"
       local satellite_number="${BASH_REMATCH[6]}"
       local start_time="${BASH_REMATCH[7]}"
-      
+
       # Determine destination by mirroring GCCS relative path
       local relative_dir=$(dirname "${gccs_file#$gccs_path/}")
       local prem_destination="${prem_path}/${relative_dir}"
@@ -740,14 +818,14 @@ function get_on_prem_products() {
       fi
 
       local satellite_id="GOES-${satellite_number}"
-      
+
       # --- CASE 1: Intermediate Product (I_ABI) ---
       if [[ "$filename" == *"I_ABI"* ]]; then
         local day_of_year="${start_time:4:3}"
         local hour_part="${start_time:7:2}"
         local tar_name="${satellite_id}_ABI_L2_IntermediateProducts_day${day_of_year}_hour${hour_part}.tar"
         local local_tar_path="${prem_path}/${tar_name}"
-        
+
         if [[ -f "$local_tar_path" ]]; then
           local grep_pattern=$(echo "${search_target}*" | sed 's/\*/.*/g')
           local matched_file_path=$(tar -tf "$local_tar_path" | grep -m 1 -E "$grep_pattern")
@@ -763,7 +841,7 @@ function get_on_prem_products() {
         local year="${start_time:0:4}"
         local day_of_year="${start_time:4:3}"
         local gpas_date=$(date --date="jan 1 + $day_of_year days - 1 days" +"%b/%Y%m%d" | tr '[:upper:]' '[:lower:]')
-        
+
         local standard_include="${search_target}*"
         local gpas_prefix="op/${satellite_id}/${level,,}/${instrument/SEIS/SEISS}/${year}/${gpas_date}/"
 
@@ -790,8 +868,183 @@ function get_on_prem_products() {
   info "On-Prem retrieval complete."
 }
 
+function get_on_prem_products() {
+  info "Starting On-Prem Retrieval"
+  local timestamp=$1
+  local year=${timestamp:0:4}
+  local day_of_year=${timestamp:4:3}
+  local hour_part="${timestamp:7:2}"
+  local gpas_date=$(date --date="jan 1 + $day_of_year days - 1 days" +"%b/%Y%m%d" | tr '[:upper:]' '[:lower:]')
+
+  # 1. IP TARBALL RETRIEVAL (One-time check per satellite)
+  # This runs first so the tarballs are ready for the later extraction phase
+  for satellite_number in 18 19; do
+    local satellite_id="GOES-${satellite_number}"
+    local tar_name="${satellite_id}_ABI_L2_IntermediateProducts_day${day_of_year}_hour${hour_part}.tar"
+    local tar_dest="${prem_path}/${tar_name}"
+    local egress_url="geoegress/egresout"
+
+    (
+      verbose "Syncing IP Tarball: $tar_name"
+      aws s3 sync "$s3_src_dir" "$prem_path/" \
+          --profile geocloud \
+          --exclude "*" \
+          --include "$tar_name" \
+          $S3_PROGRESS > /dev/null 2>&1 || debug "No IP tarball found for ${satellite_id}"
+    ) &
+  done
+  wait
+
+  # 2. STANDARD PRODUCT SYNC (Discovery-driven)
+  while read -r leaf_dir; do
+    local rel="${leaf_dir#$gccs_path/}"
+    local prod_path="${rel%/*/*}"
+    local instrument_dir="${prod_path%/*}"
+    local product_dir="${prod_path##*/}"
+
+    local local_dest="${prem_path}/${instrument_dir}/${product_dir}/${year}/${day_of_year}"
+    mkdir -p "$local_dest"
+
+    local prod_upper=${product_dir^^}
+    local channel_filter=""
+    if [[ "$product_dir" =~ -c([0-9]{2})$ ]]; then
+        prod_upper="${product_dir%-c*}"; prod_upper=${prod_upper^^}
+        channel_filter="*C${BASH_REMATCH[1]}*"
+    fi
+
+    for satellite_number in 18 19; do
+      local satellite_id="GOES-${satellite_number}"
+      local prem_daily_prefix="op/${satellite_id}/l2/ABI/${year}/${gpas_date}/"
+
+      (
+        verbose "Syncing On-Prem: $product_dir -> $local_dest"
+        aws s3 sync "s3://${PREM}/${prem_daily_prefix}" "$local_dest/" \
+          --profile geocloud --exclude "*" \
+          --include "*${prod_upper}*${channel_filter}_s${timestamp}*" \
+          $S3_PROGRESS > /dev/null
+
+        # NODD Fallback
+        if [[ -z "$(ls -A "$local_dest" 2>/dev/null)" ]] || $force_nodd; then
+          local nodd_prod_base="${prod_upper%[FCM12]*}"
+          local nodd_prefix="${instrument_dir}-L2-${nodd_prod_base}/${year}/${day_of_year}/"
+          aws s3 sync "s3://noaa-goes${satellite_number}/${nodd_prefix}" "$local_dest/" \
+            --no-sign-request --exclude "*" \
+            --include "*${prod_upper}*${channel_filter}_s${timestamp}*" \
+            $S3_PROGRESS > /dev/null
+        fi
+      ) &
+
+      if [[ $(jobs -r | wc -l) -ge $MAXTHREADS ]]; then wait -n; fi
+    done
+  done < <(find "$gccs_path" -type d -links 2 ! -empty)
+
+  wait
+  prune_empty_folders "$prem_path"
+  info "On-Prem retrieval complete."
+}
+
+function extract_on_prem_ips() {
+  info "Extracting On-Prem IP products from local tarballs..."
+
+  # Find all IP tarballs retrieved in the get_on_prem stage
+  # Pattern: GOES-19_ABI_L2_IntermediateProducts_day059_hour10.tar
+  local tarballs=$(find "$prem_path" -maxdepth 1 -name "*_IntermediateProducts_*.tar")
+
+  if [[ -z "$tarballs" ]]; then
+    verbose "No IP tarballs found in $prem_path. Skipping extraction."
+    return
+  fi
+
+  for tar_path in $tarballs; do
+    local tar_name=$(basename "$tar_path")
+    verbose "Processing IP Tarball: $tar_name"
+
+    # We use GCCS as the guide: only extract what GCCS actually retrieved
+    # We look for GCCS files with "I_ABI" in the name
+    find "$gccs_path" -type f -name "*I_ABI*.nc" | while read -r gccs_ip_file; do
+
+      # 1. Identity the target file in the tarball
+      local file_basename=$(basename "$gccs_ip_file")
+      # Match up to the end-time to find the twin in the tarball
+      local search_pattern="${file_basename%"_c"*}"
+
+      # 2. Determine where it should land in the prem/ tree
+      # Mirror the GCCS path: .../gccs/ABI/dmw-c02/... -> .../prem/ABI/dmw-c02/...
+      local rel_path="${gccs_ip_file#$gccs_path/}"
+      local target_prem_file="${prem_path}/${rel_path}"
+      local target_prem_dir=$(dirname "$target_prem_file")
+
+      # 3. Skip if already extracted
+      if [[ -f "$target_prem_file" ]]; then
+        debug "IP file already exists: $(basename "$target_prem_file")"
+        continue
+      fi
+
+      # 4. Extract only the matching file
+      # We use 'tar -tf' to find the internal path, then 'tar -xf' to pull it
+      local internal_path=$(tar -tf "$tar_path" | grep -m 1 "$search_pattern" || true)
+
+      if [[ -n "$internal_path" ]]; then
+        mkdir -p "$target_prem_dir"
+        verbose "Extracting $(basename "$internal_path") -> $target_prem_dir"
+
+        # --strip-components allows us to ignore the internal tar folder structure
+        # and land it directly in our matched directory
+        local depth=$(echo "$internal_path" | tr -cd '/' | wc -c)
+        tar -xf "$tar_path" -C "$target_prem_dir" --strip-components="$depth" "$internal_path"
+      else
+        debug "No match for $search_pattern found in $tar_name"
+      fi
+    done
+  done
+
+  info "IP extraction phase complete."
+}
+
 ####### ----- ANALYZE ---- #######
-function run_metadata_analysis() {
+
+function check_retrieval_symmetry() {
+  info "Verifying retrieval symmetry (Identity check: Instrument-Level-Product-Sat-Start)"
+
+  # Ensure we have data to compare
+  [[ -d "$gccs_path" ]] || { WARN "GCCS path missing, skipping symmetry check."; return; }
+  [[ -d "$prem_path" ]] || { WARN "On-Prem path missing, skipping symmetry check."; return; }
+
+  # Generate normalized lists: OR_ABI-L2-ACMF-M6_G19_s20260751200000
+  local gccs_list=$(find "$gccs_path" -type f -name "*.nc" -exec basename {} \; | cut -d'_' -f1-4 | sort)
+  local prem_list=$(find "$prem_path" -type f -name "*.nc" -exec basename {} \; | cut -d'_' -f1-4 | sort)
+
+  # Count totals
+  local g_count=$(echo "$gccs_list" | grep -c "OR_")
+  local p_count=$(echo "$prem_list" | grep -c "OR_")
+
+  # Find mismatches
+  local missing_in_prem=$(comm -23 <(echo "$gccs_list") <(echo "$prem_list"))
+  local missing_in_gccs=$(comm -13 <(echo "$gccs_list") <(echo "$prem_list"))
+
+  # Reporting logic
+  info "Symmetry Stats: GCCS ($g_count files) | On-Prem ($p_count files)"
+
+  if [[ -n "$missing_in_prem" ]]; then
+    local m_count=$(echo "$missing_in_prem" | wc -l)
+    WARN "$m_count GCCS files are missing On-Prem twins (check for daily bucket gaps or NODD failures)."
+    verbose "Missing in On-Prem:\n$missing_in_prem"
+  fi
+
+  if [[ -n "$missing_in_gccs" ]]; then
+    local e_count=$(echo "$missing_in_gccs" | wc -l)
+    WARN "$e_count On-Prem files have no GCCS match (check GCCS discovery or production delays)."
+    verbose "Extra in On-Prem:\n$missing_in_gccs"
+  fi
+
+  if [[ $g_count -eq $p_count && -z "$missing_in_prem" ]]; then
+    info "Retrieval Symmetry: 100% MATCH. All files aligned for analysis."
+  else
+    WARN "Symmetry check completed with discrepancies. Analysis may be incomplete."
+  fi
+}
+
+function legacy_run_metadata_analysis() {
   info "Performing Metadata Analysis"
 
   local analyzer=$pave_bin/metadata_scripts/analyze_metadata.sh
@@ -812,6 +1065,62 @@ function run_metadata_analysis() {
   # collect and cleanup
   cat $(find $metadata_path -name "*.csv") > $analysis_path/metadata_summary.csv
   (cd $analysis_path; tar cfz metadata.tar.gz metadata; rm -rf $metadata_path)
+}
+
+function run_metadata_analysis() {
+  info "Starting Metadata Analysis Discovery"
+
+  local analyzer=$pave_bin/metadata_scripts/analyze_metadata.sh
+  [[ -x $analyzer ]] || { ERROR "$analyzer not found or executable" >&2; }
+  $TOOL_DEBUG && local flag="--verbose"
+
+  # Ensure the base paths are defined
+  [[ -d "$prem_path" ]] || { WARN "On-Prem path $prem_path not found. Skipping."; return 1; }
+  [[ -d "$gccs_path" ]] || { WARN "GCCS path $gccs_path not found. Skipping."; return 1; }
+
+  # 1. DISCOVERY: Find the leaf nodes (YYYY/DDD)
+  while read -r prem_leaf; do
+    # Remove any trailing slash to ensure the chop works
+    local leaf_dir="${prem_leaf%/}"
+
+    # 2. DOUBLE-CHOP: Move up two levels to find the product root
+    # Example: /path/to/prem/ABI/cmipf-c02/2026/059
+    local tmp_path="${leaf_dir%/*}"      # Drops /059
+    local product_root="${tmp_path%/*}"  # Drops /2026
+
+    # 3. IDENTITY: Extract the product name
+    local product_name="${product_root##*/}" # Results in 'cmipf-c02' or 'acmf'
+
+    # 4. MIRROR: Construct the GCCS path for comparison
+    # Swaps 'prem' for 'gccs' in the path string
+    local gccs_leaf="${leaf_dir/prem/gccs}"
+
+    # 5. VALIDATION: Check if GCCS counterpart exists
+    if [[ ! -d "$gccs_leaf" ]]; then
+      debug "GCCS mirror missing for $product_name. Skipping analysis."
+      continue
+    fi
+
+    # 6. EXECUTION: Run the analysis in parallel
+    (
+      info "Running Metadata Check: $product_name"
+
+      local report=$(
+        debug $analyzer $flag --overwrite "$leaf_dir" "$gccs_leaf" $product_rpt
+        $analyzer $flag --overwrite "$leaf_dir" "$gccs_leaf" $product_rpt
+      )
+
+      echo -e "$report\n"
+      verbose "Completed metadata analysis for $product_name"
+    ) &
+
+    # Throttle parallel jobs
+    if [[ $(jobs -r | wc -l) -ge $MAXTHREADS ]]; then wait -n; fi
+
+  done < <(find "$prem_path" -type d -links 2 ! -empty)
+
+  wait
+  info "Metadata analysis phase complete."
 }
 
 function legacy_run_glance_collocation_analysis() {
@@ -1176,7 +1485,7 @@ elif [ -f  $SCRIPT_DIR/config.sh ]; then
   source $SCRIPT_DIR/config.sh
 else
   hostname=$(uname -n)
-  if [ -f $SCRIPT_DIR/$hostname.sh ]; then 
+  if [ -f $SCRIPT_DIR/$hostname.sh ]; then
     source  $SCRIPT_DIR/$hostname.sh
   fi
   # Paths to PAVE scripts/tools
@@ -1197,11 +1506,23 @@ IFS=',' read -ra dates <<< "$date_hour"; date_hour="${dates[0]}"
 set_paths $date_hour
 
 # only the retrieval of the gccs data requires to loop through timestamps, remaining functions driven by collected data
-if $run_gccs; then for timestamp in ${dates[@]}; do get_gccs_products $timestamp "product_names"; done; fi
-if $run_prem; then get_on_prem_products $date_hour "product_names"; fi
+for timestamp in ${dates[@]}; do
+  if $run_gccs; then get_gccs_products    $timestamp "product_names"; fi
+  if $run_prem; then get_on_prem_products $timestamp "product_names"; fi
+done
+
+# --- IP Extraction ---
+if compgen -G "${prem_path}/*.tar" > /dev/null; then
+    extract_on_prem_ips
+else
+    verbose "No IP tarballs detected in $prem_path; skipping extraction."
+fi
+# --- The Sanity Gate ---
+check_retrieval_symmetry
 
 if $run_metadata; then run_metadata_analysis; fi
-if $run_glance; then run_glance_analysis; fi
+if $run_glance;   then run_glance_analysis;   fi
 
+wait
 info "... processing complete"
 # happy dance you are at the end :-P
