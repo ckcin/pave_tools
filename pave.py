@@ -7,17 +7,17 @@ A synchronization and orchestration engine for GOES-R satellite products.
 DEVELOPMENT NOTE:
     This tool was developed with the assistance of Gemini 3 Flash (Paid Tier).
 
-CURRENT STATUS: v0.2.0 (Milestone Release)
-Focus: Hardened GCCS/On-Prem retrieval and standardized reporting.
+CURRENT STATUS: v0.2.11 (Development Phase)
+Focus: Rollback to CLI Stability and Sequential Gating.
 
 CHRONICLE:
-- Milestone 0.2.0: GCCS Retrieval logic approved; Phase 2 metadata mapping hardened.
-- Standardized Logging: Full RFC-compliant ISO 8601 timestamps and fixed-width headers.
-- Functional Twin Matching: Audit and Extraction use '_s' timestamps to ignore ground-clock drift.
-- Targeted Extraction: Maps filename Sat-IDs to specific Tarballs for O(1) satellite search.
+- Rollback: Reverted Boto3 listing to reliable CLI 'sync' for Phase 2.
+- Logic Optimization: Maintained Early-Exit guard if GCCS data is missing.
+- Universal Filtering: Maintained ABI Scene filtering for both L1b and L2.
+- Performance: Maintained local ThreadPoolExecutor gating for Phase synchronization.
 
 AUTHOR: Nick Carrasco
-VERSION: 0.2.0 (2026)
+VERSION: 0.2.11 (2026)
 """
 
 import argparse
@@ -151,88 +151,101 @@ def resolve_scene_id(folder_name):
     return match.group(1) if match else None
 
 def get_start_key(filename):
-    """Truncates filename at end-timestamp (_e) to create a definitive match-key."""
     return filename.split('_e')[0]
 
-def run_s3_sync(src, dest, include_pattern=None, profile="geocloud", no_sign=False):
+def run_s3_sync(src, dest, include_pattern=None, profile="geocloud", no_sign=False, label=None):
+    if label: log.verbose(label)
     cmd = ["aws", "s3", "sync", src, str(dest)]
     if profile and not no_sign: cmd += ["--profile", profile]
     if no_sign: cmd += ["--no-sign-request"]
     if include_pattern: cmd += ["--exclude", "*", "--include", include_pattern]
     cmd += ["--no-progress"]
+    log.debug(f"  [CLI EXEC] {' '.join(cmd)}")
     return subprocess.run(cmd, capture_output=True, text=True)
 
 # =============================================================================
 # CORE ENGINE PHASES
 # =============================================================================
 
-def get_gccs_products(args, gccs_path, executor):
-    """Phase 1: GCCS Discovery & Retrieval."""
+def get_gccs_products(args, gccs_path, threads):
     log.info(f"Phase 1: GCCS Discovery & Retrieval: {args.products}")
-    for ts in args.times:
-        year, doy = ts[:4], ts[4:7]
-        for sat in [18, 19]:
-            sat_id = f"GOES-{sat}"
-            for prod in args.products:
-                meta = resolve_meta(prod)
-                disc_prefix = f"{GCCS_PREFIX}/{sat_id}/{meta['level']}/{meta['instr']}/{prod.lower()}"
-                cmd = ["aws", "s3api", "list-objects-v2", "--profile", "geocloud", "--bucket", GCCS_BUCKET,
-                       "--prefix", disc_prefix, "--delimiter", "/", "--query", "CommonPrefixes[].Prefix", "--output", "text"]
-                res = subprocess.run(cmd, capture_output=True, text=True)
-                prefixes = res.stdout.strip().split()
-                for pref in prefixes:
-                    if pref == "None": continue
-                    local_name = Path(pref).name
-                    if args.scenes and meta['instr'] == "ABI" and meta['level'] == "L2":
-                        scene_id = resolve_scene_id(local_name)
-                        if not scene_id or scene_id not in args.scenes: continue
-                    product_root = gccs_path / meta['instr'] / local_name
-                    date_leaf = product_root / year / doy
-                    date_leaf.mkdir(parents=True, exist_ok=True)
-                    log.verbose(f"Syncing GCCS: {sat_id} | {local_name}")
-                    executor.submit(run_s3_sync, f"s3://{GCCS_BUCKET}/{pref}", date_leaf, f"*_s{ts}*")
-                    if meta['level'] == "L2":
-                        executor.submit(run_s3_sync, f"s3://{GCCS_IP_BUCKET}/{pref}", product_root, f"*_s{ts}*")
-
-def get_on_prem_products(args, gccs_path, prem_path, executor):
-    """Phase 2: Mirroring with Robust Metadata Resolution."""
-    log.info("Phase 2: On-Prem Mirroring")
-    for ts in args.times:
-        year, doy, gpas_str = ts[:4], ts[4:7], get_gpas_date(ts)
-        for sat in [18, 19]:
-            tar = f"GOES-{sat}_ABI_L2_IntermediateProducts_day{doy}_hour{ts[7:9]}.tar"
-            executor.submit(run_s3_sync, f"s3://{EGRESS_ROOT}/GOES-{sat}/", prem_path, tar)
-        if not gccs_path.exists(): return
-        for leaf in gccs_path.rglob("*"):
-            if not leaf.is_dir() or not list(leaf.glob(f"*_s{ts}*.nc")): continue
-
-            rel_parts = leaf.relative_to(gccs_path).parts
-            instr_dir = rel_parts[0]  # e.g. "MAG" or "ABI"
-            prod_folder = rel_parts[1]
-
-            meta = resolve_meta(prod_folder)
-            level_str = meta['level'].lower()
-            instr_gpas = instr_dir if instr_dir != "SEIS" else "SEISS"
-
-            if args.scenes and instr_dir == "ABI" and meta['level'] == "L2":
-                scene_id = resolve_scene_id(prod_folder)
-                if not scene_id or scene_id not in args.scenes: continue
-
-            dest = prem_path / leaf.relative_to(gccs_path)
-            chan = re.search(r'-c(\d{2})', prod_folder)
-            pat = f"*{prod_folder.split('-')[0].upper()}*{f'*C{chan.group(1)}*' if chan else ''}_s{ts}*"
-
+    with ThreadPoolExecutor(max_workers=threads) as executor:
+        for ts in args.times:
+            year, doy = ts[:4], ts[4:7]
             for sat in [18, 19]:
                 sat_id = f"GOES-{sat}"
-                gpas_src = f"s3://{PREM_BUCKET}/op/{sat_id}/{level_str}/{instr_gpas}/{year}/{gpas_str}/"
-                log.verbose(f"Mirroring On-Prem: {sat_id} | {prod_folder} ({meta['level']})")
-                log.verbose(f"  - Source: {gpas_src}")
-                log.verbose(f"  - Pattern: {pat}")
+                for prod in args.products:
+                    meta = resolve_meta(prod)
+                    disc_prefix = f"{GCCS_PREFIX}/{sat_id}/{meta['level']}/{meta['instr']}/{prod.lower()}"
+
+                    cmd = ["aws", "s3api", "list-objects-v2", "--profile", "geocloud", "--bucket", GCCS_BUCKET,
+                           "--prefix", disc_prefix, "--delimiter", "/", "--query", "CommonPrefixes[].Prefix", "--output", "text"]
+                    res = subprocess.run(cmd, capture_output=True, text=True)
+                    prefixes = res.stdout.strip().split()
+
+                    for pref in prefixes:
+                        if pref == "None": continue
+                        local_name = Path(pref).name
+                        if args.scenes and meta['instr'] == "ABI":
+                            scene_id = resolve_scene_id(local_name)
+                            if not scene_id or scene_id not in args.scenes: continue
+
+                        product_root = gccs_path / meta['instr'] / local_name
+                        date_leaf = product_root / year / doy
+                        date_leaf.mkdir(parents=True, exist_ok=True)
+
+                        pat = f"*_s{ts}*"
+                        executor.submit(run_s3_sync, f"s3://{GCCS_BUCKET}/{pref}", date_leaf, pat,
+                                       label=f"Syncing GCCS: {sat_id} | {local_name}")
+
+                        if meta['level'].upper() == "L2":
+                            executor.submit(run_s3_sync, f"s3://{GCCS_IP_BUCKET}/{pref}", product_root, pat,
+                                           label=f"Syncing GCCS IP: {sat_id} | {local_name}")
+
+def get_on_prem_products(args, gccs_path, prem_path, threads):
+    """Phase 2: Mirroring using CLI (Reliable Brute Force)."""
+    if not gccs_path.exists():
+        log.warn("On-Prem skipped: GCCS reference directory missing.")
+        return
+
+    log.info("Phase 2: On-Prem Mirroring")
+    with ThreadPoolExecutor(max_workers=threads) as executor:
+        for ts in args.times:
+            year, doy, gpas_str = ts[:4], ts[4:7], get_gpas_date(ts)
+
+            # 1. Tarball Sync
+            for sat in [18, 19]:
+                tar = f"GOES-{sat}_ABI_L2_IntermediateProducts_day{doy}_hour{ts[7:9]}.tar"
+                executor.submit(run_s3_sync, f"s3://{EGRESS_ROOT}/GOES-{sat}/", prem_path, tar, label=f"Syncing Tarball: {tar}")
+
+            # 2. Sequential Discovery and CLI Sync
+            # Using the recursive leaf search established in v0.2.8
+            for leaf in gccs_path.rglob(str(Path(year) / doy)):
+                if not leaf.is_dir(): continue
+
+                rel_parts = leaf.relative_to(gccs_path).parts
+                instr_dir, prod_folder = rel_parts[0], rel_parts[1]
+                meta = resolve_meta(prod_folder)
+                level_str, instr_gpas = meta['level'].lower(), (instr_dir if instr_dir != "SEIS" else "SEISS")
+
+                if args.scenes and instr_dir == "ABI":
+                    scene_id = resolve_scene_id(prod_folder)
+                    if not scene_id or scene_id not in args.scenes: continue
+
+                dest = prem_path / leaf.relative_to(gccs_path)
                 dest.mkdir(parents=True, exist_ok=True)
-                executor.submit(run_s3_sync, gpas_src, dest, pat)
+
+                chan = re.search(r'-c(\d{2})', prod_folder)
+                base_prod = prod_folder.split('-')[0].upper()
+                pat = f"*{base_prod}*{f'*C{chan.group(1)}*' if chan else ''}_s{ts}*"
+
+                for sat in [18, 19]:
+                    sat_id = f"GOES-{sat}"
+                    gpas_src = f"s3://{PREM_BUCKET}/op/{sat_id}/{level_str}/{instr_gpas}/{year}/{gpas_str}/"
+                    executor.submit(run_s3_sync, gpas_src, dest, pat,
+                                   label=f"Mirroring On-Prem: {sat_id} | {prod_folder} ({meta['level']})")
 
 def extract_ips(prem_path, gccs_path):
-    """Phase 3: Targeted IP Extraction."""
     log.info("Phase 3: Targeted IP Extraction")
     tarballs = list(prem_path.glob("*.tar"))
     if not tarballs: return
@@ -255,7 +268,6 @@ def extract_ips(prem_path, gccs_path):
         except Exception as e: log.warn(f"Tar Error {tar_path.name}: {e}")
 
 def check_symmetry(args, gccs_path, prem_path):
-    """Phase 4: Mandatory Smart Audit."""
     log.info("Phase 4: Verification of Retrieval Symmetry")
     log.info(f"{'PRODUCT (NO DATE)':<35} | {'STANDARD (G|P)':<14} | {'IP (G|P)':<12}")
     log.info("-" * 75)
@@ -263,19 +275,18 @@ def check_symmetry(args, gccs_path, prem_path):
     if prem_path.exists():
         for p_file in prem_path.rglob("*.nc"):
             if not any(ts in p_file.name for ts in args.times): continue
-            prem_index.add(get_start_key(p_file.name))
+            prem_index.add(get_start_key(p_file.name).upper())
     audit_map = {}
     if not gccs_path.exists(): return
     for gccs_file in gccs_path.rglob("*.nc"):
         if not any(ts in gccs_file.name for ts in args.times): continue
         parts = gccs_file.relative_to(gccs_path).parts
         identity = f"{parts[0]}/{parts[1]}"
-        meta = resolve_meta(parts[1])
-        if args.scenes and parts[0] == "ABI" and meta['level'] == "L2":
+        if args.scenes and parts[0] == "ABI":
             scene_id = resolve_scene_id(parts[1])
             if not scene_id or scene_id not in args.scenes: continue
         if identity not in audit_map: audit_map[identity] = [0, 0, 0, 0]
-        gccs_key = get_start_key(gccs_file.name)
+        gccs_key = get_start_key(gccs_file.name).upper()
         is_ip = "I_ABI" in gccs_file.name
         if is_ip: audit_map[identity][2] += 1
         else: audit_map[identity][0] += 1
@@ -306,12 +317,11 @@ def main():
     gccs, prem = root / "gccs", root / "prem"
     try:
         if not args.verify_only and not args.extract_only:
-            with ThreadPoolExecutor(max_workers=args.threads) as executor:
-                get_gccs_products(args, gccs, executor)
-                get_on_prem_products(args, gccs, prem, executor)
+            get_gccs_products(args, gccs, args.threads)
+            get_on_prem_products(args, gccs, prem, args.threads)
         if not args.verify_only: extract_ips(prem, gccs)
         check_symmetry(args, gccs, prem)
-        log.info(f"v0.2.0 Run Complete. Root: {root.absolute()}")
+        log.info(f"v0.2.11 Complete. Workspace: {root.absolute()}")
     except KeyboardInterrupt: pass
 
 if __name__ == "__main__":
