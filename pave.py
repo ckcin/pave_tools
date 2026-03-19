@@ -7,17 +7,17 @@ A synchronization and orchestration engine for GOES-R satellite products.
 DEVELOPMENT NOTE:
     This tool was developed with the assistance of Gemini 3 Flash (Paid Tier).
 
-CURRENT STATUS: v1.0.6 (Metadata Resolution Fix)
-Focus: Fixing the L1b Rad radiance retrieval by restoring prefix-aware metadata resolution.
+CURRENT STATUS: v1.0.0 (Production Release)
+Focus: Stable foundation for multi-instrument GCCS and On-Prem data retrieval.
 
 CHRONICLE:
-- Logic Fix: resolve_meta restored to greedy prefix matching (prevents Rad/L2 fall-through).
-- Feature: Maintained prune_empty_folders and standalone CLI verbosity flags.
-- Logic: get_on_prem_tag correctly appends scene to the hard-wired PRODUCT_MAP['tag'].
-- Hygiene: All sync and discovery logs remain at DEBUG/VERBOSE.
+- Final: Official v1.0.0 Production Release.
+- Fix: resolve_meta uses greedy prefix matching to separate L1b/L2 products.
+- Fix: get_on_prem_tag correctly maps hard-wired tags to scene suffixes.
+- Feature: Standalone CLI verbosity flags (-q, -v, -d) and folder pruning.
 
 AUTHOR: Nick Carrasco
-VERSION: 1.0.6 (2026)
+VERSION: 1.0.0 (2026)
 """
 
 import argparse
@@ -139,8 +139,6 @@ def get_on_prem_tag(folder_name):
     """Combines hard-wired tag from map with scene suffix."""
     base = folder_name.split('-')[0].lower()
     meta = resolve_meta(base)
-    # Extract scene by stripping the matching key from the base
-    # Find the key that resolved this meta
     match_key = next((k for k, v in PRODUCT_MAP.items() if v == meta), None)
     scene_suffix = base[len(match_key):].upper() if match_key else ""
     return f"{meta['tag']}{scene_suffix}"
@@ -163,7 +161,7 @@ def run_s3_sync(src, dest, patterns, profile="geocloud", label=None):
 # =============================================================================
 
 def get_gccs_products(args, gccs_path, threads):
-    """Phase 1: GCCS Discovery & Retrieval."""
+    """Phase 1: GCCS Discovery & Retrieval Start."""
     log.info(f"Phase 1: GCCS Discovery & Retrieval Start")
     combos = {}
     for prod in args.products:
@@ -213,13 +211,12 @@ def get_gccs_products(args, gccs_path, threads):
                 executor.submit(run_s3_sync, f"s3://{bucket_name}/{pref}{year}/{doy}/", date_leaf, pat, label=f"Sync: {sat_tag} | {folder_name}")
 
 def get_on_prem_products(args, gccs_path, prem_path, threads):
-    """Phase 2: On-Prem Mirroring."""
+    """Phase 2: On-Prem Mirroring Start."""
     if not gccs_path.exists(): return
     log.info("Phase 2: On-Prem Mirroring Start")
     filing_guide, sync_map = [], {}
     for instr_dir in [d for d in gccs_path.iterdir() if d.is_dir()]:
         for prod_folder in [p for p in instr_dir.iterdir() if p.is_dir()]:
-            # Use prefix-aware resolution to correctly identify L1b vs L2
             meta = resolve_meta(prod_folder.name)
             base_low = prod_folder.name.split('-')[0].lower()
             filing_guide.append((base_low, instr_dir.name, prod_folder.name))
@@ -261,6 +258,7 @@ def get_on_prem_products(args, gccs_path, prem_path, threads):
     if tmp_sync_dir.exists(): shutil.rmtree(tmp_sync_dir)
 
 def extract_ips(args, prem_path, gccs_path):
+    """Phase 3: Targeted IP Recovery Start."""
     if not gccs_path.exists(): return
     gccs_ip_refs = list(gccs_path.rglob("*I_ABI*.nc"))
     if not gccs_ip_refs: return
@@ -290,6 +288,7 @@ def extract_ips(args, prem_path, gccs_path):
         except Exception as e: log.warn(f"Tar Error {tar_path.name}: {e}")
 
 def check_symmetry(args, gccs_path, prem_path):
+    """Phase 4: Retrieval Symmetry Audit."""
     log.info("Phase 4: Retrieval Symmetry Audit")
     log.info(f"{'PRODUCT':<35} | {'STANDARD (G|P)':<14} | {'IP (G|P)':<12}")
     log.info("-" * 75)
@@ -331,7 +330,7 @@ def main():
         prune_empty_folders(prem)
         extract_ips(args, prem, gccs)
     check_symmetry(args, gccs, prem)
-    log.info(f"v1.0.6 Run Complete. Workspace: {root.absolute()}")
+    log.info(f"v1.0.0 Run Complete. Workspace: {root.absolute()}")
 
 if __name__ == "__main__":
     main()
