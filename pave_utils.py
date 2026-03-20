@@ -2,7 +2,7 @@
 """
 PAVE UTILS: Shared Infrastructure Module
 ========================================
-Centralized logging, product registry, and S3 helpers.
+VERSION: 1.2.1
 """
 
 import os
@@ -11,6 +11,13 @@ import datetime
 import subprocess
 import shlex
 from pathlib import Path
+
+# GLOBAL S3 CONFIG
+GCCS_BUCKET = "gccs-products"
+GCCS_IP_BUCKET = "gccs-intermediate-products"
+GCCS_PREFIX = "GCCS/op"
+PREM_BUCKET = "geoproducts-ops"
+EGRESS_ROOT = "geoegress/egresout/DOE1L2IP"
 
 PRODUCT_MAP = {
     "rad":   {"instr": "ABI",  "level": "L1b", "tag": "Rad"},
