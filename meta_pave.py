@@ -3,6 +3,8 @@
 META-PAVE: Metadata Analysis Verification Engine
 ================================================
 Metadata comparison tool for NetCDF GOES-R products.
+
+VERSION: 1.2.2 (Graceful Termination)
 """
 
 import os
@@ -12,7 +14,8 @@ import argparse
 import sys
 from pathlib import Path
 
-from pave_utils import Logger, resolve_meta
+# Shared Infrastructure
+from pave_utils import Logger, resolve_meta, setup_interrupt_handler
 
 try:
     from netCDF4 import Dataset
@@ -21,21 +24,37 @@ try:
 except ImportError:
     HAS_LIBS = False
 
+# =============================================================================
+# CLI ARGUMENT DEFINITION
+# =============================================================================
+
+def parse_args():
+    """Defines the CLI interface for the metadata analyzer."""
+    parser = argparse.ArgumentParser(
+        prog="meta_pave.py",
+        description="Compares NetCDF metadata between two folders and generates a report."
+    )
+    # Positional Arguments
+    parser.add_argument("prem_fld", help="Folder containing On-Prem data")
+    parser.add_argument("gccs_fld", help="Folder containing GCCS data")
+    parser.add_argument("output", help="CSV report filename")
+
+    # Options
+    parser.add_argument("-q", "--quiet", action="store_true", help="Only WARN/ERROR")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose")
+    parser.add_argument("-d", "--debug", action="store_true", help="Debug")
+    parser.add_argument("-O", "--overwrite", action="store_true", help="Overwrite existing output")
+
+    return parser.parse_args()
+
+# =============================================================================
+# CONFIGURATION & ANALYSIS LOGIC
+# =============================================================================
+
 REPORT_HEADERS = ["Level", "Product", "StartTime", "Group", "Difference", "From_On_Prem", "From_GCCS", "Notes"]
 WARN_STRINGS = [":data_name", ":dataset_name"]
 IGNORE_STRINGS = [":date_created", ":id", ":production_site", "timeline_id", "date_created"]
 KNOWN_STRINGS = ["algorithm_dynamic_input_data_container:"]
-
-def parse_args():
-    parser = argparse.ArgumentParser(prog="meta_pave.py", description="Metadata analysis tool.")
-    parser.add_argument("prem_fld", help="Folder containing On-Prem data")
-    parser.add_argument("gccs_fld", help="Folder containing GCCS data")
-    parser.add_argument("output", help="CSV report filename")
-    parser.add_argument("-q", "--quiet", action="store_true")
-    parser.add_argument("-v", "--verbose", action="store_true")
-    parser.add_argument("-d", "--debug", action="store_true")
-    parser.add_argument("-O", "--overwrite", action="store_true")
-    return parser.parse_args()
 
 class MetaAnalyzer:
     def __init__(self, args, log):
@@ -53,6 +72,7 @@ class MetaAnalyzer:
         return "ERROR"
 
     def values_match(self, p, g):
+        """Robust comparison handling scalars, arrays, and string types."""
         if p is g: return True
         if p is None or g is None: return False
         if isinstance(p, np.ndarray) or isinstance(g, np.ndarray):
@@ -71,7 +91,7 @@ class MetaAnalyzer:
             if not self.values_match(p_val, g_val):
                 diff_type = "GCCS ONLY" if p_val is None else "PREM ONLY" if g_val is None else "MISMATCH"
                 level = self.filter_diff(group_name, key)
-                self.results.append([level, prod_info['name'], prod_info['time'], 
+                self.results.append([level, prod_info['name'], prod_info['time'],
                                    f"{group_name}:{key}", diff_type, str(p_val), str(g_val), ""])
 
     def analyze_pair(self, p_file, g_file, prod_info):
@@ -103,12 +123,30 @@ class MetaAnalyzer:
             writer.writerows(self.results)
         self.log.info(f"Report generated: {self.output_file}")
 
+# =============================================================================
+# MAIN EXECUTION
+# =============================================================================
+
 def main():
     args = parse_args()
+
+    # Priority Ladder for Log Levels
     lvl = "DEBUG" if args.debug else "VERBOSE" if args.verbose else "QUIET" if args.quiet else "INFO"
     log = Logger(lvl)
-    if not HAS_LIBS: log.error("Missing netCDF4/numpy.")
-    if Path(args.output).exists() and not args.overwrite: sys.exit("Output exists. Use -O.")
+
+    # 1. Graceful Interrupt
+    setup_interrupt_handler(log)
+
+    # 2. Dependency Check
+    if not HAS_LIBS:
+        log.error("Missing required libraries. Run: pip install netCDF4 numpy")
+
+    # 3. Overwrite Safety
+    if Path(args.output).exists() and not args.overwrite:
+        log.info(f"Output file '{args.output}' exists. Use -O to overwrite.")
+        sys.exit(0)
+
+    # 4. Run Analyzer
     analyzer = MetaAnalyzer(args, log)
     analyzer.run()
 
