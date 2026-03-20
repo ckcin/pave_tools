@@ -2,7 +2,7 @@
 """
 PAVE UTILS: Shared Infrastructure Module
 ========================================
-Centralized logging, product registry, and S3 helpers for the PAVE toolset.
+Centralized logging, product registry, and S3 helpers.
 """
 
 import os
@@ -11,10 +11,6 @@ import datetime
 import subprocess
 import shlex
 from pathlib import Path
-
-# =============================================================================
-# THE PRODUCT REGISTRY (Single Source of Truth)
-# =============================================================================
 
 PRODUCT_MAP = {
     "rad":   {"instr": "ABI",  "level": "L1b", "tag": "Rad"},
@@ -39,63 +35,37 @@ PRODUCT_MAP = {
     "fed":   {"instr": "GLM",  "level": "L2",  "tag": "FED"},
 }
 
-# =============================================================================
-# LOGGING ENGINE
-# =============================================================================
-
 class Logger:
     def __init__(self, level="INFO"):
         self.levels = {"DEBUG": 0, "VERBOSE": 1, "INFO": 2, "QUIET": 3, "WARN": 3, "ERROR": 4}
         self.current_level = self.levels.get(level.upper(), 2)
-        self.colors = {
-            "DEBUG": "\033[94m", "VERBOSE": "\033[36m", "INFO": "\033[92m", 
-            "WARN": "\033[93m", "ERROR": "\033[91m", "RESET": "\033[0m"
-        }
-
+        self.colors = {"DEBUG": "\033[94m", "VERBOSE": "\033[36m", "INFO": "\033[92m", "WARN": "\033[93m", "ERROR": "\033[91m", "RESET": "\033[0m"}
     def _msg(self, level, text):
         if self.levels.get(level, 2) >= self.current_level:
             ts = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
             display_level = "WARN" if level == "QUIET" else level
             print(f"{ts} {self.colors.get(display_level, '')}[{display_level:<7}]{self.colors['RESET']} {text}", flush=True)
-
     def debug(self, text):   self._msg("DEBUG", text)
     def verbose(self, text): self._msg("VERBOSE", text)
     def info(self, text):    self._msg("INFO", text)
     def warn(self, text):    self._msg("WARN", text)
     def error(self, text):   self._msg("ERROR", text); sys.exit(1)
 
-# =============================================================================
-# METADATA & TAG RESOLUTION
-# =============================================================================
-
 def resolve_meta(folder_name):
-    """Greedy prefix-aware metadata resolution."""
     f_low = folder_name.lower().split('-')[0]
     best_match = None
     for key in PRODUCT_MAP.keys():
         if f_low.startswith(key):
-            if best_match is None or len(key) > len(best_match):
-                best_match = key
-    if best_match: 
-        return PRODUCT_MAP[best_match]
+            if best_match is None or len(key) > len(best_match): best_match = key
+    if best_match: return PRODUCT_MAP[best_match]
     return {"instr": "ABI", "level": "L2", "tag": folder_name.upper()}
 
 def get_on_prem_tag(folder_name):
-    """Combines hard-wired tag from map with scene suffix."""
     base = folder_name.split('-')[0].lower()
     meta = resolve_meta(base)
-    # Find the key that resolved this meta
-    match_key = None
-    for k, v in PRODUCT_MAP.items():
-        if v == meta:
-            match_key = k
-            break
+    match_key = next((k for k, v in PRODUCT_MAP.items() if v == meta), None)
     scene_suffix = base[len(match_key):].upper() if match_key else ""
     return f"{meta['tag']}{scene_suffix}"
-
-# =============================================================================
-# CLI & S3 HELPERS
-# =============================================================================
 
 def run_s3_sync(src, dest, patterns, logger, profile="geocloud", label=None):
     if label: logger.debug(label)
