@@ -1,8 +1,7 @@
-#!/usr/bin/env python3
 """
 PAVE UTILS: Shared Infrastructure Module
 ========================================
-VERSION: 1.2.1
+VERSION: 1.2.2 (Graceful Termination)
 """
 
 import os
@@ -10,6 +9,8 @@ import re
 import datetime
 import subprocess
 import shlex
+import sys
+import signal
 from pathlib import Path
 
 # GLOBAL S3 CONFIG
@@ -21,10 +22,6 @@ EGRESS_ROOT = "geoegress/egresout/DOE1L2IP"
 
 PRODUCT_MAP = {
     "rad":   {"instr": "ABI",  "level": "L1b", "tag": "Rad"},
-    "cmi":   {"instr": "ABI",  "level": "L2",  "tag": "CMIP"},
-    "cmip":  {"instr": "ABI",  "level": "L2",  "tag": "CMIP"},
-    "dmw":   {"instr": "ABI",  "level": "L2",  "tag": "DMW"},
-    "acm":   {"instr": "ABI",  "level": "L2",  "tag": "ACM"},
     "geof":  {"instr": "MAG",  "level": "L1b", "tag": "GEOF"},
     "sfeu":  {"instr": "EXIS", "level": "L1b", "tag": "SFEU"},
     "sfxr":  {"instr": "EXIS", "level": "L1b", "tag": "SFXR"},
@@ -42,6 +39,25 @@ PRODUCT_MAP = {
     "fed":   {"instr": "GLM",  "level": "L2",  "tag": "FED"},
 }
 
+# =============================================================================
+# TERMINATION & SIGNAL HANDLING
+# =============================================================================
+
+def setup_interrupt_handler(logger=None):
+    """Configures the application to exit cleanly on Ctrl+C."""
+    def signal_handler(sig, frame):
+        msg = "\n[INTERRUPT] Execution halted by user. Cleaning up and exiting..."
+        if logger:
+            logger.warn(msg)
+        else:
+            print(msg)
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, signal_handler)
+
+# =============================================================================
+# LOGGING ENGINE (Identical to previous)
+# =============================================================================
 class Logger:
     def __init__(self, level="INFO"):
         self.levels = {"DEBUG": 0, "VERBOSE": 1, "INFO": 2, "QUIET": 3, "WARN": 3, "ERROR": 4}
