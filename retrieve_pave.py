@@ -171,30 +171,47 @@ def extract_ips(args, prem_path, gccs_path, log):
             if tar_path.exists(): os.remove(tar_path)
 
 def check_symmetry(args, gccs_path, prem_path, log):
+    """Verifies retrieval success. Returns True if all products match, False otherwise."""
     log.info("Retrieval Symmetry Audit")
     log.info(f"{'PRODUCT':<35} | {'STANDARD (G|P)':<14} | {'IP (G|P)':<12}")
     log.info("-" * 75)
+
     prem_index = {get_start_key(p.name).upper() for p in prem_path.rglob("*.nc") if any(ts in p.name for ts in args.times)}
     audit_map = {}
-    if not gccs_path.exists(): return
+    overall_success = True
+
+    if not gccs_path.exists():
+        log.error("GCCS path does not exist. Retrieval failed.")
+        return False
+
     for gccs_file in gccs_path.rglob("*.nc"):
         if not any(ts in gccs_file.name for ts in args.times): continue
         parts = gccs_file.relative_to(gccs_path).parts
         identity = f"{parts[0]}/{parts[1]}"
         if identity not in audit_map: audit_map[identity] = [0, 0, 0, 0]
+
         gccs_key = get_start_key(gccs_file.name).upper()
         is_ip = "I_ABI" in gccs_file.name
+
         if is_ip: audit_map[identity][2] += 1
         else: audit_map[identity][0] += 1
+
         if gccs_key in prem_index:
             if is_ip: audit_map[identity][3] += 1
             else: audit_map[identity][1] += 1
+
     for identity, counts in sorted(audit_map.items()):
         g_s, p_s, g_i, p_i = counts
-        status = "OK" if (g_s == p_s and g_i == p_i) else "!!"
+        match = (g_s == p_s and g_i == p_i)
+        status = "OK" if match else "!!"
+        if not match: overall_success = False
+
         log.info(f"{status} {identity:<32} | {g_s:>5} | {p_s:<6} | {g_i:>4} | {p_i:<5}")
 
+    return overall_success
+
 def run_collection(args, log):
+    """Returns True if the full collection and symmetry check passed."""
     gccs, prem = Path(args.dest) / "gccs", Path(args.dest) / "prem"
     if not getattr(args, 'skip_gccs', False):
         get_gccs_products(args, gccs, log)
@@ -202,7 +219,9 @@ def run_collection(args, log):
     get_on_prem_products(args, gccs, prem, log)
     extract_ips(args, prem, gccs, log)
     prune_empty_folders(prem)
-    check_symmetry(args, gccs, prem, log)
+
+    # Return the boolean result of the audit
+    return check_symmetry(args, gccs, prem, log)
 
 def main():
     args = parse_args()
