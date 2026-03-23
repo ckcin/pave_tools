@@ -2,9 +2,7 @@
 """
 PAVE: Product/Algorithm Verification Exercise (Orchestrator)
 ============================================================
-The master suite controller for Retrieval, Metadata, and Science.
-
-VERSION: 1.2.3 (Scoping Fix & Science Integration)
+VERSION: 1.2.9 (Native Stats Integration)
 """
 
 import argparse
@@ -15,105 +13,87 @@ from pathlib import Path
 import retrieve_pave
 import meta_pave
 import science_pave
+import stats_pave
 from pave_utils import Logger, setup_interrupt_handler
 
-# =============================================================================
-# CLI ARGUMENT DEFINITION
-# =============================================================================
-
 def parse_args():
-    """Defines the master CLI for the full PAVE suite."""
-    parser = argparse.ArgumentParser(prog="pave.py", description="PAVE Suite Orchestrator")
-
-    # Core Identification
-    parser.add_argument("products", nargs="+", help="Product shortnames (e.g., radc acmc)")
-    parser.add_argument("--times", nargs="+", required=True, help="10-digit timestamps (YYYYDDDHH)")
-    parser.add_argument("--scenes", nargs="*", choices=['f', 'c', 'm1', 'm2'], help="ABI scene filter")
-
-    # Workspace Config
-    parser.add_argument("--prefix", default="validation", help="Folder prefix")
-    parser.add_argument("--tag", default="test", help="Unique tag for this run")
-
-    # Pipeline Toggles
-    parser.add_argument("--skip-retrieve", action="store_true", help="Skip data collection")
-    parser.add_argument("--skip-meta", action="store_true", help="Skip metadata comparison")
-    parser.add_argument("--skip-science", action="store_true", help="Skip Glance analysis")
-
-    # Global Options
-    parser.add_argument("--fork", action="store_true", help="Enable parallel processing in Glance")
-    parser.add_argument("-j", "--threads", type=int, default=8, help="Threads for retrieval")
-    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
-    parser.add_argument("-d", "--debug", action="store_true", help="Debug output")
-
+    parser = argparse.ArgumentParser(prog="pave.py")
+    parser.add_argument("products", nargs="+", help="Product shortnames")
+    parser.add_argument("--times", nargs="+", required=True, help="YYYYDDDHH timestamps")
+    parser.add_argument("--scenes", nargs="*", choices=['f', 'c', 'm1', 'm2'])
+    parser.add_argument("--prefix", default="py")
+    parser.add_argument("--tag", default="test")
+    parser.add_argument("--skip-retrieve", action="store_true")
+    parser.add_argument("--skip-meta", action="store_true")
+    parser.add_argument("--skip-science", action="store_true")
+    parser.add_argument("--skip-stats", action="store_true") # Added toggle
+    parser.add_argument("--fork", action="store_true")
+    parser.add_argument("-j", "--threads", type=int, default=8)
+    parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument("-d", "--debug", action="store_true")
     return parser.parse_args()
 
-# =============================================================================
-# MAIN ORCHESTRATION
-# =============================================================================
-
 def main():
-    # 1. Initialize arguments and logging
     args = parse_args()
-    lvl = "DEBUG" if args.debug else "VERBOSE" if args.verbose else "INFO"
-    log = Logger(lvl)
-
-    # 2. Enable Graceful Interrupts (Ctrl+C)
+    log = Logger("DEBUG" if args.debug else "VERBOSE" if args.verbose else "INFO")
     setup_interrupt_handler(log)
 
-    # 3. Workspace Setup
-    # Path format: validation_202607712_test
     workspace = Path(f"{args.prefix}_{args.times[0]}_{args.tag}")
     log.info(f"PAVE Orchestrator Active. Workspace: {workspace}")
     workspace.mkdir(exist_ok=True)
 
-    # 4. STAGE 1: Retrieval
+    # 1. Retrieval & Gatekeeper
+    retrieval_success = False
     if not args.skip_retrieve:
         log.info(">>> STAGE 1: Data Collection & Retrieval")
-        # Inject the destination into args for the sub-module
         args.dest = workspace
-        retrieve_pave.run_collection(args, log)
+        retrieval_success = retrieve_pave.run_collection(args, log)
     else:
-        log.warn("Skipping Stage 1: Retrieval")
+        log.warn("Skipping Stage 1. Validating existing data...")
+        retrieval_success = retrieve_pave.check_symmetry(args, workspace/"gccs", workspace/"prem", log)
 
-    # 5. STAGE 2: Metadata Analysis
+    if not retrieval_success:
+        log.error("!!! SYMMETRY VALIDATION FAILED !!!")
+        sys.exit(1)
+
+    # 2. Metadata Analysis
     if not args.skip_meta:
         log.info(">>> STAGE 2: Metadata Analysis Verification")
-        report_path = workspace / f"metadata_discrepancies_{args.tag}.csv"
-
-        # Build local namespace for meta_pave
         meta_args = argparse.Namespace(
-            prem_fld=workspace/"prem",
-            gccs_fld=workspace/"gccs",
-            output=report_path,
-            overwrite=True,
-            debug=args.debug,
-            verbose=args.verbose,
-            quiet=False
+            prem_fld=workspace/"prem", gccs_fld=workspace/"gccs",
+            output=workspace / f"metadata_discrepancies_{args.tag}.csv",
+            overwrite=True, debug=args.debug, verbose=args.verbose, quiet=False
         )
-        analyzer = meta_pave.MetaAnalyzer(meta_args, log)
-        analyzer.run()
-    else:
-        log.warn("Skipping Stage 2: Metadata Analysis")
+        meta_pave.MetaAnalyzer(meta_args, log).run()
 
-    # 6. STAGE 3: Science Level Comparison (Glance)
+    # 3. Science Comparison (Glance)
     if not args.skip_science:
         log.info(">>> STAGE 3: Science Level Comparison (Glance)")
-
-        # Build local namespace for science_pave
         sci_args = argparse.Namespace(
-            prem_fld=workspace/"prem",
-            gccs_fld=workspace/"gccs",
-            dest_fld=workspace/"science_reports",
-            fork=args.fork,
-            bin="glance",
-            debug=args.debug,
-            verbose=args.verbose,
-            quiet=False
+            prem_fld=workspace/"prem", gccs_fld=workspace/"gccs",
+            dest_fld=workspace/"glance", fork=args.fork,
+            bin="glance", debug=args.debug, verbose=args.verbose, quiet=False
         )
-        science_engine = science_pave.ScienceAnalyzer(sci_args, log)
-        science_engine.execute()
-    else:
-        log.warn("Skipping Stage 3: Science Comparison")
+        science_pave.ScienceAnalyzer(sci_args, log).execute()
+
+    # 4. Statistical Summary (The Final Verdict)
+    if not args.skip_stats:
+        log.info(">>> STAGE 4: Statistical Summary Harvest")
+
+        # Defensively check if the glance folder exists before proceeding
+        glance_folder = workspace / "glance"
+        if not glance_folder.exists():
+            log.warn(f"!!! CANNOT RUN STAGE 4: {glance_folder} does not exist.")
+            log.warn("Did Stage 3 (Glance) run successfully?")
+        else:
+            stats_args = argparse.Namespace(
+                basepath=workspace,
+                output_file=workspace / f"glance_summary_{args.tag}.csv",
+                verbose=args.verbose, debug=args.debug,
+                quiet=False, table=True, product=args.products
+            )
+            # Call the analyzer
+            stats_pave.StatsAnalyzer(stats_args, log).execute()
 
     log.info(f"PAVE Run Complete. Results: {workspace.absolute()}")
 
