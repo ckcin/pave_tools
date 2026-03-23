@@ -2,15 +2,14 @@
 """
 STATS-PAVE: Statistical Summary Engine
 =======================================
-Refactored harvester for Glance HTML reports.
-
-VERSION: 2.9.0 (StringIO Fix & FutureWarning Silence)
+VERSION: 2.9.2 (Numpy RuntimeWarning Fix & NaN-Aware Stats)
 """
 
 import argparse
 import re
 import pandas as pd
-from io import StringIO  # Added for Pandas 2.x compatibility
+import numpy as np
+from io import StringIO
 from pathlib import Path
 from bs4 import BeautifulSoup as soup
 from pave_utils import Logger, setup_interrupt_handler
@@ -38,11 +37,8 @@ class StatsAnalyzer:
         self.output_file = Path(args.output_file) if args.output_file else None
         self.log = log
         self.quiet = getattr(args, 'quiet', False)
-
-        # Identity Regex: Looking for Satellite (G18/19) and Timestamp
         self.goes_regex = re.compile(r"(?P<sat>G1[89]).*?s(?P<start>\d{14})")
 
-        # FULL PRODUCT CONFIGURATION DICTIONARY
         self.alg_config = {
             "CMIP": [ "CMI", "DQF" ],
             "ADP": [ "Cloud", "DQF", "Dust", "PQI1", "PQI2", "Smoke", "SnowIce" ],
@@ -118,21 +114,19 @@ class StatsAnalyzer:
                 with open(f_path, encoding='utf-8', errors='ignore') as fp:
                     page_content = fp.read()
 
-                # Identify satellite and timestamp
+                if not page_content.strip(): continue
+
                 match = self.goes_regex.search(page_content[:10000])
                 if not match: continue
                 sat, start = match.group('sat'), match.group('start')
 
-                # FIXED: Wrap literal HTML in StringIO to silence FutureWarning
                 df_list = pd.read_html(StringIO(page_content))
 
                 found_table = None
-                for i, df in enumerate(df_list):
+                for df in df_list:
                     if df.empty or df.shape[1] < 2: continue
-
                     rows = df.iloc[:, 0].astype(str).str.lower()
                     rows = rows.str.replace(r'[^a-z0-9]', '', regex=True)
-
                     for t in targets:
                         norm_t = re.sub(r'[^a-z0-9]', '', t.lower())
                         if any(norm_t in r for r in rows.values):
@@ -140,89 +134,77 @@ class StatsAnalyzer:
                             break
                     if found_table is not None: break
 
-                if found_table is None:
-                    self.log.debug(f"      [SKIP] No stats table found in {f_path.parent.name}")
-                    continue
+                if found_table is None: continue
 
                 found_table.columns = ['Stat', 'Both', 'File A', 'File B'][:found_table.shape[1]]
                 found_table.set_index('Stat', inplace=True)
-
                 idx_norm = {str(r): re.sub(r'[^a-z0-9]', '', str(r).lower()) for r in found_table.index}
 
                 for t_name in targets:
                     norm_t = re.sub(r'[^a-z0-9]', '', t_name.lower())
                     match_key = next((k for k, v in idx_norm.items() if norm_t in v), None)
-
                     if match_key:
                         val = found_table.loc[match_key, 'Both']
-                        results.append({
-                            'Label': label, 'Sat': sat, 'Start': start,
-                            'Metric': t_name, 'Value': val
-                        })
+                        results.append({'Label': label, 'Sat': sat, 'Start': start, 'Metric': t_name, 'Value': val})
+            except Exception: continue
 
-            except Exception as e:
-                self.log.debug(f"      [ERROR] {f_path.parent.name}: {e}")
-                continue
-
-        if results:
-            self._write_summary(results)
+        if results: self._write_summary(results)
 
     def _write_summary(self, results):
+        """NaN-Aware Summary: Prevents RuntimeWarnings by checking slice content."""
         df_res = pd.DataFrame(results)
         df_res['Start_DT'] = pd.to_datetime(df_res['Start'], format="%Y%j%H%M%S%f")
 
         for (label, metric, sat), group in df_res.groupby(['Label', 'Metric', 'Sat']):
-            sorted_group = group.sort_values('Start_DT')
-            vals = sorted_group['Value'].astype(float)
+            # Convert values to numeric, forcing errors to NaN
+            vals = pd.to_numeric(group.sort_values('Start_DT')['Value'], errors='coerce')
+
+            # THE FIX: If the slice is empty or all NaNs, skip the stats to avoid Mean of Empty Slice
+            if vals.dropna().empty:
+                self.log.debug(f"      [SKIP] No numeric data to summarize for {label} {metric}")
+                continue
 
             ts_segments = []
-            for _, row in sorted_group.iterrows():
-                ts_segments.append(f",{row['Start']},{row['Value']}")
+            for i, val in vals.items():
+                ts_segments.append(f",{group.loc[i, 'Start']},{val}")
             time_series_str = "".join(ts_segments)
 
+            # Safe calculations
             summary_line = (f"{label:35}, {sat:3}, {metric:12}, {len(vals):3}, "
                            f"{vals.min():10.8f}, {vals.max():10.8f}, {vals.mean():10.8f}, "
                            f"{vals.median():10.8f}, {vals.isna().sum():3}")
 
-            if not self.quiet: self.log.info(summary_line)
+            if not self.quiet: self.log.verbose(summary_line)
             if self.output_file:
                 with open(self.output_file, 'a') as f:
                     f.write(summary_line + time_series_str + "\n")
 
     def execute(self):
-        """Discovery phase: Instrument -> Product -> Variable."""
         glance_dir = self.basepath / "glance"
         if not glance_dir.exists():
             self.log.error(f"Glance directory missing: {glance_dir}")
             return
 
+        self.log.info(f"Harvesting Statistics from: {glance_dir}")
         if self.output_file:
             self.output_file.write_text("Product/Var, Sat, Metric, Count, Min, Max, Mean, Median, NaN, Time Series\n")
 
         all_keys = sorted(self.alg_config.keys(), key=len, reverse=True)
-
         for instr_dir in [d for d in glance_dir.iterdir() if d.is_dir()]:
             for prod_dir in [p for p in instr_dir.iterdir() if p.is_dir()]:
                 norm_name = prod_dir.name.upper().replace('-', '').replace('_', '')
                 matched_key = next((k for k in all_keys if k in norm_name), None)
-
                 if not matched_key: continue
-
-                self.log.debug(f"[MATCH] Folder: {prod_dir.name} -> Key: {matched_key}")
-
                 for var in self.alg_config[matched_key]:
                     html_files = list(prod_dir.rglob(f"{var}/index.html"))
-
                     if not html_files:
                         all_htmls = list(prod_dir.rglob("index.html"))
                         html_files = [h for h in all_htmls if h.parent.name.upper() == var.upper()]
-
                     if html_files:
-                        self.log.debug(f"  [FOUND] {len(html_files)} reports for {var}")
                         self.summarize_stats(f"{prod_dir.name}/{var}", html_files)
 
 if __name__ == "__main__":
     args = parse_args()
-    log = Logger("DEBUG" if args.debug else "INFO")
+    log = Logger("DEBUG" if args.debug else "VERBOSE" if args.verbose else "INFO")
     setup_interrupt_handler(log)
     StatsAnalyzer(args, log).execute()
