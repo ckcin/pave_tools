@@ -2,7 +2,7 @@
 """
 STATS-PAVE: Statistical Summary Engine
 =======================================
-VERSION: 2.9.2 (Numpy RuntimeWarning Fix & NaN-Aware Stats)
+VERSION: 2.9.3 (Full Orchestrator Integration)
 """
 
 import argparse
@@ -11,34 +11,35 @@ import pandas as pd
 import numpy as np
 from io import StringIO
 from pathlib import Path
-from bs4 import BeautifulSoup as soup
-from pave_utils import Logger, setup_interrupt_handler
+import sys
 
-# =============================================================================
-# CLI ARGUMENT DEFINITION
-# =============================================================================
-
-def parse_args():
-    parser = argparse.ArgumentParser(prog="stats_pave.py")
-    parser.add_argument("basepath", type=str, help="Workspace root")
-    parser.add_argument("output_file", type=str, nargs="?", help="CSV output path")
-    parser.add_argument("-v", "--verbose", action="store_true")
-    parser.add_argument("-d", "--debug", action="store_true")
-    parser.add_argument("-q", "--quiet", action="store_true")
-    return parser.parse_args()
+try:
+    from pave_utils import Logger, setup_interrupt_handler
+except ImportError:
+    print("CRITICAL: pave_utils.py not found.")
+    sys.exit(1)
 
 # =============================================================================
 # CORE ANALYSIS ENGINE
 # =============================================================================
 
-class StatsAnalyzer:
+class StatsHarvester:
     def __init__(self, args, log):
-        self.basepath = Path(args.basepath)
-        self.output_file = Path(args.output_file) if args.output_file else None
+        # Path Alignment for PAVE Orchestrator
+        self.glance_dir = Path(args.glance_fld)
+        
+        # If dest_fld is a directory, default to a standard CSV name
+        dest_path = Path(args.dest_fld)
+        if dest_path.is_dir():
+            self.output_file = dest_path / "glance_stats_summary.csv"
+        else:
+            self.output_file = dest_path
+
         self.log = log
         self.quiet = getattr(args, 'quiet', False)
         self.goes_regex = re.compile(r"(?P<sat>G1[89]).*?s(?P<start>\d{14})")
 
+        # FULL ALGORITHM CONFIGURATION
         self.alg_config = {
             "CMIP": [ "CMI", "DQF" ],
             "ADP": [ "Cloud", "DQF", "Dust", "PQI1", "PQI2", "Smoke", "SnowIce" ],
@@ -105,7 +106,6 @@ class StatsAnalyzer:
         }
 
     def summarize_stats(self, label, html_files):
-        """Parses Glance HTML tables using fuzzy row matching."""
         results = []
         targets = ['r-squared correlation', 'finite in only one fraction']
 
@@ -120,6 +120,7 @@ class StatsAnalyzer:
                 if not match: continue
                 sat, start = match.group('sat'), match.group('start')
 
+                # Using StringIO to wrap content for pandas
                 df_list = pd.read_html(StringIO(page_content))
 
                 found_table = None
@@ -151,17 +152,13 @@ class StatsAnalyzer:
         if results: self._write_summary(results)
 
     def _write_summary(self, results):
-        """NaN-Aware Summary: Prevents RuntimeWarnings by checking slice content."""
         df_res = pd.DataFrame(results)
         df_res['Start_DT'] = pd.to_datetime(df_res['Start'], format="%Y%j%H%M%S%f")
 
         for (label, metric, sat), group in df_res.groupby(['Label', 'Metric', 'Sat']):
-            # Convert values to numeric, forcing errors to NaN
             vals = pd.to_numeric(group.sort_values('Start_DT')['Value'], errors='coerce')
 
-            # THE FIX: If the slice is empty or all NaNs, skip the stats to avoid Mean of Empty Slice
             if vals.dropna().empty:
-                self.log.debug(f"      [SKIP] No numeric data to summarize for {label} {metric}")
                 continue
 
             ts_segments = []
@@ -169,42 +166,57 @@ class StatsAnalyzer:
                 ts_segments.append(f",{group.loc[i, 'Start']},{val}")
             time_series_str = "".join(ts_segments)
 
-            # Safe calculations
             summary_line = (f"{label:35}, {sat:3}, {metric:12}, {len(vals):3}, "
-                           f"{vals.min():10.8f}, {vals.max():10.8f}, {vals.mean():10.8f}, "
-                           f"{vals.median():10.8f}, {vals.isna().sum():3}")
+                            f"{vals.min():10.8f}, {vals.max():10.8f}, {vals.mean():10.8f}, "
+                            f"{vals.median():10.8f}, {vals.isna().sum():3}")
 
             if not self.quiet: self.log.verbose(summary_line)
-            if self.output_file:
-                with open(self.output_file, 'a') as f:
-                    f.write(summary_line + time_series_str + "\n")
+            
+            with open(self.output_file, 'a') as f:
+                f.write(summary_line + time_series_str + "\n")
 
     def execute(self):
-        glance_dir = self.basepath / "glance"
-        if not glance_dir.exists():
-            self.log.error(f"Glance directory missing: {glance_dir}")
+        if not self.glance_dir.exists():
+            self.log.error(f"Glance directory missing: {self.glance_dir}")
             return
 
-        self.log.info(f"Harvesting Statistics from: {glance_dir}")
-        if self.output_file:
-            self.output_file.write_text("Product/Var, Sat, Metric, Count, Min, Max, Mean, Median, NaN, Time Series\n")
+        self.log.info(f"Harvesting Statistics from: {self.glance_dir}")
+        self.output_file.write_text("Product/Var, Sat, Metric, Count, Min, Max, Mean, Median, NaN, Time Series\n")
 
         all_keys = sorted(self.alg_config.keys(), key=len, reverse=True)
-        for instr_dir in [d for d in glance_dir.iterdir() if d.is_dir()]:
+        for instr_dir in [d for d in self.glance_dir.iterdir() if d.is_dir()]:
             for prod_dir in [p for p in instr_dir.iterdir() if p.is_dir()]:
                 norm_name = prod_dir.name.upper().replace('-', '').replace('_', '')
                 matched_key = next((k for k in all_keys if k in norm_name), None)
                 if not matched_key: continue
+                
                 for var in self.alg_config[matched_key]:
+                    # Search for standard subfolders or direct parents
                     html_files = list(prod_dir.rglob(f"{var}/index.html"))
                     if not html_files:
                         all_htmls = list(prod_dir.rglob("index.html"))
                         html_files = [h for h in all_htmls if h.parent.name.upper() == var.upper()]
+                    
                     if html_files:
                         self.summarize_stats(f"{prod_dir.name}/{var}", html_files)
 
-if __name__ == "__main__":
+# =============================================================================
+# MAIN / PARSER
+# =============================================================================
+
+def parse_args():
+    parser = argparse.ArgumentParser(prog="stats_pave.py")
+    parser.add_argument("glance_fld")
+    parser.add_argument("dest_fld")
+    parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument("-d", "--debug", action="store_true")
+    return parser.parse_args()
+
+def main():
     args = parse_args()
     log = Logger("DEBUG" if args.debug else "VERBOSE" if args.verbose else "INFO")
     setup_interrupt_handler(log)
-    StatsAnalyzer(args, log).execute()
+    StatsHarvester(args, log).execute()
+
+if __name__ == "__main__":
+    main()
