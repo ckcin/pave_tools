@@ -2,16 +2,17 @@
 """
 RETRIEVE-PAVE: Data Collection Engine
 =====================================
-VERSION: 1.1.2 (Twin-Based Mirroring)
+VERSION: 1.2.7 (Strict Channel Filtering & Instrument-Aware Matching)
+Convention: {product}{*identifiers*}{scene}{*-c[00-16]*}
 """
 
 import argparse
 import sys
 import os
-import re
 import shutil
 import subprocess
 import tarfile
+import re
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
@@ -24,39 +25,75 @@ from pave_utils import (
 )
 
 # =============================================================================
-# CLI ARGUMENT DEFINITION
+# FILTER HELPERS
 # =============================================================================
 
-def parse_args():
-    parser = argparse.ArgumentParser(prog="retrieve_pave.py", description="Collect GOES-R products.")
-    parser.add_argument("products", nargs="+", help="Product shortnames")
-    parser.add_argument("--times", nargs="+", required=True, help="10-digit timestamps (YYYYDDDHH)")
-    parser.add_argument("--scenes", nargs="*", choices=['f', 'c', 'm1', 'm2'], help="Scene filter")
-    parser.add_argument("--dest", default=".", help="Workspace root")
-    parser.add_argument("-j", "--threads", type=int, default=8, help="Concurrent threads")
-    parser.add_argument("-q", "--quiet", action="store_true")
-    parser.add_argument("-v", "--verbose", action="store_true")
-    parser.add_argument("-d", "--debug", action="store_true")
-    parser.add_argument("--skip-gccs", action="store_true")
-    return parser.parse_args()
+def normalize_channels(channels):
+    """Ensures '07' or '7' becomes 'c07' for case-insensitive folder matching."""
+    if not channels: return []
+    normalized = []
+    for c in channels:
+        c_str = str(c).lower()
+        if c_str.startswith('c'):
+            normalized.append(c_str)
+        else:
+            normalized.append(f"c{c_str.zfill(2)}")
+    return normalized
+
+def match_folder(folder_name, meta, scenes, channels):
+    """
+    Strict GCCS discovery based on: {product}{*identifiers*}{scene}{*-c[00-16]*}
+    Uses instrument metadata to apply ABI-specific hierarchy rules.
+    """
+    fname = folder_name.lower()
+    pk = meta['prod_base'].lower() # e.g., 'dmw'
+
+    # 1. Product Base Check (Greedy for variants: 'dmw' matches 'dmwv')
+    if pk not in fname:
+        return False
+
+    # 2. ABI-Specific Hierarchy (Scenes and Channels)
+    if "ABI" in meta['instr'].upper():
+        # Build strict regex parts
+
+        # Scenes: (f|c|m1|m2) - if not provided, we allow any valid scene char
+        s_list = [s.lower() for s in scenes] if scenes else ['f', 'c', 'm1', 'm2']
+        s_pattern = f"({'|'.join(s_list)})"
+
+        # Channels: -c[00-16]
+        if channels:
+            # If user provided channels, we MUST match one exactly as a suffix
+            c_pattern = f"-({'|'.join(channels)})"
+        else:
+            # Otherwise, we match an optional channel suffix
+            c_pattern = "(-c\\d{2})?"
+
+        # Regex: Start with product, any modifiers, end with scene and channel
+        # e.g., ^dmwv.*f-c07$
+        regex = f"^{pk}.*{s_pattern}{c_pattern}$"
+
+        if not re.search(regex, fname):
+            return False
+
+    return True
 
 # =============================================================================
 # COLLECTION LOGIC
 # =============================================================================
 
 def get_gccs_products(args, gccs_path, log):
+    """Discovers GCCS baseline folders using strict regex matching."""
     log.info("GCCS Discovery & Retrieval")
-    combos = {}
-    for prod in args.products:
-        meta = resolve_meta(prod)
-        key = (meta['instr'], meta['level'])
-        if key not in combos: combos[key] = []
-        combos[key].append(prod.lower())
+    user_channels = normalize_channels(args.channels)
 
     discovery_list = []
-    for (instr, level), target_keys in combos.items():
+    for prod_name in args.products:
+        meta = resolve_meta(prod_name)
+        # Identify product base (e.g., ABI-L2-DMW -> DMW)
+        meta['prod_base'] = prod_name.split('-')[-1] if '-' in prod_name else prod_name
+
         for sat in [18, 19]:
-            base_prefix = f"{GCCS_PREFIX}/GOES-{sat}/{level}/{instr}/"
+            base_prefix = f"{GCCS_PREFIX}/GOES-{sat}/{meta['level']}/{meta['instr']}/"
             for bucket in [GCCS_BUCKET, GCCS_IP_BUCKET]:
                 cmd = ["aws", "s3api", "list-objects-v2", "--profile", "geocloud", "--bucket", bucket,
                        "--prefix", base_prefix, "--delimiter", "/", "--query", "CommonPrefixes[].Prefix", "--output", "text"]
@@ -66,14 +103,10 @@ def get_gccs_products(args, gccs_path, log):
 
                 for pref in listing:
                     folder_name = Path(pref).name.lower()
-                    base_name = folder_name.split('-')[0]
-                    for prod_key in target_keys:
-                        if base_name.startswith(prod_key):
-                            if args.scenes:
-                                if not any(base_name.endswith(s.lower()) for s in args.scenes): continue
-                            discovery_list.append((bucket, pref, folder_name, instr))
-                            break
+                    if match_folder(folder_name, meta, args.scenes, user_channels):
+                        discovery_list.append((bucket, pref, folder_name, meta['instr']))
 
+    # Execute Sync with Discovery results
     with ThreadPoolExecutor(max_workers=args.threads) as executor:
         for ts in args.times:
             year, doy = ts[:4], ts[4:7]
@@ -84,63 +117,67 @@ def get_gccs_products(args, gccs_path, log):
                                dest, f"*_s{ts}*", log, label=f"Sync GCCS: {folder_name}")
 
 def get_on_prem_products(args, gccs_path, prem_path, log):
+    """Mirrors On-Prem data based on established GCCS discovery."""
     log.info("On-Prem Mirroring & Restructuring")
+    user_channels = [c.upper() for c in normalize_channels(args.channels)]
 
-    # 1. Build Targeted Sync Map
     sync_map = {}
     for prod in args.products:
         meta = resolve_meta(prod)
         instr = meta['instr']
-        key = (instr, meta['level'].lower(), instr if instr != "SEIS" else "SEISS")
+        key = (instr, meta['level'].lower(), instr if instr != "SEIS" else "SEISS", prod.lower())
         if key not in sync_map: sync_map[key] = []
 
         base_tag = get_on_prem_tag(prod)
-        if args.scenes:
-            for s in args.scenes:
-                sync_map[key].append(f"{base_tag}{s.upper()}")
-        else:
-            sync_map[key].append(base_tag)
+        include_patterns = []
 
-    # 2. Sync to Flat Temp Directory
+        # Hierarchy: {base_tag}*{scene}*-M*{channel}
+        if "ABI" in instr.upper():
+            target_channels = user_channels if user_channels else [""]
+            for ch in target_channels:
+                if args.scenes:
+                    for s in args.scenes:
+                        include_patterns.append(f"{base_tag}*{s.upper()}*-M*{ch}")
+                else:
+                    include_patterns.append(f"{base_tag}*-M*{ch}")
+        else:
+            include_patterns.append(f"{base_tag}*")
+
+        for pattern in include_patterns:
+            sync_map[key].append(pattern)
+
     tmp_sync_dir = prem_path / ".tmp_sync"
     tmp_sync_dir.mkdir(parents=True, exist_ok=True)
 
     with ThreadPoolExecutor(max_workers=args.threads) as executor:
         for ts in args.times:
             year, doy, gpas_str = ts[:4], ts[4:7], get_gpas_date(ts)
-            for (instr_name, level_str, instr_gpas), include_tags in sync_map.items():
+            for (instr_name, level_str, instr_gpas, p_name), include_tags in sync_map.items():
                 patterns = [f"*{tag}*_s{ts}*" for tag in include_tags]
                 for sat in [18, 19]:
                     gpas_src = f"s3://{PREM_BUCKET}/op/GOES-{sat}/{level_str}/{instr_gpas}/{year}/{gpas_str}/"
-                    executor.submit(run_s3_sync, gpas_src, tmp_sync_dir, patterns, log, label=f"Sync On-Prem: {instr_name}")
+                    executor.submit(run_s3_sync, gpas_src, tmp_sync_dir, patterns, log, label=f"Sync On-Prem: {p_name}")
 
-    # 3. Mirroring: Map GCCS Identities to their relative paths
-    # gccs_map[IdentityPrefix] = RelativePath
+    # Mirroring via GCCS twins
     gccs_map = {}
     if gccs_path.exists():
         for gccs_file in gccs_path.rglob("*.nc"):
-            # Identity is everything before _s (Product_Scene_Mode_Sat)
             identity = gccs_file.name.split('_s')[0]
-            # Capture the relative directory (Instrument/Folder/Year/Doy)
             gccs_map[identity] = gccs_file.parent.relative_to(gccs_path)
 
-    # 4. Restructure based on the GCCS Map
-    all_files = list(tmp_sync_dir.rglob("*.nc"))
-    for f_path in all_files:
-        filename = f_path.name
-        identity = filename.split('_s')[0]
-
+    for f_path in list(tmp_sync_dir.rglob("*.nc")):
+        identity = f_path.name.split('_s')[0]
         if identity in gccs_map:
             dest_dir = prem_path / gccs_map[identity]
             dest_dir.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(f_path), str(dest_dir / filename))
+            shutil.move(str(f_path), str(dest_dir / f_path.name))
         else:
-            log.warn(f"Orphan file: {filename} (No twin found in GCCS tree)")
+            log.warn(f"Orphan file: {f_path.name}")
 
     if tmp_sync_dir.exists(): shutil.rmtree(tmp_sync_dir)
 
 # =============================================================================
-# WRAPPERS & AUDIT (Silent Pruning)
+# AUDIT & IP LOGIC
 # =============================================================================
 
 def extract_ips(args, prem_path, gccs_path, log):
@@ -153,7 +190,6 @@ def extract_ips(args, prem_path, gccs_path, log):
             for sat in [18, 19]:
                 tar = f"GOES-{sat}_ABI_L2_IntermediateProducts_day{doy}_hour{ts[7:9]}.tar"
                 executor.submit(run_s3_sync, f"s3://{EGRESS_ROOT}/GOES-{sat}/", prem_path, tar, log, label=f"IP Tar Sync")
-
     for tar_path in prem_path.glob("*.tar"):
         try:
             with tarfile.open(tar_path, 'r') as tf:
@@ -171,61 +207,62 @@ def extract_ips(args, prem_path, gccs_path, log):
             if tar_path.exists(): os.remove(tar_path)
 
 def check_symmetry(args, gccs_path, prem_path, log):
-    """Verifies retrieval success. Returns True if all products match, False otherwise."""
     log.info("Retrieval Symmetry Audit")
     log.info(f"{'PRODUCT':<35} | {'STANDARD (G|P)':<14} | {'IP (G|P)':<12}")
     log.info("-" * 75)
-
     prem_index = {get_start_key(p.name).upper() for p in prem_path.rglob("*.nc") if any(ts in p.name for ts in args.times)}
     audit_map = {}
     overall_success = True
-
     if not gccs_path.exists():
         log.error("GCCS path does not exist. Retrieval failed.")
         return False
-
     for gccs_file in gccs_path.rglob("*.nc"):
         if not any(ts in gccs_file.name for ts in args.times): continue
         parts = gccs_file.relative_to(gccs_path).parts
         identity = f"{parts[0]}/{parts[1]}"
         if identity not in audit_map: audit_map[identity] = [0, 0, 0, 0]
-
         gccs_key = get_start_key(gccs_file.name).upper()
         is_ip = "I_ABI" in gccs_file.name
-
         if is_ip: audit_map[identity][2] += 1
         else: audit_map[identity][0] += 1
-
         if gccs_key in prem_index:
             if is_ip: audit_map[identity][3] += 1
             else: audit_map[identity][1] += 1
-
     for identity, counts in sorted(audit_map.items()):
         g_s, p_s, g_i, p_i = counts
         match = (g_s == p_s and g_i == p_i)
         status = "OK" if match else "!!"
         if not match: overall_success = False
-
         log.info(f"{status} {identity:<32} | {g_s:>5} | {p_s:<6} | {g_i:>4} | {p_i:<5}")
-
     return overall_success
 
 def run_collection(args, log):
-    """Returns True if the full collection and symmetry check passed."""
     gccs, prem = Path(args.dest) / "gccs", Path(args.dest) / "prem"
+    gccs.mkdir(parents=True, exist_ok=True)
+    prem.mkdir(parents=True, exist_ok=True)
     if not getattr(args, 'skip_gccs', False):
         get_gccs_products(args, gccs, log)
         prune_empty_folders(gccs)
     get_on_prem_products(args, gccs, prem, log)
     extract_ips(args, prem, gccs, log)
     prune_empty_folders(prem)
-
-    # Return the boolean result of the audit
     return check_symmetry(args, gccs, prem, log)
+
+def parse_args():
+    parser = argparse.ArgumentParser(prog="retrieve_pave.py")
+    parser.add_argument("products", nargs="+")
+    parser.add_argument("--times", nargs="+", required=True)
+    parser.add_argument("--scenes", nargs="*")
+    parser.add_argument("--channels", nargs="*")
+    parser.add_argument("--dest", default=".")
+    parser.add_argument("-j", "--threads", type=int, default=8)
+    parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument("-d", "--debug", action="store_true")
+    return parser.parse_args()
 
 def main():
     args = parse_args()
-    log = Logger("DEBUG" if args.debug else "VERBOSE" if args.verbose else "INFO")
+    log = Logger("VERBOSE" if args.verbose else "INFO")
     setup_interrupt_handler(log)
     run_collection(args, log)
 
