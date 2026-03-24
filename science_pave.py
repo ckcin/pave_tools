@@ -2,7 +2,7 @@
 """
 SCIENCE-PAVE: Science Level Comparison Engine
 ==============================================
-VERSION: 1.4.5 (Code 4 Guard & SystemExit Interception)
+VERSION: 1.4.6 (Base Destination Folder Initialization)
 """
 
 import os
@@ -64,14 +64,11 @@ class ScienceAnalyzer:
             f_out.seek(0); raw_stdout = f_out.read()
             f_err.seek(0); raw_stderr = f_err.read()
 
-        # --- THE CODE 4 GUARD ---
+        # The Code 4 Guard
         if result.returncode == 4:
             self.log.warn(f"  [WARNING] {rel_path} exited with status 4. Moving to next product.")
-            if self.is_debug:
-                self.log.debug(f"DEBUG: Status 4 Details:\n{self._scrub_output(raw_stderr)}")
-            return # <--- CRITICAL: Exit this function NOW so we don't check for file existence
+            return
 
-        # --- OTHER CODES ---
         if not index_file.exists() and result.returncode != 0:
             self.log.error(f"!!! FAILURE: {rel_path} (Exit: {result.returncode}) !!!")
             self._flare_error(rel_path, result.returncode, cmd, raw_stdout, raw_stderr)
@@ -96,6 +93,11 @@ class ScienceAnalyzer:
 
     def execute(self):
         """Loop through directories and force continuity even on SystemExit."""
+        # NEW FIX: Ensure the base destination folder (the "glance" folder) exists
+        if not self.dest_root.exists():
+            self.log.verbose(f"Creating base science destination: {self.dest_root}")
+            self.dest_root.mkdir(parents=True, exist_ok=True)
+
         if not self.prem_root.exists():
             self.log.error(f"On-Prem root not found: {self.prem_root}")
             return
@@ -109,12 +111,10 @@ class ScienceAnalyzer:
                     try:
                         self.run_glance_report(prod_dir, g_prod_dir)
                     except (Exception, SystemExit) as e:
-                        # Catching SystemExit ensures that even if the Logger calls sys.exit(),
-                        # we keep the loop alive for the other products.
-                        self.log.warn(f"Execution failed for {rel_prod_path}, skipping to next. ({type(e).__name__})")
+                        self.log.warn(f"Execution failed for {rel_prod_path}, skipping. ({type(e).__name__})")
                         continue
 
-        self.log.info(f"Science Level Comparison Complete.")
+        self.log.info("Science Level Comparison Complete.")
 
 # =============================================================================
 # MAIN / PARSER
