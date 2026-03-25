@@ -2,7 +2,7 @@
 """
 RETRIEVE-PAVE: Data Collection Engine
 =====================================
-VERSION: 1.2.7 (Strict Channel Filtering & Instrument-Aware Matching)
+VERSION: 1.2.8 (Suite-Aligned Logging & CLI)
 Convention: {product}{*identifiers*}{scene}{*-c[00-16]*}
 """
 
@@ -55,23 +55,15 @@ def match_folder(folder_name, meta, scenes, channels):
     # 2. ABI-Specific Hierarchy (Scenes and Channels)
     if "ABI" in meta['instr'].upper():
         # Build strict regex parts
-
-        # Scenes: (f|c|m1|m2) - if not provided, we allow any valid scene char
         s_list = [s.lower() for s in scenes] if scenes else ['f', 'c', 'm1', 'm2']
         s_pattern = f"({'|'.join(s_list)})"
 
-        # Channels: -c[00-16]
         if channels:
-            # If user provided channels, we MUST match one exactly as a suffix
             c_pattern = f"-({'|'.join(channels)})"
         else:
-            # Otherwise, we match an optional channel suffix
             c_pattern = "(-c\\d{2})?"
 
-        # Regex: Start with product, any modifiers, end with scene and channel
-        # e.g., ^dmwv.*f-c07$
         regex = f"^{pk}.*{s_pattern}{c_pattern}$"
-
         if not re.search(regex, fname):
             return False
 
@@ -89,7 +81,6 @@ def get_gccs_products(args, gccs_path, log):
     discovery_list = []
     for prod_name in args.products:
         meta = resolve_meta(prod_name)
-        # Identify product base (e.g., ABI-L2-DMW -> DMW)
         meta['prod_base'] = prod_name.split('-')[-1] if '-' in prod_name else prod_name
 
         for sat in [18, 19]:
@@ -106,7 +97,6 @@ def get_gccs_products(args, gccs_path, log):
                     if match_folder(folder_name, meta, args.scenes, user_channels):
                         discovery_list.append((bucket, pref, folder_name, meta['instr']))
 
-    # Execute Sync with Discovery results
     with ThreadPoolExecutor(max_workers=args.threads) as executor:
         for ts in args.times:
             year, doy = ts[:4], ts[4:7]
@@ -131,7 +121,6 @@ def get_on_prem_products(args, gccs_path, prem_path, log):
         base_tag = get_on_prem_tag(prod)
         include_patterns = []
 
-        # Hierarchy: {base_tag}*{scene}*-M*{channel}
         if "ABI" in instr.upper():
             target_channels = user_channels if user_channels else [""]
             for ch in target_channels:
@@ -158,7 +147,6 @@ def get_on_prem_products(args, gccs_path, prem_path, log):
                     gpas_src = f"s3://{PREM_BUCKET}/op/GOES-{sat}/{level_str}/{instr_gpas}/{year}/{gpas_str}/"
                     executor.submit(run_s3_sync, gpas_src, tmp_sync_dir, patterns, log, label=f"Sync On-Prem: {p_name}")
 
-    # Mirroring via GCCS twins
     gccs_map = {}
     if gccs_path.exists():
         for gccs_file in gccs_path.rglob("*.nc"):
@@ -176,10 +164,6 @@ def get_on_prem_products(args, gccs_path, prem_path, log):
 
     if tmp_sync_dir.exists(): shutil.rmtree(tmp_sync_dir)
 
-# =============================================================================
-# AUDIT & IP LOGIC
-# =============================================================================
-
 def extract_ips(args, prem_path, gccs_path, log):
     gccs_ip_refs = list(gccs_path.rglob("*I_ABI*.nc"))
     if not gccs_ip_refs: return
@@ -190,6 +174,7 @@ def extract_ips(args, prem_path, gccs_path, log):
             for sat in [18, 19]:
                 tar = f"GOES-{sat}_ABI_L2_IntermediateProducts_day{doy}_hour{ts[7:9]}.tar"
                 executor.submit(run_s3_sync, f"s3://{EGRESS_ROOT}/GOES-{sat}/", prem_path, tar, log, label=f"IP Tar Sync")
+
     for tar_path in prem_path.glob("*.tar"):
         try:
             with tarfile.open(tar_path, 'r') as tf:
@@ -213,9 +198,11 @@ def check_symmetry(args, gccs_path, prem_path, log):
     prem_index = {get_start_key(p.name).upper() for p in prem_path.rglob("*.nc") if any(ts in p.name for ts in args.times)}
     audit_map = {}
     overall_success = True
+
     if not gccs_path.exists():
         log.error("GCCS path does not exist. Retrieval failed.")
         return False
+
     for gccs_file in gccs_path.rglob("*.nc"):
         if not any(ts in gccs_file.name for ts in args.times): continue
         parts = gccs_file.relative_to(gccs_path).parts
@@ -228,6 +215,7 @@ def check_symmetry(args, gccs_path, prem_path, log):
         if gccs_key in prem_index:
             if is_ip: audit_map[identity][3] += 1
             else: audit_map[identity][1] += 1
+
     for identity, counts in sorted(audit_map.items()):
         g_s, p_s, g_i, p_i = counts
         match = (g_s == p_s and g_i == p_i)
@@ -237,16 +225,24 @@ def check_symmetry(args, gccs_path, prem_path, log):
     return overall_success
 
 def run_collection(args, log):
-    gccs, prem = Path(args.dest) / "gccs", Path(args.dest) / "prem"
+    # Support for the orchestrator passing 'dest' vs the standalone passing 'dest'
+    dest_root = Path(getattr(args, 'dest', '.'))
+    gccs, prem = dest_root / "gccs", dest_root / "prem"
     gccs.mkdir(parents=True, exist_ok=True)
     prem.mkdir(parents=True, exist_ok=True)
+
     if not getattr(args, 'skip_gccs', False):
         get_gccs_products(args, gccs, log)
         prune_empty_folders(gccs)
+
     get_on_prem_products(args, gccs, prem, log)
     extract_ips(args, prem, gccs, log)
     prune_empty_folders(prem)
     return check_symmetry(args, gccs, prem, log)
+
+# =============================================================================
+# ENTRY POINT
+# =============================================================================
 
 def parse_args():
     parser = argparse.ArgumentParser(prog="retrieve_pave.py")
@@ -262,7 +258,11 @@ def parse_args():
 
 def main():
     args = parse_args()
-    log = Logger("VERBOSE" if args.verbose else "INFO")
+
+    # Priority Ladder for Log Levels (Suite Aligned)
+    lvl = "DEBUG" if args.debug else "VERBOSE" if args.verbose else "INFO"
+    log = Logger(lvl)
+
     setup_interrupt_handler(log)
     run_collection(args, log)
 

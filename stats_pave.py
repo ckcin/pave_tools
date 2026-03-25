@@ -27,7 +27,7 @@ class StatsHarvester:
     def __init__(self, args, log):
         # Path Alignment for PAVE Orchestrator
         self.glance_dir = Path(args.glance_fld)
-        
+
         # If dest_fld is a directory, default to a standard CSV name
         dest_path = Path(args.dest_fld)
         if dest_path.is_dir():
@@ -171,7 +171,7 @@ class StatsHarvester:
                             f"{vals.median():10.8f}, {vals.isna().sum():3}")
 
             if not self.quiet: self.log.verbose(summary_line)
-            
+
             with open(self.output_file, 'a') as f:
                 f.write(summary_line + time_series_str + "\n")
 
@@ -189,14 +189,14 @@ class StatsHarvester:
                 norm_name = prod_dir.name.upper().replace('-', '').replace('_', '')
                 matched_key = next((k for k in all_keys if k in norm_name), None)
                 if not matched_key: continue
-                
+
                 for var in self.alg_config[matched_key]:
                     # Search for standard subfolders or direct parents
                     html_files = list(prod_dir.rglob(f"{var}/index.html"))
                     if not html_files:
                         all_htmls = list(prod_dir.rglob("index.html"))
                         html_files = [h for h in all_htmls if h.parent.name.upper() == var.upper()]
-                    
+
                     if html_files:
                         self.summarize_stats(f"{prod_dir.name}/{var}", html_files)
 
