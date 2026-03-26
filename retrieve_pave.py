@@ -34,10 +34,8 @@ def normalize_channels(channels):
     normalized = []
     for c in channels:
         c_str = str(c).lower()
-        if c_str.startswith('c'):
-            normalized.append(c_str)
-        else:
-            normalized.append(f"c{c_str.zfill(2)}")
+        if c_str.startswith('c'): normalized.append(c_str)
+        else: normalized.append(f"c{c_str.zfill(2)}")
     return normalized
 
 def match_folder(folder_name, meta, scenes, channels):
@@ -49,24 +47,15 @@ def match_folder(folder_name, meta, scenes, channels):
     pk = meta['prod_base'].lower() # e.g., 'dmw'
 
     # 1. Product Base Check (Greedy for variants: 'dmw' matches 'dmwv')
-    if pk not in fname:
-        return False
+    if pk not in fname: return False
 
     # 2. ABI-Specific Hierarchy (Scenes and Channels)
     if "ABI" in meta['instr'].upper():
-        # Build strict regex parts
         s_list = [s.lower() for s in scenes] if scenes else ['f', 'c', 'm1', 'm2']
         s_pattern = f"({'|'.join(s_list)})"
-
-        if channels:
-            c_pattern = f"-({'|'.join(channels)})"
-        else:
-            c_pattern = "(-c\\d{2})?"
-
-        regex = f"^{pk}.*{s_pattern}{c_pattern}$"
-        if not re.search(regex, fname):
+        c_pattern = f"-({'|'.join(channels)})" if channels else "(-c\\d{2})?"
+        if not re.search(f"^{pk}.*{s_pattern}{c_pattern}$", fname):
             return False
-
     return True
 
 # =============================================================================
@@ -77,8 +66,8 @@ def get_gccs_products(args, gccs_path, log):
     """Discovers GCCS baseline folders using strict regex matching."""
     log.info("GCCS Discovery & Retrieval")
     user_channels = normalize_channels(args.channels)
-
     discovery_list = []
+
     for prod_name in args.products:
         meta = resolve_meta(prod_name)
         meta['prod_base'] = prod_name.split('-')[-1] if '-' in prod_name else prod_name
@@ -110,8 +99,8 @@ def get_on_prem_products(args, gccs_path, prem_path, log):
     """Mirrors On-Prem data based on established GCCS discovery."""
     log.info("On-Prem Mirroring & Restructuring")
     user_channels = [c.upper() for c in normalize_channels(args.channels)]
-
     sync_map = {}
+
     for prod in args.products:
         meta = resolve_meta(prod)
         instr = meta['instr']
@@ -125,15 +114,13 @@ def get_on_prem_products(args, gccs_path, prem_path, log):
             target_channels = user_channels if user_channels else [""]
             for ch in target_channels:
                 if args.scenes:
-                    for s in args.scenes:
-                        include_patterns.append(f"{base_tag}*{s.upper()}*-M*{ch}")
+                    for s in args.scenes: include_patterns.append(f"{base_tag}*{s.upper()}*-M*{ch}")
                 else:
                     include_patterns.append(f"{base_tag}*-M*{ch}")
         else:
             include_patterns.append(f"{base_tag}*")
 
-        for pattern in include_patterns:
-            sync_map[key].append(pattern)
+        for pattern in include_patterns: sync_map[key].append(pattern)
 
     tmp_sync_dir = prem_path / ".tmp_sync"
     tmp_sync_dir.mkdir(parents=True, exist_ok=True)
@@ -195,6 +182,7 @@ def check_symmetry(args, gccs_path, prem_path, log):
     log.info("Retrieval Symmetry Audit")
     log.info(f"{'PRODUCT':<35} | {'STANDARD (G|P)':<14} | {'IP (G|P)':<12}")
     log.info("-" * 75)
+
     prem_index = {get_start_key(p.name).upper() for p in prem_path.rglob("*.nc") if any(ts in p.name for ts in args.times)}
     audit_map = {}
     overall_success = True
