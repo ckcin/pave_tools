@@ -2,10 +2,11 @@
 """
 META-PAVE: Metadata Analysis Verification Engine
 ================================================
-VERSION: 1.3.5 (Default Overwrite & Mirror Matching)
+VERSION: 1.3.7 (Precise IP Product Naming)
 Hierarchy:
   1. Navigate to equivalent GCCS subfolder.
   2. Match file by Full Identity Prefix (OR_..._sYYYYdddhhmmsss).
+  3. Correctly parse Product Names for Intermediate (OR_I_...) data.
 """
 
 import os
@@ -105,14 +106,14 @@ class MetadataAuditor:
             self.log.warn(f"Analysis failed for {p_file.name}: {e}")
 
     def execute(self):
-        """Standard execution loop using mirrored folder-anchored matching."""
+        """Standard entry point for PAVE with folder-anchored matching."""
         self.log.info("Metadata Analysis Verification (Deep Audit)")
 
         if not HAS_LIBS:
             self.log.error("Missing required libraries: netCDF4, numpy")
             return
 
-        # 1. Main Discovery Loop
+        # Walk the On-Prem tree to find candidates
         for p_file in self.prem_fld.rglob("*.nc"):
             rel_path = p_file.relative_to(self.prem_fld)
             gccs_twin_dir = self.gccs_fld / rel_path.parent
@@ -126,9 +127,17 @@ class MetadataAuditor:
 
             identity_prefix = match.group(1)
             parts = identity_prefix.split('_')
-            prod_name, start_time = parts[1], parts[3][1:]
 
-            # Match specifically in the mirrored folder
+            # --- THE UPDATED IP-AWARE FIX ---
+            # IP Example: ['OR', 'I', 'ABI-L2-LSA...', 'G18', 'sYYYY...']
+            if parts[1] == 'I':
+                prod_name = f"{parts[1]}_{parts[2]}" # Result: I_ABI-L2-LSA...
+                start_time = parts[4][1:]
+            else:
+                # Standard Example: ['OR', 'ABI-L2-LSA...', 'G18', 'sYYYY...']
+                prod_name = parts[1]
+                start_time = parts[3][1:]
+
             gccs_matches = list(gccs_twin_dir.glob(f"{identity_prefix}*.nc"))
             if not gccs_matches:
                 self.log.warn(f"  GCCS Mirror Missing: {identity_prefix} in {rel_path.parent}")
@@ -136,7 +145,7 @@ class MetadataAuditor:
 
             self.analyze_pair(p_file, gccs_matches[0], {'name': prod_name, 'time': start_time})
 
-        # 2. Save Results (Overwrite by default)
+        # Save the audit report
         if self.results:
             with open(self.output_file, 'w', newline='') as csvfile:
                 writer = csv.writer(csvfile)
