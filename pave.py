@@ -2,7 +2,7 @@
 """
 PAVE: Product Analysis & Verification Engine
 ============================================
-VERSION: 1.1.4 (Uniform Logging Triad & Master Orchestration)
+VERSION: 1.1.5 (Full Pipeline with Stage 6 Judgment)
 """
 
 import argparse
@@ -30,6 +30,7 @@ def parse_args():
     parser.add_argument("--skip-science", action="store_true")
     parser.add_argument("--skip-collocate", action="store_true")
     parser.add_argument("--skip-stats", action="store_true")
+    parser.add_argument("--skip-judge", action="store_true")
 
     # 4. Operational Flags
     parser.add_argument("-j", "--threads", type=int, default=8, help="Concurrent threads")
@@ -37,6 +38,9 @@ def parse_args():
     parser.add_argument("-d", "--debug", action="store_true", help="Enable debug logging")
     parser.add_argument("-q", "--quiet", action="store_true", help="Only display WARNING/ERROR logs")
     parser.add_argument("--bin", default="glance", help="Path to the glance executable")
+
+    # 5. Thresholds
+    parser.add_argument("--r2-threshold", type=float, default=0.990, help="Min R-Squared for Pass")
 
     return parser.parse_args()
 
@@ -152,6 +156,16 @@ def main():
             log.warn("Skipping Stats: The glance directory is empty.")
     else:
         log.info("--- STAGE 5: STATISTICS HARVESTING (SKIPPED) ---")
+
+    # STAGE 6: FINAL VERDICT (The Jury)
+    if not args.skip_judge:
+        log.info("--- STAGE 6: FINAL VERDICT ---")
+        from judge_pave import PaveJudge
+        judge_args = argparse.Namespace(stats_fld=ws['stats'], threshold=args.r2_threshold, 
+                                        quiet=args.quiet, verbose=args.verbose, debug=args.debug)
+        PaveJudge(judge_args, log).execute()
+    else:
+        log.info("--- STAGE 6: FINAL VERDICT (SKIPPED) ---")
 
     log.info(f"PAVE Pipeline Complete. Data Root: {ws['root']}")
 
