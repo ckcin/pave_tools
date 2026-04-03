@@ -2,13 +2,13 @@
 """
 PAVE: Product Analysis & Verification Engine
 ============================================
-VERSION: 1.1.6 (Cleanup & Compression Support)
+VERSION: 1.1.8 (Cleanup Logic Removed)
 """
 
 import argparse
 import sys
 from pathlib import Path
-from pave_utils import Logger, setup_interrupt_handler, archive_directory
+from pave_utils import Logger, setup_interrupt_handler
 
 def parse_args():
     parser = argparse.ArgumentParser(prog="pave.py", description="Orchestrate the GOES-R PAVE pipeline.")
@@ -39,9 +39,6 @@ def parse_args():
     parser.add_argument("-q", "--quiet", action="store_true", help="Warn/Error only")
     parser.add_argument("--bin", default="glance", help="Path to glance")
     parser.add_argument("--r2-threshold", type=float, default=0.990, help="Min R2 for Pass")
-
-    # 5. Cleanup Flag
-    parser.add_argument("--cleanup", action="store_true", help="Tar and remove data folders after run")
 
     return parser.parse_args()
 
@@ -161,18 +158,7 @@ def main():
         )
         PaveJudge(judge_args, log).execute()
 
-    # OPTIONAL STAGE: CLEANUP
-    if args.cleanup:
-        log.info("--- CLEANUP: COMPRESSING WORKSPACE ---")
-        # Define the target list to archive (stats is explicitly omitted)
-        cleanup_targets = ["gccs", "prem", "glance", "coll"]
-
-        for target in cleanup_targets:
-            target_path = ws.get(target)
-            if target_path:
-                archive_directory(target_path, log)
-
-    log.info(f"PAVE Pipeline Complete. Data Root: {ws['root']}")
+    log.info(f"PAVE Pipeline Complete. Workspace: {ws['root']}")
 
 if __name__ == "__main__":
     main()
