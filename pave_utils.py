@@ -1,7 +1,7 @@
 """
 PAVE UTILS: Shared Infrastructure Module
 ========================================
-VERSION: 1.2.2 (Graceful Termination)
+VERSION: 1.2.4 (Archive Verification Gate)
 """
 
 import os
@@ -11,6 +11,8 @@ import subprocess
 import shlex
 import sys
 import signal
+import tarfile
+import shutil
 from pathlib import Path
 
 # GLOBAL S3 CONFIG
@@ -73,6 +75,43 @@ class Logger:
     def info(self, text):    self._msg("INFO", text)
     def warn(self, text):    self._msg("WARN", text)
     def error(self, text):   self._msg("ERROR", text); sys.exit(1)
+
+def archive_directory(path, logger):
+    """Tars a directory, verifies the archive contents, then removes source."""
+    if not path.exists():
+        return
+
+    # Check if the folder is empty
+    source_files = [f for f in path.rglob("*") if f.is_file()]
+    if not source_files:
+        logger.debug(f"Skipping archive for empty folder: {path.name}")
+        return
+
+    tar_name = f"{path.name}.tar.gz"
+    tar_path = path.parent / tar_name
+    logger.info(f"Cleanup: Archiving {path.name} ({len(source_files)} files)")
+
+    try:
+        # 1. Create the Archive
+        with tarfile.open(tar_path, "w:gz") as tar:
+            tar.add(path, arcname=path.name)
+
+        # 2. Verify the Archive
+        with tarfile.open(tar_path, "r:gz") as tar_check:
+            # Filter members to only count actual files (ignoring directory entries)
+            archive_members = [m for m in tar_check.getmembers() if m.isfile()]
+
+        # 3. Validation Gate
+        if len(archive_members) == len(source_files):
+            logger.verbose(f"Cleanup: Verification Passed ({len(archive_members)} items match).")
+            shutil.rmtree(path)
+            logger.info(f"Cleanup: Successfully removed source folder {path.name}")
+        else:
+            logger.warn(f"!!! CLEANUP FAILURE: Archive count ({len(archive_members)}) does not match source count ({len(source_files)}) !!!")
+            logger.warn(f"!!! Folder {path.name} was NOT removed for safety !!!")
+
+    except Exception as e:
+        logger.warn(f"Cleanup: Process failed for {path.name}: {e}")
 
 def resolve_meta(folder_name):
     f_low = folder_name.lower().split('-')[0]
