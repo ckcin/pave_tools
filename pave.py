@@ -2,17 +2,17 @@
 """
 PAVE: Product Analysis & Verification Engine
 ============================================
-VERSION: 1.1.5 (Full Orchestration & Verdict Stage)
+VERSION: 1.1.6 (Cleanup & Compression Support)
 """
 
 import argparse
 import sys
 from pathlib import Path
-from pave_utils import Logger, setup_interrupt_handler
+from pave_utils import Logger, setup_interrupt_handler, archive_directory
 
 def parse_args():
     parser = argparse.ArgumentParser(prog="pave.py", description="Orchestrate the GOES-R PAVE pipeline.")
-    
+
     # 1. Selection Criteria
     parser.add_argument("products", nargs="+", help="Product shortnames")
     parser.add_argument("--times", nargs="+", required=True, help="10-digit timestamps")
@@ -38,10 +38,11 @@ def parse_args():
     parser.add_argument("-d", "--debug", action="store_true", help="Debug logs")
     parser.add_argument("-q", "--quiet", action="store_true", help="Warn/Error only")
     parser.add_argument("--bin", default="glance", help="Path to glance")
-    
-    # 5. Quality Thresholds
     parser.add_argument("--r2-threshold", type=float, default=0.990, help="Min R2 for Pass")
-    
+
+    # 5. Cleanup Flag
+    parser.add_argument("--cleanup", action="store_true", help="Tar and remove data folders after run")
+
     return parser.parse_args()
 
 def initialize_workspace(args, log):
@@ -51,7 +52,7 @@ def initialize_workspace(args, log):
     parts.append(args.times[0])
     if args.tag:
         parts.append(args.tag)
-    
+
     job_folder_name = "_".join(parts)
     workspace_root = Path(args.base_dir).resolve() / job_folder_name
 
@@ -75,7 +76,7 @@ def main():
     lvl = "DEBUG" if args.debug else "VERBOSE" if args.verbose else "QUIET" if args.quiet else "INFO"
     log = Logger(lvl)
     setup_interrupt_handler(log)
-    
+
     ws = initialize_workspace(args, log)
 
     # STAGE 1: RETRIEVAL
@@ -159,6 +160,17 @@ def main():
             debug=args.debug
         )
         PaveJudge(judge_args, log).execute()
+
+    # OPTIONAL STAGE: CLEANUP
+    if args.cleanup:
+        log.info("--- CLEANUP: COMPRESSING WORKSPACE ---")
+        # Define the target list to archive (stats is explicitly omitted)
+        cleanup_targets = ["gccs", "prem", "glance", "coll"]
+
+        for target in cleanup_targets:
+            target_path = ws.get(target)
+            if target_path:
+                archive_directory(target_path, log)
 
     log.info(f"PAVE Pipeline Complete. Data Root: {ws['root']}")
 
