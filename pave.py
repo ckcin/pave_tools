@@ -38,7 +38,6 @@ def parse_args():
     parser.add_argument("-d", "--debug", action="store_true", help="Debug logs")
     parser.add_argument("-q", "--quiet", action="store_true", help="Warn/Error only")
     parser.add_argument("--bin", default="glance", help="Path to glance")
-    parser.add_argument("--r2-threshold", type=float, default=0.990, help="Min R2 for Pass")
 
     return parser.parse_args()
 
@@ -151,13 +150,11 @@ def main():
         from judge_pave import PaveJudge
         judge_args = argparse.Namespace(
             stats_fld=ws['stats'], 
-            threshold=args.r2_threshold, 
             quiet=args.quiet, 
             verbose=args.verbose, 
             debug=args.debug
         )
         PaveJudge(judge_args, log).execute()
-
     log.info(f"PAVE Pipeline Complete. Workspace: {ws['root']}")
 
 if __name__ == "__main__":
