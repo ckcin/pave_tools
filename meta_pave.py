@@ -31,8 +31,8 @@ except ImportError:
 # =============================================================================
 
 REPORT_HEADERS = ["Level", "Product", "StartTime", "Group", "Difference", "From_On_Prem", "From_GCCS", "Notes"]
-WARN_STRINGS = [":data_name", ":dataset_name"]
-IGNORE_STRINGS = [":date_created", ":id", ":production_site", ":production_cluster", "timeline_id", "date_created"]
+WARN_STRINGS = [":data_name"]
+IGNORE_STRINGS = [":date_created", ":id", ":production_site", ":production_cluster", ":dataset_name", ":timeline_id"]
 KNOWN_STRINGS = ["algorithm_dynamic_input_data_container:"]
 
 # =============================================================================
