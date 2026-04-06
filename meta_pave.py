@@ -2,11 +2,7 @@
 """
 META-PAVE: Metadata Analysis Verification Engine
 ================================================
-VERSION: 1.3.7 (Precise IP Product Naming)
-Hierarchy:
-  1. Navigate to equivalent GCCS subfolder.
-  2. Match file by Full Identity Prefix (OR_..._sYYYYdddhhmmsss).
-  3. Correctly parse Product Names for Intermediate (OR_I_...) data.
+VERSION: 1.4.0 (DSN-Centric Identity & Full CLI)
 """
 
 import os
@@ -46,16 +42,16 @@ class MetadataAuditor:
         self.log = log
         self.results = []
 
-        # Robust pathing for standalone 'output' vs orchestrator 'dest_fld'
+        # New DSN-Aware Regex: Extracts DSN and Start Time
+        self.goes_regex = re.compile(r"OR_(?P<dsn>.*?)_(?P<sat>G1[89]).*?s(?P<start>\d{14})")
+
         raw_dest = getattr(args, 'output', getattr(args, 'dest_fld', None))
         if not raw_dest:
             self.log.error("No output destination provided.")
+            sys.exit(1)
 
         dest_path = Path(raw_dest)
-        if dest_path.is_dir():
-            self.output_file = dest_path / "metadata_audit.csv"
-        else:
-            self.output_file = dest_path
+        self.output_file = dest_path / "metadata_audit.csv" if dest_path.is_dir() else dest_path
 
     def filter_diff(self, group, key):
         identity = f"{group}:{key}"
@@ -65,7 +61,6 @@ class MetadataAuditor:
         return "ERROR"
 
     def values_match(self, p, g):
-        """Robust comparison handling scalars, arrays, and strings."""
         if p is g: return True
         if p is None or g is None: return False
         if isinstance(p, (np.ndarray, list)):
@@ -84,20 +79,17 @@ class MetadataAuditor:
             if not self.values_match(p_val, g_val):
                 diff_type = "GCCS ONLY" if p_val is None else "PREM ONLY" if g_val is None else "MISMATCH"
                 level = self.filter_diff(group_name, key)
-                self.results.append([level, prod_info['name'], prod_info['time'],
+                self.results.append([level, prod_info['dsn'], prod_info['time'],
                                    f"{group_name}:{key}", diff_type, str(p_val), str(g_val), ""])
 
     def analyze_pair(self, p_file, g_file, prod_info):
         self.log.debug(f"Comparing pair: {p_file.name}")
         try:
             with Dataset(p_file, 'r') as ds_p, Dataset(g_file, 'r') as ds_g:
-                # Audit Dimensions
                 self.compare_dicts("Dimensions", {k: d.size for k, d in ds_p.dimensions.items()},
                                  {k: d.size for k, d in ds_g.dimensions.items()}, prod_info)
-                # Audit Global Attributes
                 self.compare_dicts("Global Attributes", {k: ds_p.getncattr(k) for k in ds_p.ncattrs()},
                                  {k: ds_g.getncattr(k) for k in ds_g.ncattrs()}, prod_info)
-                # Audit Variable-level Attributes
                 for var in sorted(set(ds_p.variables.keys()) & set(ds_g.variables.keys())):
                     self.compare_dicts(f"Variable:{var}",
                                      {k: ds_p.variables[var].getncattr(k) for k in ds_p.variables[var].ncattrs()},
@@ -106,46 +98,30 @@ class MetadataAuditor:
             self.log.warn(f"Analysis failed for {p_file.name}: {e}")
 
     def execute(self):
-        """Standard entry point for PAVE with folder-anchored matching."""
-        self.log.info("Metadata Analysis Verification (Deep Audit)")
-
+        self.log.info("Metadata Analysis Verification (DSN Anchored)")
         if not HAS_LIBS:
             self.log.error("Missing required libraries: netCDF4, numpy")
             return
 
-        # Walk the On-Prem tree to find candidates
         for p_file in self.prem_fld.rglob("*.nc"):
             rel_path = p_file.relative_to(self.prem_fld)
             gccs_twin_dir = self.gccs_fld / rel_path.parent
 
-            if not gccs_twin_dir.exists():
-                self.log.debug(f"  Skipping: Mirrored GCCS folder not found: {rel_path.parent}")
-                continue
+            if not gccs_twin_dir.exists(): continue
 
-            match = re.search(r'^(OR_.*_s\d{14})', p_file.name)
+            match = self.goes_regex.search(p_file.name)
             if not match: continue
 
-            identity_prefix = match.group(1)
-            parts = identity_prefix.split('_')
+            prod_info = {
+                'dsn': match.group('dsn'),
+                'time': match.group('start'),
+                'prefix': f"OR_{match.group('dsn')}_{match.group('sat')}_s{match.group('start')}"
+            }
 
-            # --- THE UPDATED IP-AWARE FIX ---
-            # IP Example: ['OR', 'I', 'ABI-L2-LSA...', 'G18', 'sYYYY...']
-            if parts[1] == 'I':
-                prod_name = f"{parts[1]}_{parts[2]}" # Result: I_ABI-L2-LSA...
-                start_time = parts[4][1:]
-            else:
-                # Standard Example: ['OR', 'ABI-L2-LSA...', 'G18', 'sYYYY...']
-                prod_name = parts[1]
-                start_time = parts[3][1:]
+            gccs_matches = list(gccs_twin_dir.glob(f"{prod_info['prefix']}*.nc"))
+            if gccs_matches:
+                self.analyze_pair(p_file, gccs_matches[0], prod_info)
 
-            gccs_matches = list(gccs_twin_dir.glob(f"{identity_prefix}*.nc"))
-            if not gccs_matches:
-                self.log.warn(f"  GCCS Mirror Missing: {identity_prefix} in {rel_path.parent}")
-                continue
-
-            self.analyze_pair(p_file, gccs_matches[0], {'name': prod_name, 'time': start_time})
-
-        # Save the audit report
         if self.results:
             with open(self.output_file, 'w', newline='') as csvfile:
                 writer = csv.writer(csvfile)
@@ -155,32 +131,20 @@ class MetadataAuditor:
         else:
             self.log.info("No metadata discrepancies found.")
 
-# =============================================================================
-# CLI PARSER
-# =============================================================================
-
 def parse_args():
-    parser = argparse.ArgumentParser(
-        prog="meta_pave.py",
-        description="Compares NetCDF metadata between mirrored folders and generates a report."
-    )
-    # Positional Arguments
+    parser = argparse.ArgumentParser(prog="meta_pave.py")
     parser.add_argument("prem_fld", help="Folder containing On-Prem data")
     parser.add_argument("gccs_fld", help="Folder containing GCCS data")
     parser.add_argument("output", help="CSV report filename or destination folder")
-
-    # Options
     parser.add_argument("-q", "--quiet", action="store_true", help="Only display WARNING/ERROR logs")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
     parser.add_argument("-d", "--debug", action="store_true", help="Enable debug logging")
-
     return parser.parse_args()
 
 def main():
     args = parse_args()
     lvl = "DEBUG" if args.debug else "VERBOSE" if args.verbose else "QUIET" if args.quiet else "INFO"
     log = Logger(lvl)
-
     setup_interrupt_handler(log)
     MetadataAuditor(args, log).execute()
 

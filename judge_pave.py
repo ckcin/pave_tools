@@ -2,7 +2,7 @@
 """
 JUDGE-PAVE: Quality Gate Verdict Engine
 =======================================
-VERSION: 1.0.7 (Timeseries-Aware & Robust Metric Search)
+VERSION: 1.1.0 (DSN-Aware & Re-Integrated Structural Logic)
 """
 
 import argparse
@@ -38,8 +38,8 @@ class PaveJudge:
 
     def _judge_science(self):
         """
-        Tiered Science Logic (v1.0.7):
-        - Scans ALL columns starting at index 10 (V1, V2, V3...) for raw data.
+        Tiered Science Logic (v1.1.0):
+        - Scans ALL columns starting at index 11 (V1, V2, V3...) for raw data.
         - FAIL: Any single data point < SCI_FAIL_LIMIT (0.900).
         - FAIL: Product-wide average (all points) < SCI_PASS_THRESHOLD (0.990).
         - CHECK: Product average >= 0.990, but one or more individual points < 0.990.
@@ -72,9 +72,9 @@ class PaveJudge:
         if df.empty:
             return {}
 
-        # Re-map the basic metadata columns (0-9)
-        # 0:Product/Var, 1:Sat, 2:Metric, 3:Count, 4:Min, 5:Max, 6:Mean, 7:Median, 8:NaN, 9:T1, 10:V1...
-        df = df.rename(columns={0: 'Product/Var', 1: 'Sat', 2: 'Metric'})
+        # Re-map the basic metadata columns (0-10) for stats_pave v3.1.0
+        # 0:Product (DSN), 1:Variable, 2:Sat, 3:Metric, 4:Count, 5:Min, 6:Max, 7:Mean, 8:Median, 9:NaN, 10:T1, 11:V1...
+        df = df.rename(columns={0: 'Product', 1: 'Variable', 2: 'Sat', 3: 'Metric'})
 
         # Filter for science metrics (R-squared)
         df['Metric'] = df['Metric'].astype(str).str.lower().str.strip()
@@ -87,21 +87,19 @@ class PaveJudge:
                 self.log.debug(f"Metrics actually found in file: {all_metrics}")
             return {}
 
-        # Group data points by parent product
-        # Format in stats_pave is "Product_Scene/Variable"
-        df_r2['Parent'] = df_r2['Product/Var'].astype(str).str.split('/').str[0]
-
-        for prod_base, group in df_r2.groupby('Parent'):
+        # Group data points by parent product (The DSN in column 0)
+        # Note: In the DSN-centric model, 'Product' is already the base ID
+        for prod_base, group in df_r2.groupby('Product'):
             status = "PASS"
             details = []
             all_raw_points = []
 
             for _, row in group.iterrows():
-                var_name = str(row['Product/Var']).split('/')[-1]
+                var_name = str(row['Variable'])
 
-                # Extract values from columns 10, 12, 14... (V1, V2, V3...)
-                # Based on stats_pave v2.9.9: Index 9=T1, 10=V1, 11=T2, 12=V2...
-                raw_vals = row.iloc[10::2].dropna()
+                # Extract values from columns 11, 13, 15... (V1, V2, V3...)
+                # Based on stats_pave v3.1.0: Index 10=T1, 11=V1, 12=T2, 13=V2...
+                raw_vals = row.iloc[11::2].dropna()
                 numeric_vals = pd.to_numeric(raw_vals, errors='coerce').dropna().tolist()
 
                 if not numeric_vals:
@@ -172,7 +170,7 @@ class PaveJudge:
         final_rows = []
 
         self.log.info("-" * 110)
-        self.log.info(f"{'PRODUCT':<30} | {'SCIENCE':<10} | {'METADATA':<10} | {'VERDICT'}")
+        self.log.info(f"{'PRODUCT (DSN)':<45} | {'SCIENCE':<10} | {'METADATA':<10} | {'VERDICT'}")
         self.log.info("-" * 110)
 
         for prod in all_products:
@@ -188,7 +186,7 @@ class PaveJudge:
             else:
                 verdict, icon = "PASS", ICON_PASS
 
-            self.log.info(f"{prod:<30} | {s_res['status']:<10} | {m_res['status']:<10} | {icon}")
+            self.log.info(f"{prod:<45} | {s_res['status']:<10} | {m_res['status']:<10} | {icon}")
 
             final_rows.append({
                 "Product": prod,
@@ -202,6 +200,10 @@ class PaveJudge:
         pd.DataFrame(final_rows).to_csv(self.verdict_file, index=False)
         self.log.info("-" * 110)
         self.log.info(f"Final Verdict Report: {self.verdict_file}")
+
+# ==============================================================================
+# CLI ENTRY POINT
+# ==============================================================================
 
 def parse_args():
     parser = argparse.ArgumentParser(prog="judge_pave.py")

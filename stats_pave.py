@@ -2,7 +2,7 @@
 """
 STATS-PAVE: Statistical Summary Engine
 =======================================
-VERSION: 2.9.4 (Full Product Config - Expanded Formatting)
+VERSION: 3.1.0 (DSN Metadata Integration)
 """
 
 import argparse
@@ -21,9 +21,10 @@ class StatsHarvester:
         self.output_file = dest / "glance_stats_summary.csv" if dest.is_dir() else dest
         self.log = log
         self.quiet = getattr(args, 'quiet', False)
-        self.goes_regex = re.compile(r"(?P<sat>G1[89]).*?s(?P<start>\d{14})")
-
-        # FULL ALGORITHM CONFIGURATION - EVERY ENTRY ON ITS OWN LINE
+        
+        # Capture DSN (between OR_ and _G##), Sat, and Start Timestamp
+        self.goes_regex = re.compile(r"OR_(?P<dsn>.*?)_(?P<sat>G1[89]).*?s(?P<start>\d{14})")
+        
         self.alg_config = {
             "CMIP": ["CMI", "DQF"],
             "ADP": ["Cloud", "DQF", "Dust", "PQI1", "PQI2", "Smoke", "SnowIce"],
@@ -89,59 +90,97 @@ class StatsHarvester:
             "GEOF": ["DQF", "IB_data", "IB_mag_ACRF", "IB_mag_BRF", "IB_mag_ECI", "IB_mag_EPN", "OB_data", "OB_mag_ACRF", "OB_mag_BRF", "OB_mag_ECI", "OB_mag_EPN", "total_mag_ACRF"],
         }
 
-    def summarize_stats(self, label, html_files):
+    def summarize_stats(self, var_name, html_files):
         results = []
-        targets = ['r-squared correlation', 'finite in only one fraction']
+        targets = ['r-squared correlation', 'finite_in_only_one_fraction']
+        
         for f in html_files:
             try:
-                with open(f, encoding='utf-8', errors='ignore') as fp: page = fp.read()
+                with open(f, encoding='utf-8', errors='ignore') as fp: 
+                    page = fp.read()
                 if not page.strip(): continue
+                
                 m = self.goes_regex.search(page[:10000])
                 if not m: continue
+                
                 dfs = pd.read_html(StringIO(page))
                 for df in dfs:
                     if df.empty or df.shape[1] < 2: continue
-                    rows = df.iloc[:, 0].astype(str).str.lower().str.replace(r'[^a-z0-9]', '', regex=True)
-                    for t_name in targets:
-                        norm_t = re.sub(r'[^a-z0-9]', '', t_name.lower())
-                        if any(norm_t in r for r in rows.values):
+                    
+                    rows_norm = df.iloc[:, 0].astype(str).str.lower().str.replace(r'[^a-z0-9]', '', regex=True)
+                    for tname in targets:
+                        normt = re.sub(r'[^a-z0-9]', '', tname.lower())
+                        if any(normt in r for r in rows_norm.values):
                             df.columns = ['Stat', 'Both', 'File A', 'File B'][:df.shape[1]]
-                            match_key = next((k for k in df.set_index('Stat').index if norm_t in re.sub(r'[^a-z0-9]', '', str(k).lower())), None)
-                            if match_key:
-                                val = df.set_index('Stat').loc[match_key, 'Both']
-                                results.append({'Label': label, 'Sat': m.group('sat'), 'Start': m.group('start'), 'Metric': t_name, 'Value': val})
-                                break
+                            v_idx = df.set_index('Stat').index
+                            matchk = next((k for k in v_idx if normt in re.sub(r'[^a-z0-9]', '', str(k).lower())), None)
+                            if matchk:
+                                val = df.set_index('Stat').loc[matchk, 'Both']
+                                results.append({
+                                    'Product': m.group('dsn'), # DSN from metadata
+                                    'Variable': var_name,
+                                    'Sat': m.group('sat'), 
+                                    'Start': m.group('start'), 
+                                    'Metric': tname, 
+                                    'Value': val
+                                })
             except Exception: continue
-        if results: self._write_summary(results)
+            
+        if results: 
+            self._write_summary(results)
 
     def _write_summary(self, res):
-        df = pd.DataFrame(res)
-        df['Start_DT'] = pd.to_datetime(df['Start'], format="%Y%j%H%M%S%f")
-        for (label, metric, sat), group in df.groupby(['Label', 'Metric', 'Sat']):
-            vals = pd.to_numeric(group.sort_values('Start_DT')['Value'], errors='coerce').dropna()
-            if vals.empty: continue
-            line = f"{label:35}, {sat:3}, {metric:12}, {len(vals):3}, {vals.min():10.8f}, {vals.max():10.8f}, {vals.mean():10.8f}, {vals.median():10.8f}, {group['Value'].isna().sum():3}"
-            if not self.quiet: self.log.verbose(line)
-            ts_str = "".join([f",{r['Start']},{r['Value']}" for _, r in group.sort_values('Start_DT').iterrows()])
-            with open(self.output_file, 'a') as f: f.write(line + ts_str + "\n")
+        df = pd.DataFrame(res).sort_values('Start')
+        
+        with open(self.output_file, 'a') as f:
+            # Group by Metadata DSN and Variable
+            for (prod, var, metric, sat), group in df.groupby(['Product', 'Variable', 'Metric', 'Sat'], sort=False):
+                vals = pd.to_numeric(group['Value'], errors='coerce').dropna()
+                if vals.empty: continue
+                
+                meta_fields = [
+                    prod, var, sat, metric, str(len(vals)),
+                    f"{vals.min():.8f}", f"{vals.max():.8f}",
+                    f"{vals.mean():.8f}", f"{vals.median():.8f}",
+                    str(group['Value'].isna().sum())
+                ]
+                
+                # Append time series: T1, V1, T2, V2...
+                ts_flat = []
+                for _, row in group.iterrows():
+                    ts_flat.append(str(row['Start']))
+                    ts_flat.append(str(row['Value']))
+                
+                csv_line = ",".join(meta_fields) + "," + ",".join(ts_flat) + "\n"
+                f.write(csv_line)
+                
+                if not self.quiet:
+                    self.log.verbose(f"{prod:<30} | {var:<15} | Mean: {vals.mean():.8f}")
 
     def execute(self):
-        if not self.glance_dir.exists(): self.log.error(f"Missing: {self.glance_dir}"); return
-        self.output_file.write_text("Product/Var, Sat, Metric, Count, Min, Max, Mean, Median, NaN, Time Series\n")
-        all_keys = sorted(self.alg_config.keys(), key=len, reverse=True)
+        if not self.glance_dir.exists(): 
+            self.log.error(f"Missing: {self.glance_dir}")
+            return
+            
+        header = "Product,Variable,Sat,Metric,Count,Min,Max,Mean,Median,NaN,T1,V1,T2,V2,T3,V3...\n"
+        self.output_file.write_text(header)
+        
+        allk = sorted(self.alg_config.keys(), key=len, reverse=True)
         for instr_dir in [d for d in self.glance_dir.iterdir() if d.is_dir()]:
             for prod_dir in [p for p in instr_dir.iterdir() if p.is_dir()]:
                 norm = prod_dir.name.upper().replace('-', '').replace('_', '')
-                match = next((k for k in all_keys if k in norm), None)
+                match = next((k for k in allk if k in norm), None)
                 if match:
                     for var in self.alg_config[match]:
-                        htmls = list(prod_dir.rglob(f"{var}/index.html")) or [h for h in prod_dir.rglob("index.html") if h.parent.name.upper() == var.upper()]
-                        if htmls: self.summarize_stats(f"{prod_dir.name}/{var}", htmls)
+                        htmls = list(prod_dir.rglob(f"{var}/index.html")) or \
+                                [h for h in prod_dir.rglob("index.html") if h.parent.name.upper() == var.upper()]
+                        if htmls: 
+                            self.summarize_stats(var, htmls)
 
 def parse_args():
-    parser = argparse.ArgumentParser(prog="stats_pave.py", description="Harvest glance statistics.")
-    parser.add_argument("glance_fld", help="Root report folder")
-    parser.add_argument("dest_fld", help="CSV path or folder")
+    parser = argparse.ArgumentParser(prog="stats_pave.py")
+    parser.add_argument("glance_fld")
+    parser.add_argument("dest_fld")
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("-d", "--debug", action="store_true")
     parser.add_argument("-q", "--quiet", action="store_true")
@@ -149,8 +188,9 @@ def parse_args():
 
 def main():
     args = parse_args()
-    lvl = "DEBUG" if args.debug else "VERBOSE" if args.verbose else "QUIET" if args.quiet else "INFO"
-    log = Logger(lvl); setup_interrupt_handler(log); StatsHarvester(args, log).execute()
+    log = Logger("DEBUG" if args.debug else "VERBOSE" if args.verbose else "QUIET" if args.quiet else "INFO")
+    setup_interrupt_handler(log)
+    StatsHarvester(args, log).execute()
 
-if __name__ == "__main__":
+if __name__ == "__main__": 
     main()
