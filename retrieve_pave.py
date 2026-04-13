@@ -73,7 +73,7 @@ def get_gccs_products(args, gccs_path, log):
                 dest = gccs_path / instr / folder_name / year / doy
                 dest.mkdir(parents=True, exist_ok=True)
                 executor.submit(run_s3_sync, f"s3://{bucket_name}/{pref}{year}/{doy}/",
-                               dest, f"*_s{ts}*", log, label=f"Sync GCCS: {folder_name}")
+                               dest, f"*_s{ts}*.nc", log, label=f"Sync GCCS: {folder_name}")
 
 def get_on_prem_products(args, gccs_path, prem_path, log):
     log.info("On-Prem Mirroring & Restructuring")
@@ -106,7 +106,7 @@ def get_on_prem_products(args, gccs_path, prem_path, log):
         for ts in args.times:
             year, doy, gpas_str = ts[:4], ts[4:7], get_gpas_date(ts)
             for (instr_name, level_str, instr_gpas, p_name), include_tags in sync_map.items():
-                patterns = [f"*{tag}*_s{ts}*" for tag in include_tags]
+                patterns = [f"*{tag}*_s{ts}*.nc" for tag in include_tags]
                 for sat in [18, 19]:
                     executor.submit(run_s3_sync, f"s3://{PREM_BUCKET}/op/GOES-{sat}/{level_str}/{instr_gpas}/{year}/{gpas_str}/",
                                    tmp_sync_dir, patterns, log, label=f"Sync On-Prem: {p_name}")
