@@ -2,7 +2,7 @@
 """
 SCIENCE-PAVE: Science Level Comparison Engine
 ==============================================
-VERSION: 1.5.5 (Cumulative Status Decoding)
+VERSION: 1.5.7 (CLI Execution Debugging)
 """
 
 import os
@@ -57,14 +57,20 @@ class ScienceAnalyzer:
         report_dest.mkdir(parents=True, exist_ok=True)
 
         cmd = [self.glance_bin, "report", "--nolonlat"]
+
+        # Maintenance: Keep --verbose for glance during PAVE debug sessions
         if self.is_debug or self.is_verbose:
             cmd.append("--verbose")
+
         if self.use_fork:
             cmd.append("--fork")
 
-        cmd += ["-p", str(report_dest), str(p_prod_dir), str(g_prod_dir), "--stripfromname", "e.*"]
+        cmd += ["-p", str(report_dest), str(p_prod_dir), str(g_prod_dir), "--stripfromname", "c.*"]
 
         self.log.info(f"Generating Science Report: {rel_path}")
+
+        # DEBUG: Write out the exact call to glance for troubleshooting
+        self.log.debug(f"  [CLI EXEC] {shlex.join(cmd)}")
 
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
@@ -81,13 +87,10 @@ class ScienceAnalyzer:
                 f_err.seek(0)
                 self._flare_error(rel_path, result.returncode, cmd, f_out.read(), f_err.read())
                 self.log.error(f"!!! GLANCE FATAL ERROR: {rel_path} (Exit: 1) !!!")
-
             # 2. NON-FATAL STATUS (Decoded for Batch Reporting)
             elif result.returncode != 0:
                 decoded_msg = self.decode_glance_status(result.returncode)
                 self.log.warn(f"  [STATUS {result.returncode}] {decoded_msg} for {rel_path}.")
-                return
-
             # 3. SUCCESS
             else:
                 self.log.verbose(f"  Success: {rel_path}")
@@ -123,23 +126,13 @@ def parse_args():
     parser.add_argument("-d", "--debug", action="store_true")
     parser.add_argument("-q", "--quiet", action="store_true")
     parser.add_argument("--bin", default="glance", help="Glance path")
+
     return parser.parse_args()
 
 def main():
     args = parse_args()
-
-    if args.debug:
-        lvl = "DEBUG"
-    elif args.verbose:
-        lvl = "VERBOSE"
-    elif args.quiet:
-        lvl = "QUIET"
-    else:
-        lvl = "INFO"
-
-    log = Logger(lvl)
-    setup_interrupt_handler(log)
-    ScienceAnalyzer(args, log).execute()
+    lvl = "DEBUG" if args.debug else "VERBOSE" if args.verbose else "QUIET" if args.quiet else "INFO"
+    log = Logger(lvl); setup_interrupt_handler(log); ScienceAnalyzer(args, log).execute()
 
 if __name__ == "__main__":
     main()
