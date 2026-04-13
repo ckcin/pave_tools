@@ -2,7 +2,7 @@
 """
 STATS-PAVE: Statistical Summary Engine
 =======================================
-VERSION: 3.1.0 (DSN Metadata Integration)
+VERSION: 3.1.2 (Explicit SUVI Configuration Rows)
 """
 
 import argparse
@@ -21,10 +21,11 @@ class StatsHarvester:
         self.output_file = dest / "glance_stats_summary.csv" if dest.is_dir() else dest
         self.log = log
         self.quiet = getattr(args, 'quiet', False)
-        
+
         # Capture DSN (between OR_ and _G##), Sat, and Start Timestamp
         self.goes_regex = re.compile(r"OR_(?P<dsn>.*?)_(?P<sat>G1[89]).*?s(?P<start>\d{14})")
-        
+
+        # Complete Algorithm Configuration Mapping
         self.alg_config = {
             "CMIP": ["CMI", "DQF"],
             "ADP": ["Cloud", "DQF", "Dust", "PQI1", "PQI2", "Smoke", "SnowIce"],
@@ -88,26 +89,41 @@ class StatsHarvester:
             "TPW": ["DQF_Overall", "DQF_Retrieval", "DQF_SkinTemp", "TPW"],
             "RAD": ["Rad", "DQF"],
             "GEOF": ["DQF", "IB_data", "IB_mag_ACRF", "IB_mag_BRF", "IB_mag_ECI", "IB_mag_EPN", "OB_data", "OB_mag_ACRF", "OB_mag_BRF", "OB_mag_ECI", "OB_mag_EPN", "total_mag_ACRF"],
+            "FE093": ["RAD", "DQF"],
+            "FE131": ["RAD", "DQF"],
+            "FE171": ["RAD", "DQF"],
+            "FE195": ["RAD", "DQF"],
+            "FE284": ["RAD", "DQF"],
+            "HE303": ["RAD", "DQF"],
+            "SFXR": ["irradiance_xrsa1", "irradiance_xrsa2", "primary_xrsa", "irradiance_xrsb1", "irradiance_xrsb2", "primary_xrsb", "xrs_ratio", "corrected_current_xrsa_1", "corrected_current_xrsa_2", "corrected_current_xrsa_3", "corrected_current_xrsa_4", "corrected_current_xrsb_1", "corrected_current_xrsb_2", "corrected_current_xrsb_3", "corrected_current_xrsb_4", "sps_temperature"],
+            "SFEU": ["irradianceSpectrum", "euvsa_corrected_currents_256", "euvsa_corrected_currents_284", "euvsa_corrected_currents_304", "euvsa_corrected_currents_dark", "euvsb_corrected_currents_1175 ", "euvsb_corrected_currents_1216", "euvsb_corrected_currents_1335", "euvsb_corrected_currents_1405", "euvsb_corrected_currents_dark"],
         }
 
     def summarize_stats(self, var_name, html_files):
         results = []
         targets = ['r-squared correlation', 'finite_in_only_one_fraction']
-        
+        self.log.debug(f"  [SUMMARIZE] Processing {len(html_files)} HTML files for Variable: {var_name}")
+
         for f in html_files:
             try:
-                with open(f, encoding='utf-8', errors='ignore') as fp: 
+                with open(f, encoding='utf-8', errors='ignore') as fp:
                     page = fp.read()
-                if not page.strip(): continue
-                
+                if not page.strip():
+                    self.log.debug(f"    [SKIP] Empty HTML file: {f.name}")
+                    continue
+
                 m = self.goes_regex.search(page[:10000])
-                if not m: continue
-                
+                if not m:
+                    self.log.debug(f"    [SKIP] Could not find DSN/Metadata in HTML: {f.name}")
+                    continue
+
                 dfs = pd.read_html(StringIO(page))
+                self.log.debug(f"    [TABLES] Found {len(dfs)} tables in {f.name}")
+
                 for df in dfs:
                     if df.empty or df.shape[1] < 2: continue
-                    
                     rows_norm = df.iloc[:, 0].astype(str).str.lower().str.replace(r'[^a-z0-9]', '', regex=True)
+
                     for tname in targets:
                         normt = re.sub(r'[^a-z0-9]', '', tname.lower())
                         if any(normt in r for r in rows_norm.values):
@@ -116,66 +132,69 @@ class StatsHarvester:
                             matchk = next((k for k in v_idx if normt in re.sub(r'[^a-z0-9]', '', str(k).lower())), None)
                             if matchk:
                                 val = df.set_index('Stat').loc[matchk, 'Both']
+                                self.log.debug(f"      [MATCH] Found {tname}: {val}")
                                 results.append({
-                                    'Product': m.group('dsn'), # DSN from metadata
+                                    'Product': m.group('dsn'),
                                     'Variable': var_name,
-                                    'Sat': m.group('sat'), 
-                                    'Start': m.group('start'), 
-                                    'Metric': tname, 
+                                    'Sat': m.group('sat'),
+                                    'Start': m.group('start'),
+                                    'Metric': tname,
                                     'Value': val
                                 })
-            except Exception: continue
-            
-        if results: 
+            except Exception as e:
+                self.log.debug(f"    [ERROR] Failed to parse {f.name}: {e}")
+                continue
+
+        if results:
             self._write_summary(results)
+        else:
+            self.log.debug(f"  [SUMMARIZE] No matching metrics found for {var_name}")
 
     def _write_summary(self, res):
         df = pd.DataFrame(res).sort_values('Start')
-        
         with open(self.output_file, 'a') as f:
-            # Group by Metadata DSN and Variable
             for (prod, var, metric, sat), group in df.groupby(['Product', 'Variable', 'Metric', 'Sat'], sort=False):
                 vals = pd.to_numeric(group['Value'], errors='coerce').dropna()
                 if vals.empty: continue
-                
                 meta_fields = [
                     prod, var, sat, metric, str(len(vals)),
                     f"{vals.min():.8f}", f"{vals.max():.8f}",
                     f"{vals.mean():.8f}", f"{vals.median():.8f}",
                     str(group['Value'].isna().sum())
                 ]
-                
-                # Append time series: T1, V1, T2, V2...
                 ts_flat = []
                 for _, row in group.iterrows():
                     ts_flat.append(str(row['Start']))
                     ts_flat.append(str(row['Value']))
-                
-                csv_line = ",".join(meta_fields) + "," + ",".join(ts_flat) + "\n"
-                f.write(csv_line)
-                
+                f.write(",".join(meta_fields) + "," + ",".join(ts_flat) + "\n")
                 if not self.quiet:
                     self.log.verbose(f"{prod:<30} | {var:<15} | Mean: {vals.mean():.8f}")
 
     def execute(self):
-        if not self.glance_dir.exists(): 
+        if not self.glance_dir.exists():
             self.log.error(f"Missing: {self.glance_dir}")
             return
-            
+        self.log.info(f"Scanning Glance workspace: {self.glance_dir}")
         header = "Product,Variable,Sat,Metric,Count,Min,Max,Mean,Median,NaN,T1,V1,T2,V2,T3,V3...\n"
         self.output_file.write_text(header)
-        
         allk = sorted(self.alg_config.keys(), key=len, reverse=True)
+
         for instr_dir in [d for d in self.glance_dir.iterdir() if d.is_dir()]:
+            self.log.debug(f"Checking Instrument Dir: {instr_dir.name}")
             for prod_dir in [p for p in instr_dir.iterdir() if p.is_dir()]:
                 norm = prod_dir.name.upper().replace('-', '').replace('_', '')
                 match = next((k for k in allk if k in norm), None)
                 if match:
+                    self.log.debug(f"  [MATCHED] Product folder {prod_dir.name} matched config key: {match}")
                     for var in self.alg_config[match]:
                         htmls = list(prod_dir.rglob(f"{var}/index.html")) or \
                                 [h for h in prod_dir.rglob("index.html") if h.parent.name.upper() == var.upper()]
-                        if htmls: 
+                        if htmls:
                             self.summarize_stats(var, htmls)
+                        else:
+                            self.log.debug(f"    [MISSING] No HTML reports found for {var} in {prod_dir.name}")
+                else:
+                    self.log.debug(f"  [SKIP] No config mapping for folder: {prod_dir.name}")
 
 def parse_args():
     parser = argparse.ArgumentParser(prog="stats_pave.py")
@@ -192,5 +211,5 @@ def main():
     setup_interrupt_handler(log)
     StatsHarvester(args, log).execute()
 
-if __name__ == "__main__": 
+if __name__ == "__main__":
     main()
