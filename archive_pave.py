@@ -2,7 +2,7 @@
 """
 ARCHIVE-PAVE: Standalone Workspace Compression Utility
 ======================================================
-VERSION: 1.1.1 (Empty Folder Purge)
+VERSION: 1.1.2 (IP Tarball Relocation)
 """
 
 import os
@@ -35,12 +35,23 @@ def run_archive(folder_path, log):
         perform_compression(path, log)
 
 def perform_compression(path, log):
-    # 1. Inventory the source
-    # We look for any file recursively to determine if data exists
+    # 1. IP RELOCATION: Move large tarballs out of 'prem' prior to archiving
+    if path.name == "prem":
+        ip_tars = list(path.glob("*.tar"))
+        if ip_tars:
+            log.info(f"Relocating {len(ip_tars)} IP Tarballs to Workspace Root...")
+            for tar in ip_tars:
+                dest = path.parent / tar.name
+                try:
+                    shutil.move(str(tar), str(dest))
+                    log.verbose(f"  Moved: {tar.name}")
+                except Exception as e:
+                    log.warn(f"  Failed to move {tar.name}: {e}")
+
+    # 2. Inventory the source
     source_files = [f for f in path.rglob("*") if f.is_file()]
 
     if not source_files:
-        # NEW LOGIC: If no files are found, simply delete the directory tree
         log.info(f"Cleanup: Removing empty folder structure {path.name}")
         try:
             shutil.rmtree(path)
@@ -49,22 +60,20 @@ def perform_compression(path, log):
             log.warn(f"Failed to remove empty directory {path.name}: {e}")
         return
 
-    # 2. Proceed with archiving if files exist
+    # 3. Create Archive
     tar_name = f"{path.name}.tar.gz"
     tar_path = path.parent / tar_name
     
     log.info(f"Archiving {path.name} ({len(source_files)} files) -> {tar_name}")
 
     try:
-        # 3. Create the compressed archive
         with tarfile.open(tar_path, "w:gz") as tar:
             tar.add(path, arcname=path.name)
 
-        # 4. Verify the archive count
+        # 4. Verification Gate
         with tarfile.open(tar_path, "r:gz") as tar_check:
             archive_members = [m for m in tar_check.getmembers() if m.isfile()]
 
-        # 5. Verification Gate
         if len(archive_members) == len(source_files):
             log.verbose(f"Verification Successful for {path.name}.")
             shutil.rmtree(path)
@@ -80,7 +89,7 @@ def perform_compression(path, log):
 def parse_args():
     parser = argparse.ArgumentParser(
         prog="archive_pave.py",
-        description="Compress PAVE data folders and delete sources. Empty folders are removed."
+        description="Compress PAVE data folders and delete sources. Relocates IP tars."
     )
     parser.add_argument("path", help="Path to a PAVE workspace root or a specific folder")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -89,17 +98,8 @@ def parse_args():
 
 def main():
     args = parse_args()
-
-    if args.verbose:
-        lvl = "VERBOSE"
-    elif args.quiet:
-        lvl = "QUIET"
-    else:
-        lvl = "INFO"
-
-    log = Logger(lvl)
+    log = Logger("VERBOSE" if args.verbose else "QUIET" if args.quiet else "INFO")
     setup_interrupt_handler(log)
-
     run_archive(args.path, log)
 
 if __name__ == "__main__":
