@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-ARCHIVE-PAVE: Standalone Workspace Compression Utility
-======================================================
-VERSION: 1.1.2 (IP Tarball Relocation)
+ARCHIVE-PAVE: Workspace Cleanup Utility
+=======================================
+VERSION: 1.1.4 (IP Data Immunity)
 """
 
 import os
@@ -16,11 +16,19 @@ from pave_utils import Logger, setup_interrupt_handler
 # Folders we are allowed to compress and delete
 TARGET_FOLDERS = ["gccs", "prem", "glance", "collocation", "coll"]
 
+# Folders explicitly immune to archival/deletion
+FORBIDDEN_FOLDERS = ["ip_data", "stats"]
+
 def run_archive(folder_path, log):
     path = Path(folder_path).resolve()
 
     if not path.exists():
         log.warn(f"Path does not exist: {path}")
+        return
+
+    # Explicit Guard: Do not process forbidden folders directly
+    if path.name in FORBIDDEN_FOLDERS:
+        log.info(f"Access Denied: Folder '{path.name}' is immune to archival.")
         return
 
     # Check if the path is a PAVE root (contains multiple targets)
@@ -35,7 +43,7 @@ def run_archive(folder_path, log):
         perform_compression(path, log)
 
 def perform_compression(path, log):
-    # 1. IP RELOCATION: Move large tarballs out of 'prem' prior to archiving
+    # 1. IP RELOCATION (Safety Net for non-preserved manual tars)
     if path.name == "prem":
         ip_tars = list(path.glob("*.tar"))
         if ip_tars:
@@ -48,7 +56,7 @@ def perform_compression(path, log):
                 except Exception as e:
                     log.warn(f"  Failed to move {tar.name}: {e}")
 
-    # 2. Inventory the source
+    # 2. Inventory the remaining source files
     source_files = [f for f in path.rglob("*") if f.is_file()]
 
     if not source_files:
@@ -60,15 +68,15 @@ def perform_compression(path, log):
             log.warn(f"Failed to remove empty directory {path.name}: {e}")
         return
 
-    # 3. Create Archive
+    # 3. Create Archive for the rest of the directory
     tar_name = f"{path.name}.tar.gz"
     tar_path = path.parent / tar_name
     
     log.info(f"Archiving {path.name} ({len(source_files)} files) -> {tar_name}")
 
     try:
-        with tarfile.open(tar_path, "w:gz") as tar:
-            tar.add(path, arcname=path.name)
+        with tarfile.open(tar_path, "w:gz") as tar_out:
+            tar_out.add(path, arcname=path.name)
 
         # 4. Verification Gate
         with tarfile.open(tar_path, "r:gz") as tar_check:
@@ -89,7 +97,7 @@ def perform_compression(path, log):
 def parse_args():
     parser = argparse.ArgumentParser(
         prog="archive_pave.py",
-        description="Compress PAVE data folders and delete sources. Relocates IP tars."
+        description="Compress PAVE data folders. Ignores stats and ip_data."
     )
     parser.add_argument("path", help="Path to a PAVE workspace root or a specific folder")
     parser.add_argument("-v", "--verbose", action="store_true")

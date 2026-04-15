@@ -2,7 +2,7 @@
 """
 RETRIEVE-PAVE: Data Collection Engine
 =====================================
-VERSION: 1.2.9 (Strict Mirroring & Aligned CLI)
+VERSION: 1.3.1 (NC-Only Enforcement & IP Preservation)
 """
 
 import argparse
@@ -15,6 +15,7 @@ import re
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
+# Shared Infrastructure
 from pave_utils import (
     Logger, resolve_meta, get_on_prem_tag, run_s3_sync,
     get_gpas_date, get_start_key, prune_empty_folders,
@@ -23,6 +24,7 @@ from pave_utils import (
 )
 
 def normalize_channels(channels):
+    """Ensures channel inputs are in the cXX format."""
     if not channels: return []
     normalized = []
     for c in channels:
@@ -32,6 +34,7 @@ def normalize_channels(channels):
     return normalized
 
 def match_folder(folder_name, meta, scenes, channels):
+    """Filters S3 prefixes based on product, scene, and channel criteria."""
     fname = folder_name.lower()
     pk = meta['prod_base'].lower()
     if pk not in fname: return False
@@ -45,6 +48,7 @@ def match_folder(folder_name, meta, scenes, channels):
     return True
 
 def get_gccs_products(args, gccs_path, log):
+    """Discovers and retrieves GCCS products from S3 (NetCDF only)."""
     log.info("GCCS Discovery & Retrieval")
     user_channels = normalize_channels(args.channels)
     discovery_list = []
@@ -72,10 +76,12 @@ def get_gccs_products(args, gccs_path, log):
             for bucket_name, pref, folder_name, instr in discovery_list:
                 dest = gccs_path / instr / folder_name / year / doy
                 dest.mkdir(parents=True, exist_ok=True)
+                # Restricted to .nc files only
                 executor.submit(run_s3_sync, f"s3://{bucket_name}/{pref}{year}/{doy}/",
                                dest, f"*_s{ts}*.nc", log, label=f"Sync GCCS: {folder_name}")
 
 def get_on_prem_products(args, gccs_path, prem_path, log):
+    """Mirrors On-Prem data based on GCCS identities (NetCDF only)."""
     log.info("On-Prem Mirroring & Restructuring")
     user_channels = [c.upper() for c in normalize_channels(args.channels)]
     sync_map = {}
@@ -106,11 +112,13 @@ def get_on_prem_products(args, gccs_path, prem_path, log):
         for ts in args.times:
             year, doy, gpas_str = ts[:4], ts[4:7], get_gpas_date(ts)
             for (instr_name, level_str, instr_gpas, p_name), include_tags in sync_map.items():
+                # Restricted to .nc files only
                 patterns = [f"*{tag}*_s{ts}*.nc" for tag in include_tags]
                 for sat in [18, 19]:
                     executor.submit(run_s3_sync, f"s3://{PREM_BUCKET}/op/GOES-{sat}/{level_str}/{instr_gpas}/{year}/{gpas_str}/",
                                    tmp_sync_dir, patterns, log, label=f"Sync On-Prem: {p_name}")
 
+    # Restructure into symmetric folder tree
     gccs_map = {}
     if gccs_path.exists():
         for gccs_file in gccs_path.rglob("*.nc"):
@@ -127,9 +135,15 @@ def get_on_prem_products(args, gccs_path, prem_path, log):
     if tmp_sync_dir.exists(): shutil.rmtree(tmp_sync_dir)
 
 def extract_ips(args, prem_path, gccs_path, log):
+    """Extracts NetCDF members from IP tarballs and manages preservation."""
     gccs_ip_refs = list(gccs_path.rglob("*I_ABI*.nc"))
     if not gccs_ip_refs: return
     log.info(f"Targeted IP Recovery ({len(gccs_ip_refs)} files)")
+
+    preserve_ip = getattr(args, 'preserve_ip', False)
+    ip_data_dir = prem_path.parent / "ip_data"
+    if preserve_ip:
+        ip_data_dir.mkdir(parents=True, exist_ok=True)
 
     with ThreadPoolExecutor(max_workers=args.threads) as executor:
         for ts in args.times:
@@ -150,9 +164,16 @@ def extract_ips(args, prem_path, gccs_path, log):
                             with tf.extractfile(m) as s, open(target, 'wb') as d: d.write(s.read())
                             break
         finally:
-            if tar_path.exists(): os.remove(tar_path)
+            if tar_path.exists():
+                if preserve_ip:
+                    # Relocate to ip_data/
+                    log.info(f"Preserving IP Tar: {tar_path.name} -> ip_data/")
+                    shutil.move(str(tar_path), str(ip_data_dir / tar_path.name))
+                else:
+                    os.remove(tar_path)
 
 def check_symmetry(args, gccs_path, prem_path, log):
+    """Final audit to verify file pair counts."""
     log.info("Retrieval Symmetry Audit")
     log.info(f"{'PRODUCT':<35} | {'STANDARD (G|P)':<14} | {'IP (G|P)':<12}")
     log.info("-" * 75)
@@ -200,6 +221,7 @@ def parse_args():
     parser.add_argument("--scenes", nargs="*", help="Scene filters (f, c, m1, m2)")
     parser.add_argument("--channels", nargs="*", help="Channel list (01-16)")
     parser.add_argument("--dest", default=".", help="Workspace root folder")
+    parser.add_argument("--preserve-ip", action="store_true", help="Preserve IP tars in ip_data/")
     parser.add_argument("-j", "--threads", type=int, default=8, help="Sync threads")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
     parser.add_argument("-d", "--debug", action="store_true", help="Enable debug logging")

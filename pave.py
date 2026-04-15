@@ -2,7 +2,7 @@
 """
 PAVE: Product Analysis & Verification Engine
 ============================================
-VERSION: 1.1.8 (Cleanup Logic Removed)
+VERSION: 1.1.9 (IP Preservation Support)
 """
 
 import argparse
@@ -25,14 +25,15 @@ def parse_args():
     parser.add_argument("--base-dir", default=".", help="Root directory for workspace")
 
     # 3. Skip Switches
-    parser.add_argument("--skip-retrieve", action="store_true", help="Skip STAGE 1")
-    parser.add_argument("--skip-meta", action="store_true", help="Skip STAGE 2")
-    parser.add_argument("--skip-science", action="store_true", help="Skip STAGE 3")
-    parser.add_argument("--skip-collocate", action="store_true", help="Skip STAGE 4")
-    parser.add_argument("--skip-stats", action="store_true", help="Skip STAGE 5")
-    parser.add_argument("--skip-judge", action="store_true", help="Skip STAGE 6")
+    parser.add_argument("--skip-retrieve", action="store_true", help="Skip STAGE 1 - data retrieval")
+    parser.add_argument("--skip-meta", action="store_true", help="Skip STAGE 2 - metadata comparisons")
+    parser.add_argument("--skip-science", action="store_true", help="Skip STAGE 3 - run glance utility")
+    parser.add_argument("--skip-collocate", action="store_true", help="Skip STAGE 4 - run collocation for DMW/GLM")
+    parser.add_argument("--skip-stats", action="store_true", help="Skip STAGE 5 - run summary tool on glance results")
+    parser.add_argument("--skip-judge", action="store_true", help="Skip STAGE 6 - run judgement stage")
 
     # 4. Operational Flags
+    parser.add_argument("--preserve-ip", action="store_true", help="Move IP tars to ip_data/ instead of deleting")
     parser.add_argument("-j", "--threads", type=int, default=8, help="S3 sync threads")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose logs")
     parser.add_argument("-d", "--debug", action="store_true", help="Debug logs")
@@ -113,7 +114,7 @@ def main():
         ScienceAnalyzer(sci_args, log).execute()
 
     # STAGE 4: COLLOCATION
-    is_sparse = any(p.upper().startswith(('DMW', 'GLM')) for p in args.products)
+    is_sparse = any(p.upper().startswith(('DMW', 'GLM', 'SUVI')) for p in args.products)
     if is_sparse and not args.skip_collocate:
         log.info("--- STAGE 4: COLLOCATION ---")
         from collocate_pave import CollocationAnalyzer
