@@ -2,7 +2,7 @@
 """
 SCIENCE-PAVE: Science Level Comparison Engine
 ==============================================
-VERSION: 1.5.7 (CLI Execution Debugging)
+VERSION: 1.5.8 (Log Level Refinement)
 """
 
 import os
@@ -15,6 +15,7 @@ import tempfile
 from pathlib import Path
 from pave_utils import Logger, setup_interrupt_handler
 
+# Suppress common Matplotlib legend warnings from filling up the logs
 warnings.filterwarnings("ignore", message="No artists with labels found to put in legend")
 
 class ScienceAnalyzer:
@@ -29,6 +30,7 @@ class ScienceAnalyzer:
         self.log = log
 
     def _scrub_output(self, text):
+        """Removes repetitive Matplotlib warnings from stderr strings."""
         if not text:
             return ""
         return "\n".join([l for l in text.splitlines() if "No artists with labels found" not in l]).strip()
@@ -38,12 +40,12 @@ class ScienceAnalyzer:
         if code == 0:
             return "Perfect Match"
 
-        # Check for pure multiples of Exit 80 (No Variables Found)
+        # Check for multiples of Exit 80 (No Variables Found)
         if code % 80 == 0:
             count = code // 80
             return f"Skipped: {count} files had no common variables (Exit 80)"
 
-        # Check for pure multiples of Exit 4 (Differences Found)
+        # Check for multiples of Exit 4 (Differences Found)
         if code % 4 == 0:
             count = code // 4
             return f"Analysis Complete: {count} files had differences (Exit 4)"
@@ -52,20 +54,22 @@ class ScienceAnalyzer:
         return f"Non-fatal status (Exit {code})"
 
     def run_glance_report(self, p_prod_dir, g_prod_dir):
+        """Executes the glance report binary for a specific file directory pair."""
         rel_path = p_prod_dir.relative_to(self.prem_root)
         report_dest = self.dest_root / rel_path
         report_dest.mkdir(parents=True, exist_ok=True)
 
+        # Build the command
         cmd = [self.glance_bin, "report", "--nolonlat"]
 
-        # Maintenance: Keep --verbose for glance during PAVE debug sessions
+        # PAVE Debug/Verbose triggers Glance-level verbosity
         if self.is_debug or self.is_verbose:
             cmd.append("--verbose")
 
         if self.use_fork:
             cmd.append("--fork")
 
-        cmd += ["-p", str(report_dest), str(p_prod_dir), str(g_prod_dir), "--stripfromname", "c.*"]
+        cmd += ["-p", str(report_dest), str(p_prod_dir), str(g_prod_dir), "--stripfromname", "e.*"]
 
         self.log.info(f"Generating Science Report: {rel_path}")
 
@@ -74,7 +78,7 @@ class ScienceAnalyzer:
 
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
-        env["MPLBACKEND"] = "Agg"
+        env["MPLBACKEND"] = "Agg" # Force non-interactive backend
 
         with tempfile.NamedTemporaryFile(mode='w+', suffix='.out') as f_out, \
              tempfile.NamedTemporaryFile(mode='w+', suffix='.err') as f_err:
@@ -87,21 +91,26 @@ class ScienceAnalyzer:
                 f_err.seek(0)
                 self._flare_error(rel_path, result.returncode, cmd, f_out.read(), f_err.read())
                 self.log.error(f"!!! GLANCE FATAL ERROR: {rel_path} (Exit: 1) !!!")
+
             # 2. NON-FATAL STATUS (Decoded for Batch Reporting)
             elif result.returncode != 0:
                 decoded_msg = self.decode_glance_status(result.returncode)
                 self.log.warn(f"  [STATUS {result.returncode}] {decoded_msg} for {rel_path}.")
+
             # 3. SUCCESS
             else:
-                self.log.verbose(f"  Success: {rel_path}")
+                # LOG REFINEMENT: Success confirmation moved to debug
+                self.log.debug(f"  Success: {rel_path}")
 
     def _flare_error(self, rel_path, code, cmd, stdout, stderr):
+        """Critical failure logging to stderr."""
         clean_err = self._scrub_output(stderr)
         msg = f"\n{'!'*80}\nGLANCE HARD ERROR | {rel_path} | Code: {code}\n{'-'*80}\nCALL: {shlex.join(cmd)}\n{'-'*80}\nSTDERR: {clean_err}\n{'!'*80}\n"
         sys.__stderr__.write(msg)
         sys.__stderr__.flush()
 
     def execute(self):
+        """Scans the workspace for matching GCCS/Prem folders and triggers reports."""
         if not self.dest_root.exists():
             self.dest_root.mkdir(parents=True, exist_ok=True)
 
@@ -118,21 +127,32 @@ class ScienceAnalyzer:
 
 def parse_args():
     parser = argparse.ArgumentParser(prog="science_pave.py", description="Generate Glance reports.")
-    parser.add_argument("prem_fld", help="On-Prem root")
-    parser.add_argument("gccs_fld", help="GCCS root")
-    parser.add_argument("dest_fld", help="Report destination")
+    parser.add_argument("prem_fld", help="On-Prem root folder")
+    parser.add_argument("gccs_fld", help="GCCS root folder")
+    parser.add_argument("dest_fld", help="Report destination folder")
     parser.add_argument("--fork", action="store_true", help="Parallelize report generation")
-    parser.add_argument("-v", "--verbose", action="store_true")
-    parser.add_argument("-d", "--debug", action="store_true")
-    parser.add_argument("-q", "--quiet", action="store_true")
-    parser.add_argument("--bin", default="glance", help="Glance path")
-
+    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose logs")
+    parser.add_argument("-d", "--debug", action="store_true", help="Debug logs")
+    parser.add_argument("-q", "--quiet", action="store_true", help="Minimal output")
+    parser.add_argument("--bin", default="glance", help="Glance binary path")
     return parser.parse_args()
 
 def main():
     args = parse_args()
-    lvl = "DEBUG" if args.debug else "VERBOSE" if args.verbose else "QUIET" if args.quiet else "INFO"
-    log = Logger(lvl); setup_interrupt_handler(log); ScienceAnalyzer(args, log).execute()
+
+    # Log Level Logic
+    if args.debug:
+        lvl = "DEBUG"
+    elif args.verbose:
+        lvl = "VERBOSE"
+    elif args.quiet:
+        lvl = "QUIET"
+    else:
+        lvl = "INFO"
+
+    log = Logger(lvl)
+    setup_interrupt_handler(log)
+    ScienceAnalyzer(args, log).execute()
 
 if __name__ == "__main__":
     main()
