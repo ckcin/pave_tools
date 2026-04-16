@@ -2,7 +2,7 @@
 """
 RETRIEVE-PAVE: Data Collection Engine
 =====================================
-VERSION: 1.3.1 (NC-Only Enforcement & IP Preservation)
+VERSION: 1.3.3 (Critical GCCS Data Gate)
 """
 
 import argparse
@@ -79,6 +79,13 @@ def get_gccs_products(args, gccs_path, log):
                 # Restricted to .nc files only
                 executor.submit(run_s3_sync, f"s3://{bucket_name}/{pref}{year}/{doy}/",
                                dest, f"*_s{ts}*.nc", log, label=f"Sync GCCS: {folder_name}")
+
+    # CRITICAL DATA GATE
+    total_gccs = len(list(gccs_path.rglob("*.nc")))
+    if total_gccs == 0:
+        log.error("CRITICAL FAILURE: No GCCS files retrieved. Hitting data gate - halting process.")
+
+    log.verbose(f"GCCS Retrieval Summary: Retrieved {total_gccs} NetCDF files.")
 
 def get_on_prem_products(args, gccs_path, prem_path, log):
     """Mirrors On-Prem data based on GCCS identities (NetCDF only)."""
