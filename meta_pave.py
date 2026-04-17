@@ -2,7 +2,7 @@
 """
 META-PAVE: Metadata Analysis Verification Engine
 ================================================
-VERSION: 1.5.0 (Tiered Comparison Logic)
+VERSION: 1.5.2 (Smart De-duplicated Reporting)
 """
 
 import os
@@ -21,15 +21,37 @@ from pave_utils import Logger, setup_interrupt_handler
 # =============================================================================
 
 # Keys that MUST be bit-identical
-CRITICAL_KEYS = ["_FillValue", "valid_range", "valid_min", "valid_max", "scale_factor", "add_offset"]
+CRITICAL_KEYS = [
+    "_FillValue",
+    "valid_range",
+    "valid_min",
+    "valid_max",
+    "scale_factor",
+    "add_offset"
+]
 
 # Tolerance for "Grey" numerical values
 NUMERIC_TOLERANCE = 1e-6
 
 # Severity Search Keys
-WARN_STRINGS = [":data_name", "title", "summary"]
-IGNORE_STRINGS = [":date_created", ":id", ":production_site", ":production_cluster", ":dataset_name", ":timeline_id"]
-KNOWN_STRINGS = ["algorithm_dynamic_input_data_container:"]
+IGNORE_STRINGS = [
+    "date_created",
+    "id",
+    "production_site",
+    "production_cluster",
+    "dataset_name",
+    "timeline_id"
+]
+
+WARN_STRINGS = [
+    "data_name",
+    "title",
+    "summary"
+]
+
+KNOWN_STRINGS = [
+    "algorithm_dynamic_input_data_container"
+]
 
 class MetadataAuditor:
     def __init__(self, args, log):
@@ -40,34 +62,30 @@ class MetadataAuditor:
         self.summary_csv = self.dest_fld / "metadata_audit_summary.csv"
         self.is_verbose = getattr(args, 'verbose', False)
 
+        # Tracking for de-duplication
+        self.reported_fingerprints = set()
+
     def determine_status(self, identity):
-        """
-        Tiered severity logic for mismatches.
-        Categorizes based on search strings; defaults to ERROR.
-        """
-        # 1. Ignored fields
+        """Tiered severity logic for mismatches."""
         if any(s in identity for s in IGNORE_STRINGS):
             return "IGNORE"
 
-        # 2. Known standard discrepancies
         if any(s in identity for s in KNOWN_STRINGS):
             return "KNOWN"
 
-        # 3. Non-critical string/desc warnings
         if any(s in identity for s in WARN_STRINGS):
             return "WARNING"
 
-        # 4. Default to ERROR if not in recognized lists
         return "ERROR"
 
     def values_match(self, key, p, g):
         """Handles exact vs fuzzy matching based on key importance."""
         if p is g:
             return True
+
         if p is None or g is None:
             return False
 
-        # Handle Numeric Arrays/Scalars
         if isinstance(p, (np.ndarray, list, float, int, np.number)):
             p_arr = np.asanyarray(p)
             g_arr = np.asanyarray(g)
@@ -75,16 +93,13 @@ class MetadataAuditor:
             if p_arr.shape != g_arr.shape:
                 return False
 
-            # Check if this is a CRITICAL key requiring exact matching
             is_critical = any(ck in key for ck in CRITICAL_KEYS)
 
             if is_critical:
                 return np.array_equal(p_arr, g_arr, equal_nan=True)
             else:
-                # Fuzzy matching for non-critical numbers
                 return np.allclose(p_arr, g_arr, atol=NUMERIC_TOLERANCE, equal_nan=True)
 
-        # Standard comparison for strings and others
         return str(p).strip() == str(g).strip()
 
     def compare_attributes(self, group_name, p_dict, g_dict):
@@ -113,9 +128,9 @@ class MetadataAuditor:
         file_issues = []
         try:
             with xr.open_dataset(p_file) as ds_p, xr.open_dataset(g_file) as ds_g:
-                # 1. Audit Dimensions
-                p_dims = {k: v for k, v in ds_p.dims.items()}
-                g_dims = {k: v for k, v in ds_g.dims.items()}
+                # 1. Audit Dimensions (Silent sizes check)
+                p_dims = {k: v for k, v in ds_p.sizes.items()}
+                g_dims = {k: v for k, v in ds_g.sizes.items()}
                 file_issues.extend(self.compare_attributes("Dimensions", p_dims, g_dims))
 
                 # 2. Audit Global Attributes
@@ -136,27 +151,26 @@ class MetadataAuditor:
             return [{"Attribute": "FILE_READ", "Status": "ERROR", "Prem": str(e), "GCCS": "N/A"}]
 
     def execute(self):
-        """Scans workspace and generates the metadata audit report."""
+        """Scans workspace and generates the de-duplicated metadata audit report."""
         if not self.dest_fld.exists():
             self.dest_fld.mkdir(parents=True, exist_ok=True)
 
-        self.log.info("Starting Metadata Audit (Version 1.5.0 Tiered Logic)")
+        self.log.info("Starting Metadata Audit (Version 1.5.2 Smart De-duplication)")
 
-        # Initialize CSV Output
         with open(self.summary_csv, 'w', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(["File", "Attribute", "Status", "On-Prem Value", "GCCS Value"])
 
         nc_files = list(self.prem_fld.rglob("*.nc"))
-        total_issues = 0
+        total_unique_issues = 0
 
         for p_file in nc_files:
             rel_path = p_file.relative_to(self.prem_fld)
 
-            # Fuzzy-match logic (ignoring creation time)
+            # Identify Product Type
             m_key = p_file.name.split('_c')[0] if "_c" in p_file.name else p_file.name
-            gccs_twin_dir = self.gccs_fld / rel_path.parent
 
+            gccs_twin_dir = self.gccs_fld / rel_path.parent
             if not gccs_twin_dir.exists():
                 continue
 
@@ -168,23 +182,30 @@ class MetadataAuditor:
                 issues = self.audit_file_pair(p_file, g_file)
 
                 if issues:
-                    total_issues += len(issues)
-                    with open(self.summary_csv, 'a', newline='') as f:
-                        writer = csv.writer(f)
-                        for issue in issues:
-                            writer.writerow([
-                                p_file.name,
-                                issue['Attribute'],
-                                issue['Status'],
-                                issue['Prem'],
-                                issue['GCCS']
-                            ])
+                    for issue in issues:
+                        # Fingerprint: (Product, Attribute, Status, PremValue, GCCSValue)
+                        # This allows anomalies (different values) to be reported while skipping repetitive identical errors.
+                        fingerprint = (m_key, issue['Attribute'], issue['Status'], issue['Prem'], issue['GCCS'])
+
+                        if fingerprint not in self.reported_fingerprints:
+                            self.reported_fingerprints.add(fingerprint)
+                            total_unique_issues += 1
+
+                            with open(self.summary_csv, 'a', newline='') as f:
+                                writer = csv.writer(f)
+                                writer.writerow([
+                                    p_file.name,
+                                    issue['Attribute'],
+                                    issue['Status'],
+                                    issue['Prem'],
+                                    issue['GCCS']
+                                ])
 
                 if self.is_verbose:
-                    self.log.verbose(f"  Audited: {p_file.name} ({len(issues)} issues)")
+                    self.log.verbose(f"  Audited: {p_file.name}")
 
-        status_msg = f"Audit Complete. Total Metadata Discrepancies: {total_issues}"
-        if total_issues > 0:
+        status_msg = f"Audit Complete. Total Unique Discrepancies: {total_unique_issues}"
+        if total_unique_issues > 0:
             self.log.warn(status_msg)
         else:
             self.log.info(status_msg)
@@ -193,9 +214,9 @@ class MetadataAuditor:
 
 def parse_args():
     parser = argparse.ArgumentParser(prog="meta_pave.py")
-    parser.add_argument("prem_fld", help="Folder containing On-Prem data")
-    parser.add_argument("gccs_fld", help="Folder containing GCCS data")
-    parser.add_argument("dest_fld", help="Folder for the CSV report")
+    parser.add_argument("prem_fld")
+    parser.add_argument("gccs_fld")
+    parser.add_argument("dest_fld")
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("-d", "--debug", action="store_true")
     parser.add_argument("-q", "--quiet", action="store_true")
