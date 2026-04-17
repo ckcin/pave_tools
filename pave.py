@@ -2,7 +2,7 @@
 """
 PAVE: Product Analysis & Verification Engine
 ============================================
-VERSION: 1.1.9 (IP Preservation Support)
+VERSION: 1.2.3 (Metadata Parameter Alignment)
 """
 
 import argparse
@@ -32,7 +32,10 @@ def parse_args():
     parser.add_argument("--skip-stats", action="store_true", help="Skip STAGE 5 - run summary tool on glance results")
     parser.add_argument("--skip-judge", action="store_true", help="Skip STAGE 6 - run judgement stage")
 
-    # 4. Operational Flags
+    # 4. Engine Selection
+    parser.add_argument("--use-compare", action="store_true", help="Use lightweight compare_pave.py instead of Glance")
+
+    # 5. Operational Flags
     parser.add_argument("--preserve-ip", action="store_true", help="Move IP tars to ip_data/ instead of deleting")
     parser.add_argument("-j", "--threads", type=int, default=8, help="S3 sync threads")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose logs")
@@ -46,7 +49,9 @@ def initialize_workspace(args, log):
     parts = []
     if args.prefix:
         parts.append(args.prefix)
+
     parts.append(args.times[0])
+
     if args.tag:
         parts.append(args.tag)
 
@@ -65,28 +70,32 @@ def initialize_workspace(args, log):
     log.info(f"Initializing Workspace: {job_folder_name}")
     for p in paths.values():
         p.mkdir(parents=True, exist_ok=True)
+
     return paths
 
 def main():
     args = parse_args()
 
+    # Determine Log Level
     lvl = "DEBUG" if args.debug else "VERBOSE" if args.verbose else "QUIET" if args.quiet else "INFO"
+
     log = Logger(lvl)
     setup_interrupt_handler(log)
 
     ws = initialize_workspace(args, log)
 
-    # STAGE 1: RETRIEVAL
+    # --- STAGE 1: RETRIEVAL ---
     if not args.skip_retrieve:
         log.info("--- STAGE 1: RETRIEVAL ---")
         import retrieve_pave
         args.dest = str(ws['root'])
         retrieve_pave.run_collection(args, log)
 
-    # STAGE 2: METADATA AUDIT
+    # --- STAGE 2: METADATA AUDIT ---
     if not args.skip_meta:
         log.info("--- STAGE 2: METADATA AUDIT ---")
         from meta_pave import MetadataAuditor
+        # Updated to use dest_fld to match Version 1.5.0
         meta_args = argparse.Namespace(
             prem_fld=ws['prem'], 
             gccs_fld=ws['gccs'], 
@@ -97,9 +106,23 @@ def main():
         )
         MetadataAuditor(meta_args, log).execute()
 
-    # STAGE 3: SCIENCE REPORTS
-    if not args.skip_science:
-        log.info("--- STAGE 3: SCIENCE REPORTS ---")
+    # --- STAGE 3: SCIENCE REPORTS ---
+    if args.use_compare:
+        log.info("--- STAGE 3/5: LIGHTWEIGHT COMPARISON ---")
+        import compare_pave
+        comp_args = argparse.Namespace(
+            prem_fld=ws['prem'],
+            gccs_fld=ws['gccs'],
+            dest_fld=ws['glance'], 
+            stats_fld=ws['stats'], 
+            threads=args.threads,
+            verbose=args.verbose,
+            debug=args.debug
+        )
+        compare_pave.PaveComparator(comp_args, log).execute()
+        args.skip_stats = True 
+    elif not args.skip_science:
+        log.info("--- STAGE 3: SCIENCE REPORTS (GLANCE) ---")
         from science_pave import ScienceAnalyzer
         sci_args = argparse.Namespace(
             prem_fld=ws['prem'], 
@@ -113,7 +136,7 @@ def main():
         )
         ScienceAnalyzer(sci_args, log).execute()
 
-    # STAGE 4: COLLOCATION
+    # --- STAGE 4: COLLOCATION ---
     is_sparse = any(p.upper().startswith(('DMW', 'GLM', 'SUVI')) for p in args.products)
     if is_sparse and not args.skip_collocate:
         log.info("--- STAGE 4: COLLOCATION ---")
@@ -131,7 +154,7 @@ def main():
         )
         CollocationAnalyzer(coll_args, log).execute()
 
-    # STAGE 5: STATISTICS HARVESTING
+    # --- STAGE 5: STATISTICS HARVESTING ---
     if not args.skip_stats:
         log.info("--- STAGE 5: STATISTICS HARVESTING ---")
         if any(ws['glance'].iterdir()):
@@ -145,7 +168,7 @@ def main():
             )
             StatsHarvester(stats_args, log).execute()
 
-    # STAGE 6: FINAL VERDICT
+    # --- STAGE 6: FINAL VERDICT ---
     if not args.skip_judge:
         log.info("--- STAGE 6: FINAL VERDICT ---")
         from judge_pave import PaveJudge
@@ -156,6 +179,7 @@ def main():
             debug=args.debug
         )
         PaveJudge(judge_args, log).execute()
+
     log.info(f"PAVE Pipeline Complete. Workspace: {ws['root']}")
 
 if __name__ == "__main__":

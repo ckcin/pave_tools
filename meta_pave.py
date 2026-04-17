@@ -2,7 +2,7 @@
 """
 META-PAVE: Metadata Analysis Verification Engine
 ================================================
-VERSION: 1.4.1 (Tiered Comparison Logic)
+VERSION: 1.5.0 (Tiered Comparison Logic)
 """
 
 import os
@@ -10,83 +10,70 @@ import re
 import csv
 import argparse
 import sys
-import math
 from pathlib import Path
 
-# Shared Infrastructure
+import numpy as np
+import xarray as xr
 from pave_utils import Logger, setup_interrupt_handler
-
-try:
-    from netCDF4 import Dataset
-    import numpy as np
-    HAS_LIBS = True
-except ImportError:
-    HAS_LIBS = False
 
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
 
-REPORT_HEADERS = ["Level", "Product", "StartTime", "Group", "Difference", "From_On_Prem", "From_GCCS", "Notes"]
-
 # Keys that MUST be bit-identical
 CRITICAL_KEYS = ["_FillValue", "valid_range", "valid_min", "valid_max", "scale_factor", "add_offset"]
 
-# Tolerance for "Grey" numerical values (e.g., percentages, mean stats)
+# Tolerance for "Grey" numerical values
 NUMERIC_TOLERANCE = 1e-6
 
+# Severity Search Keys
 WARN_STRINGS = [":data_name", "title", "summary"]
 IGNORE_STRINGS = [":date_created", ":id", ":production_site", ":production_cluster", ":dataset_name", ":timeline_id"]
 KNOWN_STRINGS = ["algorithm_dynamic_input_data_container:"]
-
-# =============================================================================
-# CORE AUDIT ENGINE
-# =============================================================================
 
 class MetadataAuditor:
     def __init__(self, args, log):
         self.prem_fld = Path(args.prem_fld).resolve()
         self.gccs_fld = Path(args.gccs_fld).resolve()
+        self.dest_fld = Path(args.dest_fld).resolve()
         self.log = log
-        self.results = []
-        self.goes_regex = re.compile(r"OR_(?P<dsn>.*?)_(?P<sat>G1[89]).*?s(?P<start>\d{14})")
+        self.summary_csv = self.dest_fld / "metadata_audit_summary.csv"
+        self.is_verbose = getattr(args, 'verbose', False)
 
-        raw_dest = getattr(args, 'output', getattr(args, 'dest_fld', None))
-        if not raw_dest:
-            self.log.error("No output destination provided.")
-            sys.exit(1)
-
-        dest_path = Path(raw_dest)
-        self.output_file = dest_path / "metadata_audit.csv" if dest_path.is_dir() else dest_path
-
-    def filter_diff(self, group, key, p_val, g_val):
-        """Tiered severity logic for mismatches."""
-        identity = f"{group}:{key}"
-
+    def determine_status(self, identity):
+        """
+        Tiered severity logic for mismatches.
+        Categorizes based on search strings; defaults to ERROR.
+        """
         # 1. Ignored fields
-        if any(s in identity for s in IGNORE_STRINGS): return "IGNORE"
+        if any(s in identity for s in IGNORE_STRINGS):
+            return "IGNORE"
 
-        # 2. String comparison - Note potential typo fixes in GCCS
-        if isinstance(p_val, str) and isinstance(g_val, str):
-            if "Global Attributes" in group or "long_name" in key:
-                return "NOTE"  # Fixing a typo in a description is a NOTE, not a FAIL
+        # 2. Known standard discrepancies
+        if any(s in identity for s in KNOWN_STRINGS):
+            return "KNOWN"
+
+        # 3. Non-critical string/desc warnings
+        if any(s in identity for s in WARN_STRINGS):
             return "WARNING"
 
-        # 3. Numerical comparison
-        if any(s in key for s in CRITICAL_KEYS):
-            return "ERROR" # FillValues and Ranges must be exact
-
-        return "WARNING" # Other numeric drifts are warnings
+        # 4. Default to ERROR if not in recognized lists
+        return "ERROR"
 
     def values_match(self, key, p, g):
         """Handles exact vs fuzzy matching based on key importance."""
-        if p is g: return True
-        if p is None or g is None: return False
+        if p is g:
+            return True
+        if p is None or g is None:
+            return False
 
         # Handle Numeric Arrays/Scalars
         if isinstance(p, (np.ndarray, list, float, int, np.number)):
-            p_arr, g_arr = np.asanyarray(p), np.asanyarray(g)
-            if p_arr.shape != g_arr.shape: return False
+            p_arr = np.asanyarray(p)
+            g_arr = np.asanyarray(g)
+
+            if p_arr.shape != g_arr.shape:
+                return False
 
             # Check if this is a CRITICAL key requiring exact matching
             is_critical = any(ck in key for ck in CRITICAL_KEYS)
@@ -94,91 +81,131 @@ class MetadataAuditor:
             if is_critical:
                 return np.array_equal(p_arr, g_arr, equal_nan=True)
             else:
-                # Fuzzy matching for non-critical numbers (e.g., percentages)
+                # Fuzzy matching for non-critical numbers
                 return np.allclose(p_arr, g_arr, atol=NUMERIC_TOLERANCE, equal_nan=True)
 
-        # Standard comparison for strings/others
-        try: return p == g
-        except ValueError: return np.array_equal(p, g)
+        # Standard comparison for strings and others
+        return str(p).strip() == str(g).strip()
 
-    def compare_dicts(self, group_name, prem_dict, gccs_dict, prod_info):
-        all_keys = set(prem_dict.keys()) | set(gccs_dict.keys())
+    def compare_attributes(self, group_name, p_dict, g_dict):
+        """Compares attribute sets and identifies tiered issues."""
+        issues = []
+        all_keys = set(p_dict.keys()) | set(g_dict.keys())
+
         for key in sorted(all_keys):
-            p_val, g_val = prem_dict.get(key), gccs_dict.get(key)
+            p_val = p_dict.get(key)
+            g_val = g_dict.get(key)
 
-            # Use the new context-aware values_match
             if not self.values_match(key, p_val, g_val):
-                diff_type = "GCCS ONLY" if p_val is None else "PREM ONLY" if g_val is None else "MISMATCH"
-                level = self.filter_diff(group_name, key, p_val, g_val)
+                identity = f"{group_name}:{key}"
+                status = self.determine_status(identity)
 
-                # Add context for strings
-                note = "Potential typo fix/improvement" if level == "NOTE" else ""
+                issues.append({
+                    "Attribute": identity,
+                    "Status": status,
+                    "Prem": str(p_val),
+                    "GCCS": str(g_val)
+                })
+        return issues
 
-                self.results.append([level, prod_info['dsn'], prod_info['time'],
-                                   f"{group_name}:{key}", diff_type, str(p_val), str(g_val), note])
-
-    def analyze_pair(self, p_file, g_file, prod_info):
-        self.log.debug(f"Comparing pair: {p_file.name}")
+    def audit_file_pair(self, p_file, g_file):
+        """Full inventory audit: Dimensions, Globals, and Variables."""
+        file_issues = []
         try:
-            with Dataset(p_file, 'r') as ds_p, Dataset(g_file, 'r') as ds_g:
-                self.compare_dicts("Dimensions", {k: d.size for k, d in ds_p.dimensions.items()},
-                                 {k: d.size for k, d in ds_g.dimensions.items()}, prod_info)
-                self.compare_dicts("Global Attributes", {k: ds_p.getncattr(k) for k in ds_p.ncattrs()},
-                                 {k: ds_g.getncattr(k) for k in ds_g.ncattrs()}, prod_info)
-                for var in sorted(set(ds_p.variables.keys()) & set(ds_g.variables.keys())):
-                    self.compare_dicts(f"Variable:{var}",
-                                     {k: ds_p.variables[var].getncattr(k) for k in ds_p.variables[var].ncattrs()},
-                                     {k: ds_g.variables[var].getncattr(k) for k in ds_g.variables[var].ncattrs()}, prod_info)
+            with xr.open_dataset(p_file) as ds_p, xr.open_dataset(g_file) as ds_g:
+                # 1. Audit Dimensions
+                p_dims = {k: v for k, v in ds_p.dims.items()}
+                g_dims = {k: v for k, v in ds_g.dims.items()}
+                file_issues.extend(self.compare_attributes("Dimensions", p_dims, g_dims))
+
+                # 2. Audit Global Attributes
+                file_issues.extend(self.compare_attributes("Global", ds_p.attrs, ds_g.attrs))
+
+                # 3. Audit Variable Attributes
+                common_vars = set(ds_p.variables.keys()) & set(ds_g.variables.keys())
+                for var in sorted(common_vars):
+                    file_issues.extend(self.compare_attributes(
+                        f"Variable:{var}",
+                        ds_p.variables[var].attrs,
+                        ds_g.variables[var].attrs
+                    ))
+
+            return file_issues
         except Exception as e:
-            self.log.warn(f"Analysis failed for {p_file.name}: {e}")
+            self.log.debug(f"      [FAILED] Metadata read error: {e}")
+            return [{"Attribute": "FILE_READ", "Status": "ERROR", "Prem": str(e), "GCCS": "N/A"}]
 
     def execute(self):
-        self.log.info("Metadata Analysis Verification (Tiered Logic Enabled)")
-        if not HAS_LIBS:
-            self.log.error("Missing required libraries: netCDF4, numpy")
-            return
+        """Scans workspace and generates the metadata audit report."""
+        if not self.dest_fld.exists():
+            self.dest_fld.mkdir(parents=True, exist_ok=True)
 
-        for p_file in self.prem_fld.rglob("*.nc"):
+        self.log.info("Starting Metadata Audit (Version 1.5.0 Tiered Logic)")
+
+        # Initialize CSV Output
+        with open(self.summary_csv, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(["File", "Attribute", "Status", "On-Prem Value", "GCCS Value"])
+
+        nc_files = list(self.prem_fld.rglob("*.nc"))
+        total_issues = 0
+
+        for p_file in nc_files:
             rel_path = p_file.relative_to(self.prem_fld)
+
+            # Fuzzy-match logic (ignoring creation time)
+            m_key = p_file.name.split('_c')[0] if "_c" in p_file.name else p_file.name
             gccs_twin_dir = self.gccs_fld / rel_path.parent
-            if not gccs_twin_dir.exists(): continue
 
-            match = self.goes_regex.search(p_file.name)
-            if not match: continue
+            if not gccs_twin_dir.exists():
+                continue
 
-            prod_info = {
-                'dsn': match.group('dsn'),
-                'time': match.group('start'),
-                'prefix': f"OR_{match.group('dsn')}_{match.group('sat')}_s{match.group('start')}"
-            }
+            matches = list(gccs_twin_dir.glob(f"{m_key}_c*.nc")) if "_c" in p_file.name else \
+                      [gccs_twin_dir / p_file.name] if (gccs_twin_dir / p_file.name).exists() else []
 
-            gccs_matches = list(gccs_twin_dir.glob(f"{prod_info['prefix']}*.nc"))
-            if gccs_matches:
-                self.analyze_pair(p_file, gccs_matches[0], prod_info)
+            if matches:
+                g_file = matches[0]
+                issues = self.audit_file_pair(p_file, g_file)
 
-        if self.results:
-            with open(self.output_file, 'w', newline='') as csvfile:
-                writer = csv.writer(csvfile)
-                writer.writerow(REPORT_HEADERS)
-                writer.writerows(self.results)
-            self.log.info(f"Report generated: {self.output_file}")
+                if issues:
+                    total_issues += len(issues)
+                    with open(self.summary_csv, 'a', newline='') as f:
+                        writer = csv.writer(f)
+                        for issue in issues:
+                            writer.writerow([
+                                p_file.name,
+                                issue['Attribute'],
+                                issue['Status'],
+                                issue['Prem'],
+                                issue['GCCS']
+                            ])
+
+                if self.is_verbose:
+                    self.log.verbose(f"  Audited: {p_file.name} ({len(issues)} issues)")
+
+        status_msg = f"Audit Complete. Total Metadata Discrepancies: {total_issues}"
+        if total_issues > 0:
+            self.log.warn(status_msg)
         else:
-            self.log.info("No metadata discrepancies found.")
+            self.log.info(status_msg)
+
+        self.log.info(f"Metadata Report: {self.summary_csv}")
 
 def parse_args():
     parser = argparse.ArgumentParser(prog="meta_pave.py")
     parser.add_argument("prem_fld", help="Folder containing On-Prem data")
     parser.add_argument("gccs_fld", help="Folder containing GCCS data")
-    parser.add_argument("output", help="CSV report filename or destination folder")
-    parser.add_argument("-q", "--quiet", action="store_true")
+    parser.add_argument("dest_fld", help="Folder for the CSV report")
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("-d", "--debug", action="store_true")
+    parser.add_argument("-q", "--quiet", action="store_true")
     return parser.parse_args()
 
 def main():
     args = parse_args()
     lvl = "DEBUG" if args.debug else "VERBOSE" if args.verbose else "QUIET" if args.quiet else "INFO"
-    log = Logger(lvl); setup_interrupt_handler(log)
+    log = Logger(lvl)
+    setup_interrupt_handler(log)
     MetadataAuditor(args, log).execute()
 
 if __name__ == "__main__":
