@@ -2,16 +2,20 @@
 """
 PAVE: Product Analysis & Verification Engine
 ============================================
-VERSION: 1.2.3 (Metadata Parameter Alignment)
+VERSION: 1.2.7 (Symmetry Audit Integration)
 """
 
 import argparse
 import sys
 from pathlib import Path
-from pave_utils import Logger, setup_interrupt_handler
+# Import shared utility for symmetry verification
+from pave_utils import Logger, setup_interrupt_handler, print_symmetry_table
 
 def parse_args():
-    parser = argparse.ArgumentParser(prog="pave.py", description="Orchestrate the GOES-R PAVE pipeline.")
+    parser = argparse.ArgumentParser(
+        prog="pave.py",
+        description="Orchestrate the GOES-R PAVE pipeline."
+    )
 
     # 1. Selection Criteria
     parser.add_argument("products", nargs="+", help="Product shortnames")
@@ -45,6 +49,26 @@ def parse_args():
 
     return parser.parse_args()
 
+def run_symmetry_audit(ws, log):
+    """
+    Performs a high-level inventory check between Prem and GCCS folders.
+    Utilizes shared logic in pave_utils.py.
+    """
+    log.info("--- WORKSPACE SYMMETRY AUDIT ---")
+
+    inventory = get_symmetry_inventory(ws['prem'], ws['gccs'], log)
+
+    log.info("Inventory Summary:")
+    log.info(f"  On-Prem Total: {inventory['prem_total']} files")
+    log.info(f"  GCCS Total:    {inventory['gccs_total']} files")
+    log.info(f"  Matched Pairs: {len(inventory['pairs'])}")
+
+    if inventory['missing_gccs']:
+        log.warn(f"  Symmetry Gap: {len(inventory['missing_gccs'])} On-Prem files have no GCCS match.")
+        if len(inventory['missing_gccs']) < 15:
+            for missing in inventory['missing_gccs']:
+                log.debug(f"    Missing counterpart: {missing}")
+
 def initialize_workspace(args, log):
     parts = []
     if args.prefix:
@@ -73,10 +97,15 @@ def initialize_workspace(args, log):
 
     return paths
 
+def run_symmetry_audit(ws, log):
+    """Triggers the visual symmetry table from shared utils."""
+    log.info("--- WORKSPACE SYMMETRY AUDIT ---")
+    print_symmetry_table(ws['prem'], ws['gccs'], log)
+    
 def main():
     args = parse_args()
 
-    # Determine Log Level
+    # Map CLI flags to the 1.2.4 Logger numeric levels
     lvl = "DEBUG" if args.debug else "VERBOSE" if args.verbose else "QUIET" if args.quiet else "INFO"
 
     log = Logger(lvl)
@@ -91,17 +120,21 @@ def main():
         args.dest = str(ws['root'])
         retrieve_pave.run_collection(args, log)
 
+    # --- MANDATORY SYMMETRY AUDIT ---
+    # Runs even if Stage 1 is skipped
+    run_symmetry_audit(ws, log)
+
     # --- STAGE 2: METADATA AUDIT ---
     if not args.skip_meta:
         log.info("--- STAGE 2: METADATA AUDIT ---")
         from meta_pave import MetadataAuditor
-        # Updated to use dest_fld to match Version 1.5.0
+        # Using dest_fld to match Version 1.5.0 requirements
         meta_args = argparse.Namespace(
-            prem_fld=ws['prem'], 
-            gccs_fld=ws['gccs'], 
-            dest_fld=ws['stats'], 
-            quiet=args.quiet, 
-            verbose=args.verbose, 
+            prem_fld=ws['prem'],
+            gccs_fld=ws['gccs'],
+            dest_fld=ws['stats'],
+            quiet=args.quiet,
+            verbose=args.verbose,
             debug=args.debug
         )
         MetadataAuditor(meta_args, log).execute()
@@ -113,25 +146,25 @@ def main():
         comp_args = argparse.Namespace(
             prem_fld=ws['prem'],
             gccs_fld=ws['gccs'],
-            dest_fld=ws['glance'], 
-            stats_fld=ws['stats'], 
+            dest_fld=ws['glance'],
+            stats_fld=ws['stats'],
             threads=args.threads,
             verbose=args.verbose,
             debug=args.debug
         )
         compare_pave.PaveComparator(comp_args, log).execute()
-        args.skip_stats = True 
+        args.skip_stats = True
     elif not args.skip_science:
         log.info("--- STAGE 3: SCIENCE REPORTS (GLANCE) ---")
         from science_pave import ScienceAnalyzer
         sci_args = argparse.Namespace(
-            prem_fld=ws['prem'], 
-            gccs_fld=ws['gccs'], 
-            dest_fld=ws['glance'], 
-            bin=args.bin, 
-            fork=True, 
-            debug=args.debug, 
-            verbose=args.verbose, 
+            prem_fld=ws['prem'],
+            gccs_fld=ws['gccs'],
+            dest_fld=ws['glance'],
+            bin=args.bin,
+            fork=True,
+            debug=args.debug,
+            verbose=args.verbose,
             quiet=args.quiet
         )
         ScienceAnalyzer(sci_args, log).execute()
@@ -142,14 +175,14 @@ def main():
         log.info("--- STAGE 4: COLLOCATION ---")
         from collocate_pave import CollocationAnalyzer
         coll_args = argparse.Namespace(
-            prem_fld=ws['prem'], 
-            gccs_fld=ws['gccs'], 
-            coll_fld=ws['coll'], 
-            dest_fld=ws['glance'] / "collocated", 
-            cfg_fld="./glance_configs", 
-            bin=args.bin, 
-            verbose=args.verbose, 
-            debug=args.debug, 
+            prem_fld=ws['prem'],
+            gccs_fld=ws['gccs'],
+            coll_fld=ws['coll'],
+            dest_fld=ws['glance'] / "collocated",
+            cfg_fld="./glance_configs",
+            bin=args.bin,
+            verbose=args.verbose,
+            debug=args.debug,
             quiet=args.quiet
         )
         CollocationAnalyzer(coll_args, log).execute()
@@ -160,10 +193,10 @@ def main():
         if any(ws['glance'].iterdir()):
             from stats_pave import StatsHarvester
             stats_args = argparse.Namespace(
-                glance_fld=ws['glance'], 
-                dest_fld=ws['stats'], 
-                quiet=args.quiet, 
-                verbose=args.verbose, 
+                glance_fld=ws['glance'],
+                dest_fld=ws['stats'],
+                quiet=args.quiet,
+                verbose=args.verbose,
                 debug=args.debug
             )
             StatsHarvester(stats_args, log).execute()
@@ -173,9 +206,9 @@ def main():
         log.info("--- STAGE 6: FINAL VERDICT ---")
         from judge_pave import PaveJudge
         judge_args = argparse.Namespace(
-            stats_fld=ws['stats'], 
-            quiet=args.quiet, 
-            verbose=args.verbose, 
+            stats_fld=ws['stats'],
+            quiet=args.quiet,
+            verbose=args.verbose,
             debug=args.debug
         )
         PaveJudge(judge_args, log).execute()

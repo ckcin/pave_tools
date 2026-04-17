@@ -1,8 +1,8 @@
+#!/usr/bin/env python3
 """
 PAVE UTILS: Shared Infrastructure Module
 ========================================
-VERSION: 1.2.4 (Archive Verification Gate)
-"""
+VERSION: 1.4.0 (Visual Symmetry Table Utility)"""
 
 import os
 import re
@@ -21,6 +21,9 @@ GCCS_IP_BUCKET = "gccs-intermediate-products"
 GCCS_PREFIX = "GCCS/op"
 PREM_BUCKET = "geoproducts-ops"
 EGRESS_ROOT = "geoegress/egresout/DOE1L2IP"
+
+# Global Regex for Product Identification
+GOES_REGEX = re.compile(r"OR_(?P<dsn>.*?)_(?P<sat>G1[89]).*?s(?P<start>\d{14})")
 
 PRODUCT_MAP = {
     "rad":   {"instr": "ABI",  "level": "L1b", "tag": "Rad"},
@@ -42,6 +45,33 @@ PRODUCT_MAP = {
 }
 
 # =============================================================================
+# LOGGING ENGINE (v1.2.4 standard)
+# =============================================================================
+class Logger:
+    def __init__(self, level="INFO"):
+        self.levels = {
+            "DEBUG": 0, "VERBOSE": 1, "INFO": 2,
+            "QUIET": 3, "WARN": 3, "ERROR": 4
+        }
+        self.current_level = self.levels.get(level.upper(), 2)
+        self.colors = {
+            "DEBUG": "\033[94m", "VERBOSE": "\033[36m", "INFO": "\033[92m",
+            "WARN": "\033[93m", "ERROR": "\033[91m", "RESET": "\033[0m"
+        }
+
+    def _msg(self, level, text):
+        if self.levels.get(level, 2) >= self.current_level:
+            ts = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+            display_level = "WARN" if level == "QUIET" else level
+            print(f"{ts} {self.colors.get(display_level, '')}[{display_level:<7}]{self.colors['RESET']} {text}", flush=True)
+
+    def debug(self, text):   self._msg("DEBUG", text)
+    def verbose(self, text): self._msg("VERBOSE", text)
+    def info(self, text):    self._msg("INFO", text)
+    def warn(self, text):    self._msg("WARN", text)
+    def error(self, text):   self._msg("ERROR", text); sys.exit(1)
+
+# =============================================================================
 # TERMINATION & SIGNAL HANDLING
 # =============================================================================
 
@@ -54,62 +84,111 @@ def setup_interrupt_handler(logger=None):
         else:
             print(msg)
         sys.exit(0)
-
     signal.signal(signal.SIGINT, signal_handler)
 
 # =============================================================================
-# LOGGING ENGINE (Identical to previous)
+# SYMMETRY ENGINE (v1.4.0)
 # =============================================================================
-class Logger:
-    def __init__(self, level="INFO"):
-        self.levels = {"DEBUG": 0, "VERBOSE": 1, "INFO": 2, "QUIET": 3, "WARN": 3, "ERROR": 4}
-        self.current_level = self.levels.get(level.upper(), 2)
-        self.colors = {"DEBUG": "\033[94m", "VERBOSE": "\033[36m", "INFO": "\033[92m", "WARN": "\033[93m", "ERROR": "\033[91m", "RESET": "\033[0m"}
-    def _msg(self, level, text):
-        if self.levels.get(level, 2) >= self.current_level:
-            ts = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-            display_level = "WARN" if level == "QUIET" else level
-            print(f"{ts} {self.colors.get(display_level, '')}[{display_level:<7}]{self.colors['RESET']} {text}", flush=True)
-    def debug(self, text):   self._msg("DEBUG", text)
-    def verbose(self, text): self._msg("VERBOSE", text)
-    def info(self, text):    self._msg("INFO", text)
-    def warn(self, text):    self._msg("WARN", text)
-    def error(self, text):   self._msg("ERROR", text); sys.exit(1)
+
+def print_symmetry_table(prem_fld, gccs_fld, log):
+    """
+    Groups files by product and prints a visual ASCII table of symmetry.
+    This replaces the custom table previously in retrieve_pave.py.
+    """
+    p_root = Path(prem_fld).resolve()
+    g_root = Path(gccs_fld).resolve()
+
+    p_files = list(p_root.rglob("*.nc"))
+    g_files = list(g_root.rglob("*.nc"))
+
+    stats = {} # key: product_name, value: {prem, gccs, pairs}
+
+    # 1. Process On-Prem Files
+    for pf in p_files:
+        m = GOES_REGEX.search(pf.name)
+        prod = m.group('dsn') if m else "Unknown"
+
+        if prod not in stats:
+            stats[prod] = {"prem": 0, "gccs": 0, "pairs": 0}
+        stats[prod]["prem"] += 1
+
+        # Match check
+        rel_dir = pf.relative_to(p_root).parent
+        m_key = pf.name.split('_c')[0] if "_c" in pf.name else pf.name
+        t_dir = g_root / rel_dir
+
+        if t_dir.exists():
+            matches = list(t_dir.glob(f"{m_key}_c*.nc")) if "_c" in pf.name else \
+                      [t_dir / pf.name] if (t_dir / pf.name).exists() else []
+            if matches:
+                stats[prod]["pairs"] += 1
+
+    # 2. Account for GCCS-only files
+    for gf in g_files:
+        m = GOES_REGEX.search(gf.name)
+        prod = m.group('dsn') if m else "Unknown"
+        if prod not in stats:
+            stats[prod] = {"prem": 0, "gccs": 0, "pairs": 0}
+        stats[prod]["gccs"] += 1
+
+    # 3. Format and Print Table
+    headers = ["Product", "On-Prem", "GCCS", "Matched"]
+    rows = []
+    totals = [0, 0, 0]
+
+    for prod in sorted(stats.keys()):
+        s = stats[prod]
+        rows.append([prod, s['prem'], s['gccs'], s['pairs']])
+        totals[0] += s['prem']; totals[1] += s['gccs']; totals[2] += s['pairs']
+
+    rows.append(["TOTAL", totals[0], totals[1], totals[2]])
+
+    # Calculate column widths
+    widths = [len(h) for h in headers]
+    for row in rows:
+        for i, val in enumerate(row):
+            widths[i] = max(widths[i], len(str(val)))
+
+    # Output to Logger
+    sep = "-+-".join("-" * w for w in widths)
+    log.info("Symmetry Inventory Table:")
+    log.info(" | ".join(h.ljust(widths[i]) for i, h in enumerate(headers)))
+    log.info(sep)
+    for row in rows[:-1]:
+        log.info(" | ".join(str(val).ljust(widths[i]) for i, val in enumerate(row)))
+    log.info(sep)
+    log.info(" | ".join(str(val).ljust(widths[i]) for i, val in enumerate(rows[-1])))
+
+# =============================================================================
+# FILE SYSTEM UTILITIES
+# =============================================================================
 
 def archive_directory(path, logger):
     """Tars a directory, verifies the archive contents, then removes source."""
     if not path.exists():
         return
 
-    # Check if the folder is empty
     source_files = [f for f in path.rglob("*") if f.is_file()]
     if not source_files:
         logger.debug(f"Skipping archive for empty folder: {path.name}")
         return
 
-    tar_name = f"{path.name}.tar.gz"
-    tar_path = path.parent / tar_name
+    tar_path = path.parent / f"{path.name}.tar.gz"
     logger.info(f"Cleanup: Archiving {path.name} ({len(source_files)} files)")
 
     try:
-        # 1. Create the Archive
         with tarfile.open(tar_path, "w:gz") as tar:
             tar.add(path, arcname=path.name)
 
-        # 2. Verify the Archive
         with tarfile.open(tar_path, "r:gz") as tar_check:
-            # Filter members to only count actual files (ignoring directory entries)
             archive_members = [m for m in tar_check.getmembers() if m.isfile()]
 
-        # 3. Validation Gate
         if len(archive_members) == len(source_files):
-            logger.verbose(f"Cleanup: Verification Passed ({len(archive_members)} items match).")
+            logger.verbose(f"Cleanup: Verification Passed ({len(archive_members)} items).")
             shutil.rmtree(path)
             logger.info(f"Cleanup: Successfully removed source folder {path.name}")
         else:
-            logger.warn(f"!!! CLEANUP FAILURE: Archive count ({len(archive_members)}) does not match source count ({len(source_files)}) !!!")
-            logger.warn(f"!!! Folder {path.name} was NOT removed for safety !!!")
-
+            logger.warn(f"!!! CLEANUP FAILURE: {path.name} was NOT removed !!!")
     except Exception as e:
         logger.warn(f"Cleanup: Process failed for {path.name}: {e}")
 
