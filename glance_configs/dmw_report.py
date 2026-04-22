@@ -10,7 +10,7 @@ settings[constants.DO_MAKE_FORKS_KEY]         = True
 settings[constants.DO_CLEAR_MEM_THREADED_KEY] = True
 
 defaultValues = {}
-defaultValues[constants.FILL_VALUE_KEY] = -999
+defaultValues[constants.FILL_VALUE_KEY] = -999.0
 
 # lat/lon for DMW
 lat_lon_info = {}

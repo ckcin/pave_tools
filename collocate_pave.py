@@ -2,7 +2,7 @@
 """
 COLLOCATE-PAVE: Sparse Data Alignment & Comparison
 ==================================================
-VERSION: 1.0.7 (Complete Resilience - Only Exit 1 Fatal)
+VERSION: 1.0.9 (Glance Call Debugging)
 """
 
 import os
@@ -22,7 +22,7 @@ except ImportError:
     sys.exit(1)
 
 PRODUCT_MAP = {
-    "DMW": {"coll_cfg": "dmw_collocate.py", "rpt_cfg": "dmw_report.py"}, 
+    "DMW": {"coll_cfg": "dmw_collocate.py", "rpt_cfg": "dmw_report.py"},
     "DMWV": {"coll_cfg": "dmw_collocate.py", "rpt_cfg": "dmw_report.py"}
 }
 
@@ -32,11 +32,13 @@ class CollocationAnalyzer:
         self.gccs_root = Path(args.gccs_fld).resolve()
         self.coll_root = Path(args.coll_fld).resolve()
         self.dest_root = Path(args.dest_fld).resolve()
+
         pcfg = Path(args.cfg_fld)
         if pcfg.is_absolute() or pcfg.exists():
             self.cfg_root = pcfg.resolve()
         else:
             self.cfg_root = (Path(__file__).parent / pcfg).resolve()
+
         self.glance_bin = getattr(args, 'bin', 'glance')
         self.is_debug = getattr(args, 'debug', False)
         self.is_verbose = getattr(args, 'verbose', False)
@@ -55,65 +57,110 @@ class CollocationAnalyzer:
         gd = self.coll_root / "coll_gccs" / rel.parent
         pd.mkdir(parents=True, exist_ok=True)
         gd.mkdir(parents=True, exist_ok=True)
+
         cmd = [self.glance_bin, "collocate", "-c", str(self.cfg_root / cfg), "-p"]
+
         with tempfile.TemporaryDirectory() as tmp:
             cmd += [tmp, str(gf), str(pf)]
             if self.is_debug or self.is_verbose:
                 cmd.append("--verbose")
+
             self.log.info(f"  [COLLOCATE] Processing: {gf.name}")
+            # Explicit debug statement for the collocate call
+            self.log.debug(f"  [DEBUG] GLANCE CALL: {shlex.join(cmd)}")
+
             res = subprocess.run(cmd, capture_output=True, text=True)
-            
-            if res.returncode == 1:
-                self._flare_crash(gf.name, res.returncode, cmd, res.stdout, res.stderr)
-                self.log.error(f"!!! COLLOCATION FATAL ERROR: {gf.name} (Exit: 1) !!!")
+
+            # --- THE GRACEFUL SIEVE ---
+            if res.returncode != 0:
+                if "KeyError" in res.stderr:
+                    self.log.warn(f"  [SKIPPED] {gf.name}: No spatial matches found (KeyError).")
+                    return None, None
+
+                if "Data type" in res.stderr:
+                    self.log.warn(f"  [SKIPPED] {gf.name}: Data type determination failure.")
+                    return None, None
+
+                if res.returncode == 1:
+                    self._flare_crash(gf.name, res.returncode, cmd, res.stdout, res.stderr)
+                    return None, None
+
+                self.log.warn(f"  [SKIPPED] Status {res.returncode} for {gf.name}.")
                 return None, None
-            elif res.returncode != 0:
-                self.log.warn(f"  [SKIPPED] Collocation status {res.returncode} for {gf.name}.")
-                return None, None
-                
+
+            # Success Path
             pres = list(Path(tmp).glob(f"*{pf.stem}-collocated.nc"))
             gres = list(Path(tmp).glob(f"*{gf.stem}-collocated.nc"))
+
             if not pres or not gres:
+                self.log.warn(f"  [SKIPPED] {gf.name}: Output files not found in temp workspace.")
                 return None, None
-            
+
             pfinal, gfinal = pd / pf.name, gd / gf.name
             shutil.move(str(pres[0]), str(pfinal))
             shutil.move(str(gres[0]), str(gfinal))
             return pfinal, gfinal
 
     def _flare_crash(self, f, code, cmd, out, err):
+        """Standardizes fatal error output to stderr."""
         msg = f"\n{'#'*80}\nCOLLOCATION FATAL | {f} | Code: {code}\n{'-'*80}\nCALL: {shlex.join(cmd)}\n{'-'*80}\nSTDERR: {err}\n{'#'*80}\n"
         sys.__stderr__.write(msg)
         sys.__stderr__.flush()
 
     def execute(self):
+        # Walk the product directories
         for prod_dir in [p for d in self.gccs_root.iterdir() if d.is_dir() for p in d.iterdir() if p.is_dir()]:
             match = next((k for k in PRODUCT_MAP if k in prod_dir.name.upper()), None)
             if not match:
                 continue
+
             configs = PRODUCT_MAP[match]
             self.log.info(f"Starting Collocation: {prod_dir.name}")
             count = 0
+
+            # Process individual NetCDF files
             for gf in prod_dir.rglob("*.nc"):
                 pf_dir = self.prem_root / gf.relative_to(self.gccs_root).parent
                 try:
+                    # Find matching PREM file
                     pf = next(pf_dir.glob(f"{gf.name.split('_s')[0]}*.nc"))
                     if self._has_data(pf) and self._has_data(gf):
                         p_coll, g_coll = self.run_collocation(pf, gf, configs['coll_cfg'])
                         if p_coll:
                             count += 1
                 except StopIteration:
+                    self.log.debug(f"  No PREM match for {gf.name}")
                     continue
+
+            # If we have collocated files, run the report
             if count > 0:
                 rel_prod = prod_dir.relative_to(self.gccs_root)
                 p_c_d = self.coll_root / "coll_prem" / rel_prod
                 g_c_d = self.coll_root / "coll_gccs" / rel_prod
+
                 for pl in [d for d in p_c_d.rglob("*") if d.is_dir() and any(d.glob("*.nc"))]:
                     gl = g_c_d / pl.relative_to(p_c_d)
                     if gl.exists():
                         rdest = self.dest_root / rel_prod / pl.relative_to(p_c_d)
                         rdest.mkdir(parents=True, exist_ok=True)
-                        subprocess.run([self.glance_bin, "report", "-c", str(self.cfg_root / configs['rpt_cfg']), "-p", str(rdest), "--stripfromname", "e.*", str(pl), str(gl)], capture_output=not self.is_debug)
+
+                        rep_cmd = [
+                            self.glance_bin, "report",
+                            "-c", str(self.cfg_root / configs['rpt_cfg']),
+                            "-p", str(rdest),
+                            "--stripfromname", "e.*",
+                            str(pl), str(gl)
+                        ]
+                        if self.is_debug or self.is_verbose:
+                            rep_cmd.append("--verbose")
+
+
+                        # Explicit debug statement for the report call
+                        self.log.info(f"  [REPORT] Generating: {rel_prod}")
+                        self.log.debug(f"  [DEBUG] GLANCE CALL: {shlex.join(rep_cmd)}")
+
+#                        subprocess.run(rep_cmd, capture_output=True, text=True)
+                        subprocess.run(rep_cmd, capture_output=not self.is_debug)
 
 def parse_args():
     parser = argparse.ArgumentParser(prog="collocate_pave.py")
@@ -123,9 +170,9 @@ def parse_args():
     parser.add_argument("dest_fld", help="Report destination")
     parser.add_argument("--cfg_fld", required=True, help="Glance config folder")
     parser.add_argument("--bin", default="glance", help="Glance binary")
-    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose")
-    parser.add_argument("-d", "--debug", action="store_true", help="Debug")
-    parser.add_argument("-q", "--quiet", action="store_true", help="Quiet")
+    parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument("-d", "--debug", action="store_true")
+    parser.add_argument("-q", "--quiet", action="store_true")
     return parser.parse_args()
 
 def main():

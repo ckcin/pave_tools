@@ -1,18 +1,20 @@
 #!/usr/bin/env python
+# Glance configurate for collocating DMW files
 
 import glance.constants as constants
 
 settings = {}
-#settings[constants.WARN_MISSING_KEY] = True
+settings[constants.WARN_MISSING_KEY] = True
 
 defaultValues = {}
-defaultValues[constants.FILL_VALUE_KEY] = -999
+defaultValues[constants.FILL_VALUE_KEY] = -999.0
 
 # lat/lon for DMW
 lat_lon_info = {}
 lat_lon_info[constants.LONGITUDE_NAME_KEY] = 'lon'
 lat_lon_info[constants.LATITUDE_NAME_KEY] = 'lat'
-lat_lon_info[constants.LON_LAT_EPSILON_KEY] = 0.0001
+lat_lon_info[constants.LON_LAT_EPSILON_KEY] = 0.001
+#lat_lon_info[constants.LON_LAT_EPSILON_KEY] = 0.0001
 
 # variable list
 setOfVariables = {}
