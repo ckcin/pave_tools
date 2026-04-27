@@ -2,7 +2,7 @@
 """
 RETRIEVE-PAVE: Data Collection Engine
 =====================================
-VERSION: 1.3.4 (Debug Re-injected)
+VERSION: 1.3.8 (Logging Verbosity Tuning)
 """
 
 import argparse
@@ -24,8 +24,16 @@ from pave_utils import (
     GCCS_BUCKET, GCCS_IP_BUCKET, GCCS_PREFIX, PREM_BUCKET, EGRESS_ROOT
 )
 
+# --- FOLDER ALIAS MAPPING ---
+# Applies strictly to GCCS S3 Discovery
+FOLDER_ALIASES = {
+    'brdf': 'olsa',
+    'brdff20': 'olsa',
+    'nbar': 'olsa',
+    'nbarf20': 'olsa'
+}
+
 def normalize_channels(channels):
-    """Ensures channel inputs are in the cXX format."""
     if not channels: return []
     normalized = []
     for c in channels:
@@ -35,10 +43,16 @@ def normalize_channels(channels):
     return normalized
 
 def match_folder(folder_name, meta, scenes, channels):
-    """Filters S3 prefixes based on product, scene, and channel criteria."""
     fname = folder_name.lower()
     pk = meta['prod_base'].lower()
-    if pk not in fname: return False
+
+    expected_core = FOLDER_ALIASES.get(pk, pk)
+
+    if expected_core not in fname:
+        return False
+
+    if expected_core != pk:
+        return True
 
     if "ABI" in meta['instr'].upper():
         s_list = [s.lower() for s in scenes] if scenes else ['f', 'c', 'm1', 'm2']
@@ -49,7 +63,6 @@ def match_folder(folder_name, meta, scenes, channels):
     return True
 
 def get_gccs_products(args, gccs_path, log):
-    """Discovers and retrieves GCCS products from S3 (NetCDF only)."""
     log.info("GCCS Discovery & Retrieval")
     user_channels = normalize_channels(args.channels)
     discovery_list = []
@@ -61,19 +74,29 @@ def get_gccs_products(args, gccs_path, log):
         for sat in [18, 19]:
             base_prefix = f"{GCCS_PREFIX}/GOES-{sat}/{meta['level']}/{meta['instr']}/"
             for bucket in [GCCS_BUCKET, GCCS_IP_BUCKET]:
-                log.debug(f"Searching base prefix: s3://{bucket}/{base_prefix}")
+
                 cmd = ["aws", "s3api", "list-objects-v2", "--profile", "geocloud", "--bucket", bucket,
                        "--prefix", base_prefix, "--delimiter", "/", "--query", "CommonPrefixes[].Prefix", "--output", "text"]
 
-                # RE-INJECTED DEBUG LOGGING
-                log.debug(f"AWS Discovery CMD: {shlex.join(cmd)}")
+                # Lowered to VERBOSE
+                log.verbose(f"--> [AWS CMD] {shlex.join(cmd)}")
 
                 res = subprocess.run(cmd, capture_output=True, text=True)
+
+                # Trap AWS CLI Errors
+                if res.returncode != 0:
+                    log.error(f"AWS CLI FAILED! Return Code {res.returncode}")
+                    log.error(f"AWS STDERR: {res.stderr.strip()}")
+                    continue
+
                 listing = res.stdout.strip().split()
-                if not listing or "None" in listing: continue
+                if not listing or "None" in listing:
+                    log.verbose(f"--> [AWS RESULT] Empty list returned for {bucket}/{base_prefix}")
+                    continue
 
                 for pref in listing:
                     if match_folder(Path(pref).name.lower(), meta, args.scenes, user_channels):
+                        # Lowered to DEBUG
                         log.debug(f"  [MATCH] Found S3 Folder: {Path(pref).name}")
                         discovery_list.append((bucket, pref, Path(pref).name.lower(), meta['instr']))
 
@@ -84,23 +107,20 @@ def get_gccs_products(args, gccs_path, log):
                 dest = gccs_path / instr / folder_name / year / doy
                 dest.mkdir(parents=True, exist_ok=True)
 
-                # Added debug queue path
                 s3_uri = f"s3://{bucket_name}/{pref}{year}/{doy}/"
-                log.debug(f"Queuing GCCS Sync: {s3_uri}")
+                log.info(f"Queuing GCCS Sync: {s3_uri}")
 
-                # Restricted to .nc files only
                 executor.submit(run_s3_sync, s3_uri,
                                dest, f"*_s{ts}*.nc", log, label=f"Sync GCCS: {folder_name}")
 
-    # CRITICAL DATA GATE
     total_gccs = len(list(gccs_path.rglob("*.nc")))
     if total_gccs == 0:
         log.error("CRITICAL FAILURE: No GCCS files retrieved. Hitting data gate - halting process.")
+        sys.exit(1)
 
     log.verbose(f"GCCS Retrieval Summary: Retrieved {total_gccs} NetCDF files.")
 
 def get_on_prem_products(args, gccs_path, prem_path, log):
-    """Mirrors On-Prem data based on GCCS identities (NetCDF only)."""
     log.info("On-Prem Mirroring & Restructuring")
     user_channels = [c.upper() for c in normalize_channels(args.channels)]
     sync_map = {}
@@ -131,18 +151,13 @@ def get_on_prem_products(args, gccs_path, prem_path, log):
         for ts in args.times:
             year, doy, gpas_str = ts[:4], ts[4:7], get_gpas_date(ts)
             for (instr_name, level_str, instr_gpas, p_name), include_tags in sync_map.items():
-                # Restricted to .nc files only
                 patterns = [f"*{tag}*_s{ts}*.nc" for tag in include_tags]
                 for sat in [18, 19]:
                     s3_uri = f"s3://{PREM_BUCKET}/op/GOES-{sat}/{level_str}/{instr_gpas}/{year}/{gpas_str}/"
-
-                    # Added debug queue path
-                    log.debug(f"Queuing On-Prem Sync: {s3_uri}")
-
+                    log.info(f"Queuing On-Prem Sync: {s3_uri}")
                     executor.submit(run_s3_sync, s3_uri,
                                    tmp_sync_dir, patterns, log, label=f"Sync On-Prem: {p_name}")
 
-    # Restructure into symmetric folder tree
     gccs_map = {}
     if gccs_path.exists():
         for gccs_file in gccs_path.rglob("*.nc"):
@@ -159,7 +174,6 @@ def get_on_prem_products(args, gccs_path, prem_path, log):
     if tmp_sync_dir.exists(): shutil.rmtree(tmp_sync_dir)
 
 def extract_ips(args, prem_path, gccs_path, log):
-    """Extracts NetCDF members from IP tarballs and manages preservation."""
     gccs_ip_refs = list(gccs_path.rglob("*I_ABI*.nc"))
     if not gccs_ip_refs: return
     log.info(f"Targeted IP Recovery ({len(gccs_ip_refs)} files)")
@@ -190,14 +204,12 @@ def extract_ips(args, prem_path, gccs_path, log):
         finally:
             if tar_path.exists():
                 if preserve_ip:
-                    # Relocate to ip_data/
                     log.info(f"Preserving IP Tar: {tar_path.name} -> ip_data/")
                     shutil.move(str(tar_path), str(ip_data_dir / tar_path.name))
                 else:
                     os.remove(tar_path)
 
 def check_symmetry(args, gccs_path, prem_path, log):
-    """Final audit to verify file pair counts."""
     log.info("Retrieval Symmetry Audit")
     log.info(f"{'PRODUCT':<35} | {'STANDARD (G|P)':<14} | {'IP (G|P)':<12}")
     log.info("-" * 75)
