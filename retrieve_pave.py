@@ -2,7 +2,7 @@
 """
 RETRIEVE-PAVE: Data Collection Engine
 =====================================
-VERSION: 1.3.3 (Critical GCCS Data Gate)
+VERSION: 1.3.4 (Debug Re-injected)
 """
 
 import argparse
@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import tarfile
 import re
+import shlex
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
@@ -60,14 +61,20 @@ def get_gccs_products(args, gccs_path, log):
         for sat in [18, 19]:
             base_prefix = f"{GCCS_PREFIX}/GOES-{sat}/{meta['level']}/{meta['instr']}/"
             for bucket in [GCCS_BUCKET, GCCS_IP_BUCKET]:
+                log.debug(f"Searching base prefix: s3://{bucket}/{base_prefix}")
                 cmd = ["aws", "s3api", "list-objects-v2", "--profile", "geocloud", "--bucket", bucket,
                        "--prefix", base_prefix, "--delimiter", "/", "--query", "CommonPrefixes[].Prefix", "--output", "text"]
+
+                # RE-INJECTED DEBUG LOGGING
+                log.debug(f"AWS Discovery CMD: {shlex.join(cmd)}")
+
                 res = subprocess.run(cmd, capture_output=True, text=True)
                 listing = res.stdout.strip().split()
                 if not listing or "None" in listing: continue
 
                 for pref in listing:
                     if match_folder(Path(pref).name.lower(), meta, args.scenes, user_channels):
+                        log.debug(f"  [MATCH] Found S3 Folder: {Path(pref).name}")
                         discovery_list.append((bucket, pref, Path(pref).name.lower(), meta['instr']))
 
     with ThreadPoolExecutor(max_workers=args.threads) as executor:
@@ -76,8 +83,13 @@ def get_gccs_products(args, gccs_path, log):
             for bucket_name, pref, folder_name, instr in discovery_list:
                 dest = gccs_path / instr / folder_name / year / doy
                 dest.mkdir(parents=True, exist_ok=True)
+
+                # Added debug queue path
+                s3_uri = f"s3://{bucket_name}/{pref}{year}/{doy}/"
+                log.debug(f"Queuing GCCS Sync: {s3_uri}")
+
                 # Restricted to .nc files only
-                executor.submit(run_s3_sync, f"s3://{bucket_name}/{pref}{year}/{doy}/",
+                executor.submit(run_s3_sync, s3_uri,
                                dest, f"*_s{ts}*.nc", log, label=f"Sync GCCS: {folder_name}")
 
     # CRITICAL DATA GATE
@@ -122,7 +134,12 @@ def get_on_prem_products(args, gccs_path, prem_path, log):
                 # Restricted to .nc files only
                 patterns = [f"*{tag}*_s{ts}*.nc" for tag in include_tags]
                 for sat in [18, 19]:
-                    executor.submit(run_s3_sync, f"s3://{PREM_BUCKET}/op/GOES-{sat}/{level_str}/{instr_gpas}/{year}/{gpas_str}/",
+                    s3_uri = f"s3://{PREM_BUCKET}/op/GOES-{sat}/{level_str}/{instr_gpas}/{year}/{gpas_str}/"
+
+                    # Added debug queue path
+                    log.debug(f"Queuing On-Prem Sync: {s3_uri}")
+
+                    executor.submit(run_s3_sync, s3_uri,
                                    tmp_sync_dir, patterns, log, label=f"Sync On-Prem: {p_name}")
 
     # Restructure into symmetric folder tree
