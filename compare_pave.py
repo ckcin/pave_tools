@@ -2,7 +2,7 @@
 """
 COMPARE-PAVE: Lightweight Science Analysis Engine
 =================================================
-VERSION: 1.5.9 (Colored Quiver Flow Vectors)
+VERSION: 1.5.10 (Native Aspect Ratio Sizing)
 """
 
 import os
@@ -60,14 +60,20 @@ def _execute_standard_comparison(data_p, data_g, var, tmp_dir, pair_info, strate
     plot_g = data_g[..., 0] if data_g.ndim > 2 else data_g
     plot_diff = plot_g - plot_p
 
+    # MATHEMATICAL FIGURE SIZING
+    # Ensures the plot windows exactly match the data's native aspect ratio
     h, w = plot_p.shape
     data_ratio = h / w if w > 0 else 1
 
-    fig_width = 18
-    fig_height = max(min(fig_width * data_ratio, 30), 8)
+    fig_width = 18.0
+    # 2 columns: each has Plot (W) + Cbar/Pad (0.1 W). Total width roughly 2.2 W + 2 inch margins.
+    w_ax = (fig_width - 2.0) / 2.2
+    h_ax = w_ax * data_ratio
+    # 2 rows: each has Plot (H). Total height roughly 2 H + 3 inch margins/titles.
+    fig_height = max(min(2 * h_ax + 3.0, 40), 8)
 
     fig, axes = plt.subplots(2, 2, figsize=(fig_width, fig_height))
-    plt.suptitle(f"Variable: {var}\n{pair_info} ({strategy_label})", fontsize=10, y=0.95)
+    plt.suptitle(f"Variable: {var}\n{pair_info} ({strategy_label})", fontsize=10, y=0.97)
 
     ax1, ax2, ax3, ax4 = axes.flatten()
 
@@ -102,11 +108,12 @@ def _execute_standard_comparison(data_p, data_g, var, tmp_dir, pair_info, strate
     else:
         ax4.text(0.5, 0.5, "No overlapping valid data", ha='center', va='center')
 
+    # Dummy invisible colorbar to force Panel 4 to identically match the width of Panels 1-3
     div4 = make_axes_locatable(ax4)
     cax4 = div4.append_axes("right", size="5%", pad=0.05)
     cax4.axis('off')
 
-    plt.tight_layout(rect=[0, 0.03, 1, 0.93])
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     plt.savefig(tmp_dir / f"{var}_comparison.png", dpi=90)
     plt.close(fig)
 
@@ -261,20 +268,22 @@ def _compare_sparse_vectors(ds_p, ds_g, vec_type, var1, var2, tmp_dir, pair_info
     v_diff = v_grid_g - v_grid_p
     spd_diff = spd_grid_g - spd_grid_p
 
-    fig_width = 18
+    # MATHEMATICAL FIGURE SIZING FOR VECTORS
+    fig_width = 18.0
     data_ratio = lat_range / lon_range
-    fig_height = max(min(fig_width * data_ratio, 30), 8)
+    w_ax = (fig_width - 2.0) / 2.2
+    h_ax = w_ax * data_ratio
+    fig_height = max(min(2 * h_ax + 3.0, 40), 8)
 
     fig, axes = plt.subplots(2, 2, figsize=(fig_width, fig_height))
     var_label = f"Wind Vectors ({var1} & {var2})"
-    plt.suptitle(f"Variable: {var_label}\n{pair_info} (Sparse Gridded Flow)", fontsize=10, y=0.95)
+    plt.suptitle(f"Variable: {var_label}\n{pair_info} (Sparse Gridded Flow)", fontsize=10, y=0.97)
 
     ax1, ax2, ax3, ax4 = axes.flatten()
 
     spd_vmin = min(np.nanmin(spd_grid_p), np.nanmin(spd_grid_g)) if not np.isnan(spd_grid_p).all() else 0
     spd_vmax = max(np.nanmax(spd_grid_p), np.nanmax(spd_grid_g)) if not np.isnan(spd_grid_p).all() else 1
 
-    # Apply uniform bounds and light gray background to maps
     for ax in [ax1, ax2, ax3]:
         ax.set_facecolor('#f4f4f4')
         ax.set_xlim(min_lon, max_lon)
@@ -317,7 +326,7 @@ def _compare_sparse_vectors(ds_p, ds_g, vec_type, var1, var2, tmp_dir, pair_info
     cax4 = div4.append_axes("right", size="5%", pad=0.05)
     cax4.axis('off')
 
-    plt.tight_layout(rect=[0, 0.03, 1, 0.93])
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     out_name = f"wind_vectors_{'uv' if vec_type == 'uv' else 'speed_dir'}_comparison.png"
     plt.savefig(tmp_dir / out_name, dpi=90)
     plt.close(fig)
