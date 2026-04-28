@@ -2,7 +2,8 @@
 """
 PAVE UTILS: Shared Infrastructure Module
 ========================================
-VERSION: 1.4.0 (Visual Symmetry Table Utility)"""
+VERSION: 1.4.2 (Robust Metadata Resolution)
+"""
 
 import os
 import re
@@ -26,26 +27,37 @@ EGRESS_ROOT = "geoegress/egresout/DOE1L2IP"
 GOES_REGEX = re.compile(r"OR_(?P<dsn>.*?)_(?P<sat>G1[89]).*?s(?P<start>\d{14})")
 
 PRODUCT_MAP = {
-    "rad":   {"instr": "ABI",  "level": "L1b", "tag": "Rad"},
-    "geof":  {"instr": "MAG",  "level": "L1b", "tag": "GEOF"},
-    "sfeu":  {"instr": "EXIS", "level": "L1b", "tag": "SFEU"},
-    "sfxr":  {"instr": "EXIS", "level": "L1b", "tag": "SFXR"},
-    "ehis":  {"instr": "SEIS", "level": "L1b", "tag": "EHIS"},
-    "mpsl":  {"instr": "SEIS", "level": "L1b", "tag": "MPSL"},
-    "mpsh":  {"instr": "SEIS", "level": "L1b", "tag": "MPSH"},
-    "sgps":  {"instr": "SEIS", "level": "L1b", "tag": "SGPS"},
-    "fe093": {"instr": "SUVI", "level": "L1b", "tag": "Fe093"},
-    "fe131": {"instr": "SUVI", "level": "L1b", "tag": "Fe131"},
-    "fe171": {"instr": "SUVI", "level": "L1b", "tag": "Fe171"},
-    "fe195": {"instr": "SUVI", "level": "L1b", "tag": "Fe195"},
-    "fe284": {"instr": "SUVI", "level": "L1b", "tag": "Fe284"},
-    "he303": {"instr": "SUVI", "level": "L1b", "tag": "He303"},
-    "lcfa":  {"instr": "GLM",  "level": "L2",  "tag": "LCFA"},
-    "fed":   {"instr": "GLM",  "level": "L2",  "tag": "FED"},
+    # --- ABI STANDARD (IMAGES) ---
+    "cmip":  {"instr": "ABI",  "level": "L2",  "tag": "CMIP",  "comp_type": "standard"},
+    "mcmip": {"instr": "ABI",  "level": "L2",  "tag": "MCMIP", "comp_type": "standard"},
+    "rad":   {"instr": "ABI",  "level": "L1b", "tag": "Rad",   "comp_type": "standard"},
+
+    # --- ABI/GLM SPARSE (COLLOCATION PATH) ---
+    "dmw":   {"instr": "ABI",  "level": "L2",  "tag": "DMW",   "comp_type": "sparse"},
+    "dmwv":  {"instr": "ABI",  "level": "L2",  "tag": "DMWV",  "comp_type": "sparse"},
+    "lcfa":  {"instr": "GLM",  "level": "L2",  "tag": "LCFA",  "comp_type": "sparse"},
+    "fed":   {"instr": "GLM",  "level": "L2",  "tag": "FED",   "comp_type": "sparse"},
+
+    # --- SPACE WEATHER TIME-SERIES (TEMPORAL ALIGNMENT) ---
+    "geof":  {"instr": "MAG",  "level": "L1b", "tag": "GEOF",  "comp_type": "timeseries"},
+    "sfeu":  {"instr": "EXIS", "level": "L1b", "tag": "SFEU",  "comp_type": "timeseries"},
+    "sfxr":  {"instr": "EXIS", "level": "L1b", "tag": "SFXR",  "comp_type": "timeseries"},
+    "ehis":  {"instr": "SEIS", "level": "L1b", "tag": "EHIS",  "comp_type": "timeseries"},
+    "mpsl":  {"instr": "SEIS", "level": "L1b", "tag": "MPSL",  "comp_type": "timeseries"},
+    "mpsh":  {"instr": "SEIS", "level": "L1b", "tag": "MPSH",  "comp_type": "timeseries"},
+    "sgps":  {"instr": "SEIS", "level": "L1b", "tag": "SGPS",  "comp_type": "timeseries"},
+
+    # --- SPACE WEATHER IMAGERY (STANDARD) ---
+    "fe093": {"instr": "SUVI", "level": "L1b", "tag": "Fe093", "comp_type": "standard"},
+    "fe131": {"instr": "SUVI", "level": "L1b", "tag": "Fe131", "comp_type": "standard"},
+    "fe171": {"instr": "SUVI", "level": "L1b", "tag": "Fe171", "comp_type": "standard"},
+    "fe195": {"instr": "SUVI", "level": "L1b", "tag": "Fe195", "comp_type": "standard"},
+    "fe284": {"instr": "SUVI", "level": "L1b", "tag": "Fe284", "comp_type": "standard"},
+    "he303": {"instr": "SUVI", "level": "L1b", "tag": "He303", "comp_type": "standard"},
 }
 
 # =============================================================================
-# LOGGING ENGINE (v1.2.4 standard)
+# LOGGING ENGINE
 # =============================================================================
 class Logger:
     def __init__(self, level="INFO"):
@@ -87,23 +99,18 @@ def setup_interrupt_handler(logger=None):
     signal.signal(signal.SIGINT, signal_handler)
 
 # =============================================================================
-# SYMMETRY ENGINE (v1.4.0)
+# SYMMETRY ENGINE
 # =============================================================================
 
 def print_symmetry_table(prem_fld, gccs_fld, log):
-    """
-    Groups files by product and prints a visual ASCII table of symmetry.
-    This replaces the custom table previously in retrieve_pave.py.
-    """
     p_root = Path(prem_fld).resolve()
     g_root = Path(gccs_fld).resolve()
 
     p_files = list(p_root.rglob("*.nc"))
     g_files = list(g_root.rglob("*.nc"))
 
-    stats = {} # key: product_name, value: {prem, gccs, pairs}
+    stats = {}
 
-    # 1. Process On-Prem Files
     for pf in p_files:
         m = GOES_REGEX.search(pf.name)
         prod = m.group('dsn') if m else "Unknown"
@@ -112,7 +119,6 @@ def print_symmetry_table(prem_fld, gccs_fld, log):
             stats[prod] = {"prem": 0, "gccs": 0, "pairs": 0}
         stats[prod]["prem"] += 1
 
-        # Match check
         rel_dir = pf.relative_to(p_root).parent
         m_key = pf.name.split('_c')[0] if "_c" in pf.name else pf.name
         t_dir = g_root / rel_dir
@@ -123,7 +129,6 @@ def print_symmetry_table(prem_fld, gccs_fld, log):
             if matches:
                 stats[prod]["pairs"] += 1
 
-    # 2. Account for GCCS-only files
     for gf in g_files:
         m = GOES_REGEX.search(gf.name)
         prod = m.group('dsn') if m else "Unknown"
@@ -131,7 +136,6 @@ def print_symmetry_table(prem_fld, gccs_fld, log):
             stats[prod] = {"prem": 0, "gccs": 0, "pairs": 0}
         stats[prod]["gccs"] += 1
 
-    # 3. Format and Print Table
     headers = ["Product", "On-Prem", "GCCS", "Matched"]
     rows = []
     totals = [0, 0, 0]
@@ -143,13 +147,11 @@ def print_symmetry_table(prem_fld, gccs_fld, log):
 
     rows.append(["TOTAL", totals[0], totals[1], totals[2]])
 
-    # Calculate column widths
     widths = [len(h) for h in headers]
     for row in rows:
         for i, val in enumerate(row):
             widths[i] = max(widths[i], len(str(val)))
 
-    # Output to Logger
     sep = "-+-".join("-" * w for w in widths)
     log.info("Symmetry Inventory Table:")
     log.info(" | ".join(h.ljust(widths[i]) for i, h in enumerate(headers)))
@@ -164,42 +166,47 @@ def print_symmetry_table(prem_fld, gccs_fld, log):
 # =============================================================================
 
 def archive_directory(path, logger):
-    """Tars a directory, verifies the archive contents, then removes source."""
-    if not path.exists():
-        return
-
+    if not path.exists(): return
     source_files = [f for f in path.rglob("*") if f.is_file()]
-    if not source_files:
-        logger.debug(f"Skipping archive for empty folder: {path.name}")
-        return
+    if not source_files: return
 
     tar_path = path.parent / f"{path.name}.tar.gz"
     logger.info(f"Cleanup: Archiving {path.name} ({len(source_files)} files)")
 
     try:
-        with tarfile.open(tar_path, "w:gz") as tar:
-            tar.add(path, arcname=path.name)
-
-        with tarfile.open(tar_path, "r:gz") as tar_check:
-            archive_members = [m for m in tar_check.getmembers() if m.isfile()]
+        with tarfile.open(tar_path, "w:gz") as tar: tar.add(path, arcname=path.name)
+        with tarfile.open(tar_path, "r:gz") as tar_check: archive_members = [m for m in tar_check.getmembers() if m.isfile()]
 
         if len(archive_members) == len(source_files):
-            logger.verbose(f"Cleanup: Verification Passed ({len(archive_members)} items).")
             shutil.rmtree(path)
-            logger.info(f"Cleanup: Successfully removed source folder {path.name}")
-        else:
-            logger.warn(f"!!! CLEANUP FAILURE: {path.name} was NOT removed !!!")
+            logger.verbose(f"Cleanup: Successfully removed source folder {path.name}")
     except Exception as e:
         logger.warn(f"Cleanup: Process failed for {path.name}: {e}")
 
 def resolve_meta(folder_name):
-    f_low = folder_name.lower().split('-')[0]
+    """
+    Resolves product string into routing metadata using the PRODUCT_MAP.
+    Now correctly searches for the key INSIDE the folder_name to support DSN resolution.
+    """
+    f_low = folder_name.lower()
     best_match = None
+    
+    # Check if any key exists within the given string (e.g., 'dmw' in 'abi-l2-dmwf')
     for key in PRODUCT_MAP.keys():
-        if f_low.startswith(key):
-            if best_match is None or len(key) > len(best_match): best_match = key
-    if best_match: return PRODUCT_MAP[best_match]
-    return {"instr": "ABI", "level": "L2", "tag": folder_name.upper()}
+        if key in f_low:
+            if best_match is None or len(key) > len(best_match): 
+                best_match = key
+    
+    if best_match: 
+        return PRODUCT_MAP[best_match]
+        
+    # Safe fallback mapping for unknown products
+    return {
+        "instr": "ABI", 
+        "level": "L2", 
+        "tag": folder_name.upper(), 
+        "comp_type": "standard"
+    }
 
 def get_on_prem_tag(folder_name):
     base = folder_name.split('-')[0].lower()

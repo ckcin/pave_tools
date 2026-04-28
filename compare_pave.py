@@ -2,7 +2,7 @@
 """
 COMPARE-PAVE: Lightweight Science Analysis Engine
 =================================================
-VERSION: 1.4.0 (Strategy Routing + Flattened CSV Support)
+VERSION: 1.5.9 (Colored Quiver Flow Vectors)
 """
 
 import os
@@ -21,27 +21,19 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 import matplotlib.pyplot as plt
-from scipy.spatial import cKDTree
 from scipy.stats import pearsonr
-from matplotlib.colors import ListedColormap
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 
-# Shared Infrastructure
 from pave_utils import Logger, setup_interrupt_handler, resolve_meta
 
-# Suppress Matplotlib overhead
 warnings.filterwarnings("ignore")
 plt.switch_backend('Agg')
 
 GOES_REGEX = re.compile(r"OR_(?P<dsn>.*?)_(?P<sat>G1[89]).*?s(?P<start>\d{14})")
 
+# --- CORE COMPARISON ENGINE ---
 
-# --- COMPARISON STRATEGIES ---
-
-def _compare_standard(ds_p, ds_g, var, tmp_dir, pair_info):
-    """Standard 2D Array Comparison."""
-    data_p = ds_p[var].values.astype(np.float32)
-    data_g = ds_g[var].values.astype(np.float32)
-
+def _execute_standard_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_label):
     mask_p = np.isfinite(data_p)
     mask_g = np.isfinite(data_g)
     common = np.logical_and(mask_p, mask_g)
@@ -62,86 +54,276 @@ def _compare_standard(ds_p, ds_g, var, tmp_dir, pair_info):
 
         r_val, _ = pearsonr(sample_p, sample_g)
         r_sq = r_val ** 2
-        sample_p = sample_g = None # Clear sample arrays
+        sample_p = sample_g = None
 
-    # Standard Plot Slicing
     plot_p = data_p[..., 0] if data_p.ndim > 2 else data_p
     plot_g = data_g[..., 0] if data_g.ndim > 2 else data_g
-    plot_diff = plot_p - plot_g
+    plot_diff = plot_g - plot_p
 
-    fig = plt.figure(figsize=(18, 10))
-    plt.suptitle(f"Variable: {var}\n{pair_info} (Standard)", fontsize=8)
+    h, w = plot_p.shape
+    data_ratio = h / w if w > 0 else 1
 
-    # (Axes 1-4 rendering remains consistent with v1.2.1)
-    ax1 = fig.add_subplot(221)
+    fig_width = 18
+    fig_height = max(min(fig_width * data_ratio, 30), 8)
+
+    fig, axes = plt.subplots(2, 2, figsize=(fig_width, fig_height))
+    plt.suptitle(f"Variable: {var}\n{pair_info} ({strategy_label})", fontsize=10, y=0.95)
+
+    ax1, ax2, ax3, ax4 = axes.flatten()
+
     ax1.set_title("PREM")
-    im1 = ax1.imshow(plot_p, cmap='viridis')
-    plt.colorbar(im1, ax=ax1)
+    im1 = ax1.imshow(plot_p, cmap='viridis', aspect='equal')
+    div1 = make_axes_locatable(ax1)
+    cax1 = div1.append_axes("right", size="5%", pad=0.05)
+    plt.colorbar(im1, cax=cax1)
 
-    ax2 = fig.add_subplot(222)
     ax2.set_title("GCCS")
-    im2 = ax2.imshow(plot_g, cmap='viridis')
-    plt.colorbar(im2, ax=ax2)
+    im2 = ax2.imshow(plot_g, cmap='viridis', aspect='equal')
+    div2 = make_axes_locatable(ax2)
+    cax2 = div2.append_axes("right", size="5%", pad=0.05)
+    plt.colorbar(im2, cax=cax2)
 
-    ax3 = fig.add_subplot(223)
     ax3.set_title("Difference (GCCS - PREM)")
     vmax = np.nanmax(np.abs(plot_diff)) if not np.isnan(plot_diff).all() else 1
-    im3 = ax3.imshow(plot_diff, cmap='bwr', vmin=-vmax, vmax=vmax)
-    plt.colorbar(im3, ax=ax3)
+    im3 = ax3.imshow(plot_diff, cmap='bwr', vmin=-vmax, vmax=vmax, aspect='equal')
+    div3 = make_axes_locatable(ax3)
+    cax3 = div3.append_axes("right", size="5%", pad=0.05)
+    plt.colorbar(im3, cax=cax3)
 
+    ax4.set_title("Histogram of Differences")
+    valid_diffs = plot_diff[np.isfinite(plot_diff)]
+
+    if len(valid_diffs) > 0:
+        ax4.hist(valid_diffs, bins=50, color='dimgray', edgecolor='black')
+        ax4.axvline(0, color='red', linestyle='--', linewidth=1.5, label='Zero Bias')
+        ax4.set_xlabel("Difference (GCCS - PREM)")
+        ax4.set_ylabel("Frequency")
+        ax4.legend()
+    else:
+        ax4.text(0.5, 0.5, "No overlapping valid data", ha='center', va='center')
+
+    div4 = make_axes_locatable(ax4)
+    cax4 = div4.append_axes("right", size="5%", pad=0.05)
+    cax4.axis('off')
+
+    plt.tight_layout(rect=[0, 0.03, 1, 0.93])
     plt.savefig(tmp_dir / f"{var}_comparison.png", dpi=90)
     plt.close(fig)
-    del data_p, data_g, mask_p, mask_g, common, plot_p, plot_g, plot_diff
+
+    del data_p, data_g, mask_p, mask_g, common, plot_p, plot_g, plot_diff, valid_diffs
 
     return [
         {'Metric': 'r-squared correlation', 'Value': r_sq},
         {'Metric': 'finite_in_only_one_fraction', 'Value': f1_frac}
     ]
+
+# --- ROUTING STRATEGIES ---
+
+def _get_coords_for_var(ds, var_name):
+    prefix = var_name.split('_')[0] + '_' if '_' in var_name else ''
+    if f"{prefix}lat" in ds.variables and f"{prefix}lon" in ds.variables:
+        return f"{prefix}lat", f"{prefix}lon"
+    if "lat" in ds.variables and "lon" in ds.variables:
+        return "lat", "lon"
+    lat_var = next((v for v in ds.variables if 'lat' in v.lower()), None)
+    lon_var = next((v for v in ds.variables if 'lon' in v.lower()), None)
+    return lat_var, lon_var
+
+def _compare_standard(ds_p, ds_g, var, tmp_dir, pair_info):
+    data_p = ds_p[var].values.astype(np.float32)
+    data_g = ds_g[var].values.astype(np.float32)
+    return _execute_standard_comparison(data_p, data_g, var, tmp_dir, pair_info, "Standard")
 
 def _compare_sparse(ds_p, ds_g, var, tmp_dir, pair_info):
-    """Sparse Spatial Comparison using cKDTree."""
-    lat_var = next((v for v in ds_p.variables if 'lat' in v.lower()), None)
-    lon_var = next((v for v in ds_p.variables if 'lon' in v.lower()), None)
-
+    lat_var, lon_var = _get_coords_for_var(ds_p, var)
     if not lat_var or not lon_var:
-        raise ValueError("Missing lat/lon for sparse comparison.")
+        raise ValueError(f"Could not locate coordinate variables for {var}")
 
-    coords_p = np.column_stack((ds_p[lat_var].values, ds_p[lon_var].values))
-    coords_g = np.column_stack((ds_g[lat_var].values, ds_g[lon_var].values))
+    if ds_p[lat_var].size != ds_p[var].size:
+        raise ValueError(f"Size mismatch: Data size {ds_p[var].size} vs Coords size {ds_p[lat_var].size}")
 
-    tree_p = cKDTree(coords_p)
-    distances, indices = tree_p.query(coords_g, distance_upper_bound=0.01)
+    coords_p = np.column_stack((ds_p[lat_var].values.ravel(), ds_p[lon_var].values.ravel()))
+    coords_g = np.column_stack((ds_g[lat_var].values.ravel(), ds_g[lon_var].values.ravel()))
 
-    valid = distances != np.inf
-    mismatch_count = len(coords_g) - np.sum(valid) + len(coords_p) - np.sum(valid)
-    total_points = len(coords_g) + len(coords_p)
-    f1_frac = mismatch_count / total_points if total_points > 0 else 0
+    vals_p = ds_p[var].values.astype(np.float32).ravel()
+    vals_g = ds_g[var].values.astype(np.float32).ravel()
 
-    r_sq = 0.0
-    if np.any(valid):
-        matched_p_vals = ds_p[var].values[indices[valid]]
-        matched_g_vals = ds_g[var].values[valid]
+    valid_p = np.isfinite(coords_p).all(axis=1) & np.isfinite(vals_p)
+    valid_g = np.isfinite(coords_g).all(axis=1) & np.isfinite(vals_g)
 
-        if len(matched_p_vals) > 1:
-            r_val, _ = pearsonr(matched_p_vals, matched_g_vals)
-            r_sq = r_val ** 2
+    coords_p, vals_p = coords_p[valid_p], vals_p[valid_p]
+    coords_g, vals_g = coords_g[valid_g], vals_g[valid_g]
 
-        diff = matched_g_vals - matched_p_vals
+    if len(coords_p) == 0 and len(coords_g) == 0:
+        return _execute_standard_comparison(np.array([[np.nan]]), np.array([[np.nan]]), var, tmp_dir, pair_info, "Sparse Gridded (Empty)")
 
-        fig = plt.figure(figsize=(10, 8))
-        plt.scatter(coords_g[valid, 1], coords_g[valid, 0], c=diff, cmap='bwr', s=5)
-        plt.colorbar(label='Difference (GCCS - PREM)')
-        plt.title(f"Variable: {var}\n{pair_info} (Sparse Spatial)", fontsize=8)
-        plt.savefig(tmp_dir / f"{var}_comparison.png", dpi=90)
-        plt.close(fig)
+    min_lat = min(np.nanmin(coords_p[:, 0]) if len(coords_p) else 90, np.nanmin(coords_g[:, 0]) if len(coords_g) else 90)
+    max_lat = max(np.nanmax(coords_p[:, 0]) if len(coords_p) else -90, np.nanmax(coords_g[:, 0]) if len(coords_g) else -90)
+    min_lon = min(np.nanmin(coords_p[:, 1]) if len(coords_p) else 180, np.nanmin(coords_g[:, 1]) if len(coords_g) else 180)
+    max_lon = max(np.nanmax(coords_p[:, 1]) if len(coords_p) else -180, np.nanmax(coords_g[:, 1]) if len(coords_g) else -180)
 
-    return [
-        {'Metric': 'r-squared correlation', 'Value': r_sq},
-        {'Metric': 'finite_in_only_one_fraction', 'Value': f1_frac}
-    ]
+    if max_lat - min_lat < 1e-4: min_lat -= 0.1; max_lat += 0.1
+    if max_lon - min_lon < 1e-4: min_lon -= 0.1; max_lon += 0.1
+
+    bins_lon = 500
+    lon_range = max_lon - min_lon
+    lat_range = max_lat - min_lat
+    bins_lat = int(bins_lon * (lat_range / lon_range)) if lon_range > 0 else bins_lon
+    bins_lat = max(min(bins_lat, 2000), 100)
+
+    lon_edges = np.linspace(min_lon, max_lon, bins_lon + 1)
+    lat_edges = np.linspace(min_lat, max_lat, bins_lat + 1)
+
+    counts_p, _, _ = np.histogram2d(coords_p[:, 1], coords_p[:, 0], bins=[lon_edges, lat_edges])
+    sums_p, _, _ = np.histogram2d(coords_p[:, 1], coords_p[:, 0], bins=[lon_edges, lat_edges], weights=vals_p)
+
+    counts_g, _, _ = np.histogram2d(coords_g[:, 1], coords_g[:, 0], bins=[lon_edges, lat_edges])
+    sums_g, _, _ = np.histogram2d(coords_g[:, 1], coords_g[:, 0], bins=[lon_edges, lat_edges], weights=vals_g)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        grid_p = np.where(counts_p > 0, sums_p / counts_p, np.nan).T
+        grid_g = np.where(counts_g > 0, sums_g / counts_g, np.nan).T
+
+    return _execute_standard_comparison(grid_p, grid_g, var, tmp_dir, pair_info, "Sparse Gridded")
+
+def _compare_sparse_vectors(ds_p, ds_g, vec_type, var1, var2, tmp_dir, pair_info):
+    """Produces a dedicated colored quiver plot for derived vector variables."""
+    lat_var, lon_var = _get_coords_for_var(ds_p, var1)
+    if not lat_var or not lon_var: return
+
+    coords_p = np.column_stack((ds_p[lat_var].values.ravel(), ds_p[lon_var].values.ravel()))
+    coords_g = np.column_stack((ds_g[lat_var].values.ravel(), ds_g[lon_var].values.ravel()))
+
+    val1_p = ds_p[var1].values.astype(np.float32).ravel()
+    val2_p = ds_p[var2].values.astype(np.float32).ravel()
+    val1_g = ds_g[var1].values.astype(np.float32).ravel()
+    val2_g = ds_g[var2].values.astype(np.float32).ravel()
+
+    if vec_type == 'speed_dir':
+        speed_p, dir_p = val1_p, val2_p
+        speed_g, dir_g = val1_g, val2_g
+        u_p = -speed_p * np.sin(np.radians(dir_p))
+        v_p = -speed_p * np.cos(np.radians(dir_p))
+        u_g = -speed_g * np.sin(np.radians(dir_g))
+        v_g = -speed_g * np.cos(np.radians(dir_g))
+    else:
+        u_p, v_p = val1_p, val2_p
+        u_g, v_g = val1_g, val2_g
+        speed_p = np.sqrt(u_p**2 + v_p**2)
+        speed_g = np.sqrt(u_g**2 + v_g**2)
+
+    valid_p = np.isfinite(coords_p).all(axis=1) & np.isfinite(u_p) & np.isfinite(v_p)
+    valid_g = np.isfinite(coords_g).all(axis=1) & np.isfinite(u_g) & np.isfinite(v_g)
+
+    coords_p, u_p, v_p, speed_p = coords_p[valid_p], u_p[valid_p], v_p[valid_p], speed_p[valid_p]
+    coords_g, u_g, v_g, speed_g = coords_g[valid_g], u_g[valid_g], v_g[valid_g], speed_g[valid_g]
+
+    if len(coords_p) == 0 and len(coords_g) == 0: return
+
+    min_lat = min(np.nanmin(coords_p[:, 0]) if len(coords_p) else 90, np.nanmin(coords_g[:, 0]) if len(coords_g) else 90)
+    max_lat = max(np.nanmax(coords_p[:, 0]) if len(coords_p) else -90, np.nanmax(coords_g[:, 0]) if len(coords_g) else -90)
+    min_lon = min(np.nanmin(coords_p[:, 1]) if len(coords_p) else 180, np.nanmin(coords_g[:, 1]) if len(coords_g) else 180)
+    max_lon = max(np.nanmax(coords_p[:, 1]) if len(coords_p) else -180, np.nanmax(coords_g[:, 1]) if len(coords_g) else -180)
+
+    bins_lon = 45
+    lon_range = max_lon - min_lon if max_lon > min_lon else 1
+    lat_range = max_lat - min_lat if max_lat > min_lat else 1
+    bins_lat = int(bins_lon * (lat_range / lon_range))
+    bins_lat = max(min(bins_lat, 80), 10)
+
+    lon_edges = np.linspace(min_lon, max_lon, bins_lon + 1)
+    lat_edges = np.linspace(min_lat, max_lat, bins_lat + 1)
+
+    X, Y = np.meshgrid((lon_edges[:-1] + lon_edges[1:])/2, (lat_edges[:-1] + lat_edges[1:])/2)
+
+    counts_p, _, _ = np.histogram2d(coords_p[:, 1], coords_p[:, 0], bins=[lon_edges, lat_edges])
+    u_sums_p, _, _ = np.histogram2d(coords_p[:, 1], coords_p[:, 0], bins=[lon_edges, lat_edges], weights=u_p)
+    v_sums_p, _, _ = np.histogram2d(coords_p[:, 1], coords_p[:, 0], bins=[lon_edges, lat_edges], weights=v_p)
+    spd_sums_p, _, _ = np.histogram2d(coords_p[:, 1], coords_p[:, 0], bins=[lon_edges, lat_edges], weights=speed_p)
+
+    counts_g, _, _ = np.histogram2d(coords_g[:, 1], coords_g[:, 0], bins=[lon_edges, lat_edges])
+    u_sums_g, _, _ = np.histogram2d(coords_g[:, 1], coords_g[:, 0], bins=[lon_edges, lat_edges], weights=u_g)
+    v_sums_g, _, _ = np.histogram2d(coords_g[:, 1], coords_g[:, 0], bins=[lon_edges, lat_edges], weights=v_g)
+    spd_sums_g, _, _ = np.histogram2d(coords_g[:, 1], coords_g[:, 0], bins=[lon_edges, lat_edges], weights=speed_g)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        u_grid_p = np.where(counts_p > 0, u_sums_p / counts_p, np.nan).T
+        v_grid_p = np.where(counts_p > 0, v_sums_p / counts_p, np.nan).T
+        spd_grid_p = np.where(counts_p > 0, spd_sums_p / counts_p, np.nan).T
+
+        u_grid_g = np.where(counts_g > 0, u_sums_g / counts_g, np.nan).T
+        v_grid_g = np.where(counts_g > 0, v_sums_g / counts_g, np.nan).T
+        spd_grid_g = np.where(counts_g > 0, spd_sums_g / counts_g, np.nan).T
+
+    u_diff = u_grid_g - u_grid_p
+    v_diff = v_grid_g - v_grid_p
+    spd_diff = spd_grid_g - spd_grid_p
+
+    fig_width = 18
+    data_ratio = lat_range / lon_range
+    fig_height = max(min(fig_width * data_ratio, 30), 8)
+
+    fig, axes = plt.subplots(2, 2, figsize=(fig_width, fig_height))
+    var_label = f"Wind Vectors ({var1} & {var2})"
+    plt.suptitle(f"Variable: {var_label}\n{pair_info} (Sparse Gridded Flow)", fontsize=10, y=0.95)
+
+    ax1, ax2, ax3, ax4 = axes.flatten()
+
+    spd_vmin = min(np.nanmin(spd_grid_p), np.nanmin(spd_grid_g)) if not np.isnan(spd_grid_p).all() else 0
+    spd_vmax = max(np.nanmax(spd_grid_p), np.nanmax(spd_grid_g)) if not np.isnan(spd_grid_p).all() else 1
+
+    # Apply uniform bounds and light gray background to maps
+    for ax in [ax1, ax2, ax3]:
+        ax.set_facecolor('#f4f4f4')
+        ax.set_xlim(min_lon, max_lon)
+        ax.set_ylim(min_lat, max_lat)
+        ax.set_aspect('equal')
+
+    ax1.set_title("PREM Vectors")
+    q1 = ax1.quiver(X, Y, u_grid_p, v_grid_p, spd_grid_p, cmap='viridis')
+    q1.set_clim(spd_vmin, spd_vmax)
+    div1 = make_axes_locatable(ax1)
+    cax1 = div1.append_axes("right", size="5%", pad=0.05)
+    plt.colorbar(q1, cax=cax1, label='Speed')
+
+    ax2.set_title("GCCS Vectors")
+    q2 = ax2.quiver(X, Y, u_grid_g, v_grid_g, spd_grid_g, cmap='viridis')
+    q2.set_clim(spd_vmin, spd_vmax)
+    div2 = make_axes_locatable(ax2)
+    cax2 = div2.append_axes("right", size="5%", pad=0.05)
+    plt.colorbar(q2, cax=cax2, label='Speed')
+
+    ax3.set_title("Vector Difference (GCCS - PREM)")
+    diff_vmax = np.nanmax(np.abs(spd_diff)) if not np.isnan(spd_diff).all() else 1
+    q3 = ax3.quiver(X, Y, u_diff, v_diff, spd_diff, cmap='bwr')
+    q3.set_clim(-diff_vmax, diff_vmax)
+    div3 = make_axes_locatable(ax3)
+    cax3 = div3.append_axes("right", size="5%", pad=0.05)
+    plt.colorbar(q3, cax=cax3, label='Speed Diff')
+
+    ax4.set_title("Histogram of Speed Differences")
+    valid_diffs = spd_diff[np.isfinite(spd_diff)]
+    if len(valid_diffs) > 0:
+        ax4.hist(valid_diffs, bins=50, color='dimgray', edgecolor='black')
+        ax4.axvline(0, color='red', linestyle='--', linewidth=1.5)
+        ax4.set_xlabel("Difference (GCCS - PREM)")
+        ax4.set_ylabel("Frequency")
+    else:
+        ax4.text(0.5, 0.5, "No overlapping valid data", ha='center', va='center')
+
+    div4 = make_axes_locatable(ax4)
+    cax4 = div4.append_axes("right", size="5%", pad=0.05)
+    cax4.axis('off')
+
+    plt.tight_layout(rect=[0, 0.03, 1, 0.93])
+    out_name = f"wind_vectors_{'uv' if vec_type == 'uv' else 'speed_dir'}_comparison.png"
+    plt.savefig(tmp_dir / out_name, dpi=90)
+    plt.close(fig)
+
 
 def _compare_timeseries(ds_p, ds_g, var, tmp_dir, pair_info):
-    """Time-Series Comparison using pandas merge_asof."""
     time_var = next((v for v in ds_p.variables if 'time' in v.lower()), None)
     if not time_var:
         raise ValueError("Missing time variable for timeseries comparison.")
@@ -149,7 +331,6 @@ def _compare_timeseries(ds_p, ds_g, var, tmp_dir, pair_info):
     df_p = pd.DataFrame({'time': ds_p[time_var].values, 'P_Val': ds_p[var].values}).dropna().sort_values('time')
     df_g = pd.DataFrame({'time': ds_g[time_var].values, 'G_Val': ds_g[var].values}).dropna().sort_values('time')
 
-    # Merge on nearest timestamp allowing small misalignment
     merged = pd.merge_asof(df_g, df_p, on='time', direction='nearest', tolerance=pd.Timedelta('1s')).dropna()
 
     mismatch_count = len(df_g) - len(merged) + len(df_p) - len(merged)
@@ -178,88 +359,113 @@ def _compare_timeseries(ds_p, ds_g, var, tmp_dir, pair_info):
 
 # --- ENGINE ORCHESTRATOR ---
 
-def process_file_pair(p_file, g_file, dest_root, prem_root):
-    """Worker: Generates plots and local raw stats using appropriate strategy."""
+def process_file_pair(p_file, g_file, dest_root, prem_root, log):
     results = []
     pair_info = f"{p_file.name} <-> {g_file.name}"
 
     m = GOES_REGEX.search(p_file.name)
     if not m:
-        return None, f"Metadata Error: {pair_info}"
+        log.warn(f"Metadata Error: {pair_info}")
+        return None
 
     prod_name = m.group('dsn')
-    meta = {
-        'Product': prod_name,
-        'Sat': m.group('sat'),
-        'Start': m.group('start')
-    }
+    meta = {'Product': prod_name, 'Sat': m.group('sat'), 'Start': m.group('start')}
 
     global_meta = resolve_meta(prod_name)
-    comp_strategy = global_meta.get('comp_type', 'image').lower()
+    comp_strategy = global_meta.get('comp_type', 'standard').lower()
+
+    if comp_strategy not in ['sparse', 'timeseries']:
+        comp_strategy = 'standard'
+
+    log.debug(f"[{comp_strategy.upper()}] Opened File: {p_file.name}")
 
     rel_dir = p_file.relative_to(prem_root).parent
     final_dir = dest_root / rel_dir / p_file.stem
     tmp_dir = dest_root / rel_dir / f"{p_file.stem}.partial"
 
     if final_dir.exists():
-        return [], pair_info
+        log.debug(f"[{comp_strategy.upper()}] Skipping (Already Exists): {p_file.name}")
+        return []
 
-    if tmp_dir.exists():
-        shutil.rmtree(tmp_dir)
+    if tmp_dir.exists(): shutil.rmtree(tmp_dir)
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         with xr.open_dataset(p_file, cache=False) as ds_p, \
              xr.open_dataset(g_file, cache=False) as ds_g:
 
-            # Variable selection logic based on strategy
+            vector_tasks = []
+
             if comp_strategy == 'sparse':
-                lat_v = next((v for v in ds_p.variables if 'lat' in v.lower()), None)
-                lon_v = next((v for v in ds_p.variables if 'lon' in v.lower()), None)
-                variables = [v for v in ds_p.data_vars if ds_p[v].ndim == 1 and v not in [lat_v, lon_v]]
+                coord_vars = [v for v in ds_p.variables if 'lat' in v.lower() or 'lon' in v.lower()]
+                variables = [v for v in ds_p.data_vars if ds_p[v].ndim == 1 and v not in coord_vars]
+                if not variables: log.warn(f"[{p_file.name}] No suitable 1D data variables found.")
+
+                for var in variables:
+                    v_low = var.lower()
+                    if 'wind_speed' in v_low:
+                        dir_cand = var.replace('speed', 'direction').replace('Speed', 'Direction')
+                        if dir_cand in variables: vector_tasks.append(('speed_dir', var, dir_cand))
+                    elif 'u_component' in v_low:
+                        v_cand = var.replace('u_component', 'v_component').replace('U_component', 'V_component')
+                        if v_cand in variables: vector_tasks.append(('uv', var, v_cand))
+
             elif comp_strategy == 'timeseries':
                 time_v = next((v for v in ds_p.variables if 'time' in v.lower()), None)
                 variables = [v for v in ds_p.data_vars if ds_p[v].ndim == 1 and v != time_v]
-            else: # Standard Image
+                if not variables: log.warn(f"[{p_file.name}] No suitable 1D data variables found.")
+
+            else:
                 variables = [v for v in ds_p.data_vars if ds_p[v].ndim >= 2]
+                if not variables: log.warn(f"[{p_file.name}] No suitable 2D+ data variables found.")
 
             for var in variables:
+                log.debug(f"  -> Target [{var}] routed to {comp_strategy.upper()}")
                 try:
-                    # Route to correct comparison logic
                     if comp_strategy == 'sparse':
+                        lat_v, lon_v = _get_coords_for_var(ds_p, var)
+                        log.debug(f"    -> Mapped Coords: ({lat_v}, {lon_v})")
                         var_metrics = _compare_sparse(ds_p, ds_g, var, tmp_dir, pair_info)
+
                     elif comp_strategy == 'timeseries':
                         var_metrics = _compare_timeseries(ds_p, ds_g, var, tmp_dir, pair_info)
+
                     else:
                         var_metrics = _compare_standard(ds_p, ds_g, var, tmp_dir, pair_info)
 
-                    # Ensure format perfectly matches stats_pave.py expectations
                     for m_dict in var_metrics:
                         results.append({
                             **meta, 'Variable': var,
                             'Metric': m_dict['Metric'], 'Value': m_dict['Value']
                         })
-
                 except MemoryError:
                     results.append({**meta, 'Variable': var, 'Metric': 'r-squared correlation', 'Value': np.nan})
+                    log.warn(f"[{var}] MemoryError - Array too large to process.")
                 except Exception as ve:
-                    # Skip problematic variables but continue evaluating others
+                    log.warn(f"[{var}] Failed processing: {str(ve)}")
                     continue
                 finally:
                     gc.collect()
 
-        # Local stats record EXACTLY as written in v1.2.2
+            for v_type, v1, v2 in vector_tasks:
+                try:
+                    log.debug(f"  -> Generating Dedicated Vector Flow Plot for: {v1} & {v2}")
+                    _compare_sparse_vectors(ds_p, ds_g, v_type, v1, v2, tmp_dir, pair_info)
+                except Exception as ve:
+                    log.warn(f"Failed to generate vector plot for {v1}/{v2}: {str(ve)}")
+
         with open(tmp_dir / "stats.csv", 'w', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=['Product', 'Variable', 'Sat', 'Metric', 'Start', 'Value'])
             writer.writeheader()
             writer.writerows(results)
 
         tmp_dir.rename(final_dir)
-        return results, pair_info
+        return results
 
     except Exception as e:
         if tmp_dir.exists(): shutil.rmtree(tmp_dir)
-        return None, f"FAILED: {pair_info} -> {str(e)}"
+        log.warn(f"FAILED FILE: {pair_info} -> {str(e)}")
+        return None
     finally:
         plt.close('all')
 
@@ -268,86 +474,62 @@ class PaveComparator:
         self.prem_root = Path(args.prem_fld).resolve()
         self.gccs_root = Path(args.gccs_fld).resolve()
         self.dest_root = Path(args.dest_fld).resolve()
-
         stats_val = getattr(args, 'stats_fld', None)
         self.stats_root = Path(stats_val if stats_val else args.dest_fld).resolve()
-
         self.threads = getattr(args, 'threads', 4)
         self.log = log
         self.summary_csv = self.stats_root / "glance_stats_summary.csv"
 
     def _cleanup_partial_runs(self):
-        """Removes orphaned .partial folders from previous crashes."""
         for p_dir in self.dest_root.rglob("*.partial"):
             if p_dir.is_dir(): shutil.rmtree(p_dir)
 
     def _write_aggregated_summary(self):
-        """
-        Reformatting Logic:
-        Scrapes local stats, calculates overall stats, and flattens time-series.
-        (Remains identical to v1.2.2 to ensure matching format with stats_pave.py)
-        """
         all_raw_data = []
         self.log.info("Collecting and reformatting cumulative statistics...")
 
-        # 1. Scrape all local records
         for local_csv in self.dest_root.rglob("stats.csv"):
             try:
                 with open(local_csv, 'r') as f:
                     reader = csv.DictReader(f)
-                    for row in reader:
-                        all_raw_data.append(row)
+                    for row in reader: all_raw_data.append(row)
             except Exception: continue
 
         if not all_raw_data:
             self.log.warn("No statistical records found to aggregate.")
             return
 
-        # 2. Reformat into Time-Series mirrored format
         df = pd.DataFrame(all_raw_data).sort_values('Start')
         df['Value'] = pd.to_numeric(df['Value'], errors='coerce')
 
         header = "Product,Variable,Sat,Metric,Count,Min,Max,Mean,Median,NaN,T1,V1,T2,V2,T3,V3...\n"
-
-        if not self.stats_root.exists():
-            self.stats_root.mkdir(parents=True, exist_ok=True)
+        self.stats_root.mkdir(parents=True, exist_ok=True)
 
         with open(self.summary_csv, 'w') as f:
             f.write(header)
-
-            # Mirroring statistics gathering logic
             groups = df.groupby(['Product', 'Variable', 'Metric', 'Sat'], sort=False)
             for (prod, var, metric, sat), group in groups:
                 vals = group['Value'].dropna()
-
-                # Metadata columns
                 meta = [
-                    prod, var, sat, metric,
-                    str(len(group)),
+                    prod, var, sat, metric, str(len(group)),
                     f"{vals.min():.8f}" if not vals.empty else "NaN",
                     f"{vals.max():.8f}" if not vals.empty else "NaN",
                     f"{vals.mean():.8f}" if not vals.empty else "NaN",
                     f"{vals.median():.8f}" if not vals.empty else "NaN",
                     str(group['Value'].isna().sum())
                 ]
-
-                # Flattened Time-Series
                 ts_pairs = []
                 for _, row in group.iterrows():
                     ts_pairs.append(str(row['Start']))
                     ts_pairs.append(str(row['Value']))
-
                 f.write(",".join(meta) + "," + ",".join(ts_pairs) + "\n")
 
     def execute(self):
-        if not self.dest_root.exists():
-            self.dest_root.mkdir(parents=True, exist_ok=True)
-
+        self.dest_root.mkdir(parents=True, exist_ok=True)
         self._cleanup_partial_runs()
 
         nc_files = list(self.prem_root.rglob("*.nc"))
-        tasks = []
-        skipped = 0
+        tasks, skipped = [], 0
 
         for pf in nc_files:
             rel = pf.relative_to(self.prem_root).parent
@@ -361,18 +543,17 @@ class PaveComparator:
                       [g_dir / pf.name] if (g_dir / pf.name).exists() else []
             if matches: tasks.append((pf, matches[0]))
 
-        if skipped > 0:
-            self.log.info(f"Compare-PAVE: Resuming. Skipping {skipped} existing results.")
-
+        if skipped > 0: self.log.info(f"Compare-PAVE: Resuming. Skipping {skipped} existing results.")
         if tasks:
             self.log.info(f"Compare-PAVE: Processing {len(tasks)} file pairs.")
             with ProcessPoolExecutor(max_workers=self.threads) as executor:
-                futures = {executor.submit(process_file_pair, p, g, self.dest_root, self.prem_root): p.name for p, g in tasks}
+                futures = {executor.submit(process_file_pair, p, g, self.dest_root, self.prem_root, self.log): p.name for p, g in tasks}
                 for fut in as_completed(futures):
-                    try: res, info = fut.result()
-                    except Exception as e: self.log.error(f"Critical Worker Error: {e}")
+                    try:
+                        _ = fut.result()
+                    except Exception as e:
+                        self.log.error(f"Critical Worker Error: {e}")
 
-        # Final Reformatting Step
         self._write_aggregated_summary()
         self.log.info(f"Final Summary Rebuilt: {self.summary_csv}")
 
@@ -390,9 +571,7 @@ def parse_args():
 def main():
     args = parse_args()
     lvl = "DEBUG" if args.debug else "VERBOSE" if args.verbose else "INFO"
-    log = Logger(lvl)
-    setup_interrupt_handler(log)
+    log = Logger(lvl); setup_interrupt_handler(log)
     PaveComparator(args, log).execute()
 
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": main()
