@@ -2,7 +2,7 @@
 """
 PAVE: Product Analysis & Verification Engine
 ============================================
-VERSION: 1.3.12 (Validation Directory Routing)
+VERSION: 1.3.13 (Skip IP Retrieval Option)
 """
 
 import argparse
@@ -16,23 +16,30 @@ def parse_args():
         description="Orchestrate the GOES-R PAVE pipeline."
     )
 
+    # 1. Selection Criteria
     parser.add_argument("products", nargs="+", help="Product shortnames")
     parser.add_argument("--times", nargs="+", required=True, help="10-digit timestamps")
     parser.add_argument("--scenes", nargs="*", choices=['f', 'c', 'm1', 'm2'], help="Scene filter")
     parser.add_argument("--channels", nargs="*", help="Channel filter")
+
+    # 2. Workspace Construction
     parser.add_argument("--prefix", help="Prefix for the job folder name")
     parser.add_argument("--tag", help="Suffix/Tag for the job folder name")
     parser.add_argument("--base-dir", default=".", help="Root directory for workspace")
 
+    # 3. Skip Switches
     parser.add_argument("--skip-retrieve", action="store_true", help="Skip STAGE 1 - data retrieval")
+    parser.add_argument("--skip-ip", action="store_true", help="Skip Intermediate Product (IP) retrieval in STAGE 1")
     parser.add_argument("--skip-meta", action="store_true", help="Skip STAGE 2 - metadata comparisons")
     parser.add_argument("--skip-science", action="store_true", help="Skip STAGE 3 - run glance utility")
     parser.add_argument("--skip-collocate", action="store_true", help="Skip STAGE 4 - run collocation for DMW/GLM")
     parser.add_argument("--skip-stats", action="store_true", help="Skip STAGE 5 - run summary tool on glance results")
     parser.add_argument("--skip-judge", action="store_true", help="Skip STAGE 6 - run judgement stage")
 
+    # 4. Engine Selection
     parser.add_argument("--use-compare", action="store_true", help="Use lightweight compare_pave.py instead of Glance")
 
+    # 5. Operational Flags
     parser.add_argument("--preserve-ip", action="store_true", help="Move IP tars to ip_data/ instead of deleting")
     parser.add_argument("-j", "--threads", type=int, default=8, help="S3 sync threads")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose logs")
@@ -60,7 +67,7 @@ def initialize_workspace(args, log):
         "gccs": workspace_root / "gccs",
         "prem": workspace_root / "prem",
         "glance": workspace_root / "glance",
-        "validation": workspace_root / "validation",  # ADDED VALIDATION FOLDER
+        "validation": workspace_root / "validation",
         "coll": workspace_root / "collocation",
         "stats": workspace_root / "stats"
     }
@@ -78,6 +85,7 @@ def main():
 
     ws = initialize_workspace(args, log)
 
+    # --- STAGE 1: RETRIEVAL ---
     if not args.skip_retrieve:
         log.info("--- STAGE 1: RETRIEVAL ---")
         import retrieve_pave
@@ -86,6 +94,7 @@ def main():
 
     run_symmetry_audit(ws, log)
 
+    # --- STAGE 2: METADATA AUDIT ---
     if not args.skip_meta:
         log.info("--- STAGE 2: METADATA AUDIT ---")
         from meta_pave import MetadataAuditor
@@ -95,11 +104,12 @@ def main():
         )
         MetadataAuditor(meta_args, log).execute()
 
+    # --- STAGE 3: SCIENCE REPORTING ---
     if args.use_compare:
         log.info("--- STAGE 3/5: LIGHTWEIGHT COMPARISON ENGINE ---")
         import compare_pave
         comp_args = argparse.Namespace(
-            prem_fld=ws['prem'], gccs_fld=ws['gccs'], dest_fld=ws['validation'], # ROUTES TO VALIDATION DIRECTORY
+            prem_fld=ws['prem'], gccs_fld=ws['gccs'], dest_fld=ws['validation'],
             stats_fld=ws['stats'], threads=args.threads, verbose=args.verbose, debug=args.debug
         )
         compare_pave.PaveComparator(comp_args, log).execute()
@@ -132,10 +142,11 @@ def main():
                 )
                 ScienceAnalyzer(sci_args, log).execute()
 
+    # --- STAGE 5: STATISTICS HARVESTING ---
     if not args.skip_stats:
         log.info("--- STAGE 5: STATISTICS HARVESTING ---")
         harvest_fld = ws['glance']
-        if (ws['glance'] / "collocated").exists():
+        if is_sparse and (ws['glance'] / "collocated").exists():
             harvest_fld = ws['glance'] / "collocated"
             log.info(f"Targeting collocated reports for stats: {harvest_fld}")
 
@@ -147,6 +158,7 @@ def main():
             )
             StatsHarvester(stats_args, log).execute()
 
+    # --- STAGE 6: FINAL VERDICT ---
     if not args.skip_judge:
         log.info("--- STAGE 6: FINAL VERDICT ---")
         from judge_pave import PaveJudge

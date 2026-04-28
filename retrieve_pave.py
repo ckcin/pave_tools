@@ -2,7 +2,7 @@
 """
 RETRIEVE-PAVE: Data Collection Engine
 =====================================
-VERSION: 1.3.8 (Logging Verbosity Tuning)
+VERSION: 1.4.0 (Skip IP Integration)
 """
 
 import argparse
@@ -73,17 +73,17 @@ def get_gccs_products(args, gccs_path, log):
 
         for sat in [18, 19]:
             base_prefix = f"{GCCS_PREFIX}/GOES-{sat}/{meta['level']}/{meta['instr']}/"
-            for bucket in [GCCS_BUCKET, GCCS_IP_BUCKET]:
 
+            # ---> NEW: IP SKIP LOGIC FOR GCCS DISCOVERY
+            buckets_to_search = [GCCS_BUCKET] if getattr(args, 'skip_ip', False) else [GCCS_BUCKET, GCCS_IP_BUCKET]
+
+            for bucket in buckets_to_search:
                 cmd = ["aws", "s3api", "list-objects-v2", "--profile", "geocloud", "--bucket", bucket,
                        "--prefix", base_prefix, "--delimiter", "/", "--query", "CommonPrefixes[].Prefix", "--output", "text"]
 
-                # Lowered to VERBOSE
                 log.verbose(f"--> [AWS CMD] {shlex.join(cmd)}")
-
                 res = subprocess.run(cmd, capture_output=True, text=True)
 
-                # Trap AWS CLI Errors
                 if res.returncode != 0:
                     log.error(f"AWS CLI FAILED! Return Code {res.returncode}")
                     log.error(f"AWS STDERR: {res.stderr.strip()}")
@@ -96,7 +96,6 @@ def get_gccs_products(args, gccs_path, log):
 
                 for pref in listing:
                     if match_folder(Path(pref).name.lower(), meta, args.scenes, user_channels):
-                        # Lowered to DEBUG
                         log.debug(f"  [MATCH] Found S3 Folder: {Path(pref).name}")
                         discovery_list.append((bucket, pref, Path(pref).name.lower(), meta['instr']))
 
@@ -174,6 +173,11 @@ def get_on_prem_products(args, gccs_path, prem_path, log):
     if tmp_sync_dir.exists(): shutil.rmtree(tmp_sync_dir)
 
 def extract_ips(args, prem_path, gccs_path, log):
+    # ---> NEW: FAST-FAIL IP SKIP LOGIC
+    if getattr(args, 'skip_ip', False):
+        log.info("Skipping Intermediate Product (IP) recovery as requested.")
+        return
+
     gccs_ip_refs = list(gccs_path.rglob("*I_ABI*.nc"))
     if not gccs_ip_refs: return
     log.info(f"Targeted IP Recovery ({len(gccs_ip_refs)} files)")
@@ -258,6 +262,7 @@ def parse_args():
     parser.add_argument("--channels", nargs="*", help="Channel list (01-16)")
     parser.add_argument("--dest", default=".", help="Workspace root folder")
     parser.add_argument("--preserve-ip", action="store_true", help="Preserve IP tars in ip_data/")
+    parser.add_argument("--skip-ip", action="store_true", help="Skip Intermediate Product (IP) retrieval")
     parser.add_argument("-j", "--threads", type=int, default=8, help="Sync threads")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
     parser.add_argument("-d", "--debug", action="store_true", help="Enable debug logging")
