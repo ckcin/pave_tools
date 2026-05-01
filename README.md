@@ -4,8 +4,19 @@
 
 ---
 
-## 1. Master Orchestrator: `pave.py` (v1.1.8)
-The primary entry point that manages workspace initialization and sequential execution of stages 1 through 6. 
+## Environment Setup
+Ensure you have your AWS credentials properly configured under the `geocloud` profile. Check that your Python environment meets all requirements by running:
+
+```bash
+python3 check_env.py
+```
+
+**Core Dependencies:** `numpy`, `pandas`, `xarray`, `scipy`, `matplotlib`, `cartopy` (for geospatial plotting), `sunpy` (for SDO solar palettes), `netCDF4`, `boto3`.
+
+---
+
+## 1. Master Orchestrator: `pave.py` (v1.3.13)
+The primary entry point that manages workspace initialization and sequential execution of all pipeline stages. 
 
 ### CLI Usage
 ```bash
@@ -20,8 +31,9 @@ The primary entry point that manages workspace initialization and sequential exe
 | `--scenes` | Choices: `f`, `c`, `m1`, `m2`. |
 | `--channels` | Channel list (e.g., `01`, `13`). |
 | `--base-dir` | Root directory for the workspace (Default: `.`). |
-| `--skip-*` | Flags to skip any specific stage (1-6). |
-| `--r2-threshold` | Min R² Mean for a PASS (Default: `0.990`). |
+| `--use-compare`| **(Recommended)** Bypasses legacy Glance and routes all variables through the dynamic `compare_pave.py` engine. |
+| `--skip-ip` | Safely bypasses the download of massive Intermediate Product (IP) tarballs. |
+| `--skip-*` | Flags to skip any specific stage (`retrieve`, `meta`, `science`, `collocate`, `stats`, `judge`). |
 | `-j`, `--threads` | Concurrent S3 sync threads (Default: `8`). |
 
 ---
@@ -29,28 +41,15 @@ The primary entry point that manages workspace initialization and sequential exe
 ## 2. Maintenance Utility: `archive_pave.py` (v1.1.1)
 A standalone utility used to compress large data folders and reclaim disk space. It features "Workspace Intelligence" to automatically identify PAVE subdirectories.
 
-### Key Logic
-- **Archive**: Populated folders (`gccs`, `prem`, `glance`, `coll`) are compressed into `.tar.gz`.
-- **Verify**: The utility verifies that the archive file count matches the source before deletion.
-- **Purge**: Empty folders are removed immediately without creating an archive.
-- **Protect**: The `stats/` folder is explicitly excluded from archival to keep results accessible.
-
 ### CLI Usage
 ```bash
 ./archive_pave.py [path] [options]
 ```
 
-### Arguments
-| Flag | Description |
-| :--- | :--- |
-| `path` | Path to a PAVE workspace root (e.g., `./202418012`) or a specific subdirectory. |
-| `-v`, `--verbose` | Shows the verification and purge details. |
-| `-q`, `--quiet` | Suppresses all output except errors. |
-
 ---
 
-## 3. Data Retrieval: `retrieve_pave.py` (v1.2.9)
-Handles S3 discovery and mirroring. Maps GCCS cloud structures to On-Prem folder hierarchies and extracts Intermediate Products (IP) from tarballs.
+## 3. Data Retrieval: `retrieve_pave.py` (v1.4.0)
+Handles S3 discovery and mirroring. Maps GCCS cloud structures to On-Prem folder hierarchies and extracts Intermediate Products (IP) from tarballs. Now supports fast-fail `--skip-ip` bypassing.
 
 ### CLI Usage
 ```bash
@@ -69,42 +68,52 @@ Performs a recursive audit of NetCDF dimensions and attributes. Fully supports `
 
 ---
 
-## 5. Science Engine: `science_pave.py` (v1.5.5)
-Wraps `glance report` to generate comparisons. Features **Cumulative Status Decoding** to report how many file pairs in a batch contained differences or missing variables.
+## 5. Lightweight Science Engine: `compare_pave.py` (v1.6.3)
+Replaces legacy tools by dynamically applying specialized comparison strategies (2D Images, 1D Time-Series, Sparse Spatial Gridding).
+- **Geospatial Projections:** Uses Cartopy to natively project ABI data onto `Geostationary` maps with coastlines.
+- **Solar Palettes:** Automatically maps SUVI imagery using standard NASA SDO `sunpy` colormaps.
+- **Vector Flow:** Dynamically converts winds into geographical colored quiver plots.
+- **Standalone Outputs:** Generates combined 2x2 dashboards as well as high-res standalone PNGs for PREM, GCCS, Differences, and Histograms.
 
 ### CLI Usage
 ```bash
-./science_pave.py [prem_fld] [gccs_fld] [dest_fld] [options]
+./compare_pave.py [prem_fld] [gccs_fld] [dest_fld] [options]
 ```
 
 ---
 
-## 6. Collocation Engine: `collocate_pave.py` (v1.0.7)
-Used for sparse data (DMW/GLM). Creates common grids for files before analysis.
+## 6. Legacy Science Engine: `science_pave.py` (v1.5.5)
+Wraps `glance report` to generate older comparisons. Features Cumulative Status Decoding to report how many file pairs in a batch contained differences. *(Skipped if `--use-compare` is active).*
+
+---
+
+## 7. Legacy Collocation Engine: `collocate_pave.py` (v1.0.7)
+Used for sparse data (DMW/GLM) in the legacy pipeline. Creates common grids for files before analysis. *(Skipped if `--use-compare` is active).*
+
+---
+
+## 8. Stats Harvester: `stats_pave.py` (v2.9.4)
+Scrapes legacy Glance HTML reports to build a centralized `glance_stats_summary.csv`.
+
+---
+
+## 9. The Jury: `judge_pave.py` (v1.2.0)
+Renders the final PASS/CHECK/FAIL verdict based on scientific statistics and metadata differences. 
+- **Outlier Tracing:** Directly prints the exact filename (e.g., `OR_ABI-L2-DMWF_G18_s...`) of the specific timestep that caused a product to be flagged as CHECK or FAIL.
 
 ### CLI Usage
 ```bash
-./collocate_pave.py [prem_fld] [gccs_fld] [coll_fld] [dest_fld] --cfg_fld [path]
+./judge_pave.py [stats_fld] [options]
 ```
 
 ---
 
-## 7. Stats Harvester: `stats_pave.py` (v2.9.4)
-Scrapes Glance HTML reports to build a centralized `glance_stats_summary.csv`.
+## 10. Environment Checker: `check_env.py`
+Utility script to verify that the PAVE pipeline's environment has all required dependencies installed for geospatial and solar visualization.
 
 ### CLI Usage
 ```bash
-./stats_pave.py [glance_fld] [dest_fld]
-```
-
----
-
-## 8. The Jury: `judge_pave.py` (v1.0.1)
-Renders the final PASS/FAIL verdict based on `glance_stats_summary.csv` and `metadata_audit.csv`. Robust against empty dataframes and floating-point `NaN` values.
-
-### CLI Usage
-```bash
-./judge_pave.py [stats_fld] --threshold [float]
+./check_env.py
 ```
 
 ---
