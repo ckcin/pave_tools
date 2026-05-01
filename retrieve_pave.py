@@ -107,7 +107,7 @@ def get_gccs_products(args, gccs_path, log):
                 dest.mkdir(parents=True, exist_ok=True)
 
                 s3_uri = f"s3://{bucket_name}/{pref}{year}/{doy}/"
-                log.info(f"Queuing GCCS Sync: {s3_uri}")
+                log.verbose(f"Queuing GCCS Sync: {s3_uri}")
 
                 executor.submit(run_s3_sync, s3_uri,
                                dest, f"*_s{ts}*.nc", log, label=f"Sync GCCS: {folder_name}")
@@ -153,7 +153,7 @@ def get_on_prem_products(args, gccs_path, prem_path, log):
                 patterns = [f"*{tag}*_s{ts}*.nc" for tag in include_tags]
                 for sat in [18, 19]:
                     s3_uri = f"s3://{PREM_BUCKET}/op/GOES-{sat}/{level_str}/{instr_gpas}/{year}/{gpas_str}/"
-                    log.info(f"Queuing On-Prem Sync: {s3_uri}")
+                    log.verbose(f"Queuing On-Prem Sync: {s3_uri}")
                     executor.submit(run_s3_sync, s3_uri,
                                    tmp_sync_dir, patterns, log, label=f"Sync On-Prem: {p_name}")
 
