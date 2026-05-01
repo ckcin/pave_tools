@@ -2,7 +2,7 @@
 """
 JUDGE-PAVE: Quality Gate Verdict Engine
 =======================================
-VERSION: 1.1.0 (DSN-Aware & Re-Integrated Structural Logic)
+VERSION: 1.2.0 (Outlier Filename Tracing)
 """
 
 import argparse
@@ -38,32 +38,29 @@ class PaveJudge:
 
     def _judge_science(self):
         """
-        Tiered Science Logic (v1.1.0):
-        - Scans ALL columns starting at index 11 (V1, V2, V3...) for raw data.
+        Tiered Science Logic (v1.2.0):
+        - Scans alternating T/V pairs (Start Time / Value) starting at index 10.
         - FAIL: Any single data point < SCI_FAIL_LIMIT (0.900).
         - FAIL: Product-wide average (all points) < SCI_PASS_THRESHOLD (0.990).
         - CHECK: Product average >= 0.990, but one or more individual points < 0.990.
-        - PASS: All points in the timeseries >= 0.990.
+        - Logs the precise filename string (OR_DSN_SAT_sTIME) for outliers.
         """
         science_results = {}
         if not self.stats_file.exists():
             self.log.warn(f"Science stats file missing ({self.stats_file.name}).")
             return {}
 
-        # We read without a fixed header count to handle 'ragged' CSV horizontal expansion
-        # Using header=None and then setting names helps ensure we capture all columns
         try:
-            # Read first line to get count of columns in the widest row
             with open(self.stats_file, 'r') as f:
                 first_line = f.readline()
-                col_count = len(first_line.split(',')) + 50 # Buffer for long timeseries
+                col_count = len(first_line.split(',')) + 50
 
             df = pd.read_csv(
                 self.stats_file,
                 names=range(col_count),
                 skipinitialspace=True,
                 low_memory=False,
-                skiprows=1 # Skip the header line
+                skiprows=1
             )
         except Exception as e:
             self.log.error(f"Failed to parse {self.stats_file.name}: {e}")
@@ -72,23 +69,15 @@ class PaveJudge:
         if df.empty:
             return {}
 
-        # Re-map the basic metadata columns (0-10) for stats_pave v3.1.0
-        # 0:Product (DSN), 1:Variable, 2:Sat, 3:Metric, 4:Count, 5:Min, 6:Max, 7:Mean, 8:Median, 9:NaN, 10:T1, 11:V1...
+        # 0:Product, 1:Variable, 2:Sat, 3:Metric, 4:Count, 5:Min, 6:Max, 7:Mean, 8:Median, 9:NaN, 10:T1, 11:V1...
         df = df.rename(columns={0: 'Product', 1: 'Variable', 2: 'Sat', 3: 'Metric'})
-
-        # Filter for science metrics (R-squared)
         df['Metric'] = df['Metric'].astype(str).str.lower().str.strip()
         df_r2 = df[df['Metric'].str.contains('r-squared|r2', case=False, na=False)]
 
         if df_r2.empty:
-            self.log.warn(f"No R-Squared metrics found in {self.stats_file.name}. (Metric Search: 'r-squared' or 'r2')")
-            if self.log.current_level <= 0: # Debug mode
-                all_metrics = df['Metric'].unique()
-                self.log.debug(f"Metrics actually found in file: {all_metrics}")
+            self.log.warn(f"No R-Squared metrics found in {self.stats_file.name}.")
             return {}
 
-        # Group data points by parent product (The DSN in column 0)
-        # Note: In the DSN-centric model, 'Product' is already the base ID
         for prod_base, group in df_r2.groupby('Product'):
             status = "PASS"
             details = []
@@ -96,34 +85,38 @@ class PaveJudge:
 
             for _, row in group.iterrows():
                 var_name = str(row['Variable'])
+                sat = str(row['Sat'])
+                prod_dsn = str(row['Product'])
 
-                # Extract values from columns 11, 13, 15... (V1, V2, V3...)
-                # Based on stats_pave v3.1.0: Index 10=T1, 11=V1, 12=T2, 13=V2...
-                raw_vals = row.iloc[11::2].dropna()
-                numeric_vals = pd.to_numeric(raw_vals, errors='coerce').dropna().tolist()
+                # Extract paired arrays of Timestamps and Values
+                times = row.iloc[10::2].values
+                vals = row.iloc[11::2].values
 
-                if not numeric_vals:
-                    continue
+                for t, v in zip(times, vals):
+                    if pd.isna(v): continue
+                    try:
+                        val_float = float(v)
+                    except (ValueError, TypeError):
+                        continue
 
-                all_raw_points.extend(numeric_vals)
+                    all_raw_points.append(val_float)
 
-                # Check individual points for this specific variable
-                v_min = min(numeric_vals)
-                if v_min < SCI_FAIL_LIMIT:
-                    status = "FAIL"
-                    details.append(f"Critical Fail in {var_name}: Point={v_min:.4f}")
-                elif v_min < SCI_PASS_THRESHOLD and status != "FAIL":
-                    status = "CHECK"
-                    details.append(f"Noise in {var_name}: Min={v_min:.4f}")
+                    if val_float < SCI_FAIL_LIMIT:
+                        status = "FAIL"
+                        filename_hint = f"OR_{prod_dsn}_{sat}_s{str(t).strip()}"
+                        details.append(f"Fail {var_name} [{filename_hint}]: {val_float:.4f}")
 
-            # Once all points for the product are collected, check the aggregate Mean
+                    elif val_float < SCI_PASS_THRESHOLD and status != "FAIL":
+                        status = "CHECK"
+                        filename_hint = f"OR_{prod_dsn}_{sat}_s{str(t).strip()}"
+                        details.append(f"Check {var_name} [{filename_hint}]: {val_float:.4f}")
+
             if not all_raw_points:
                 science_results[prod_base] = {"status": "CHECK", "details": ["No numeric timeseries found"]}
                 continue
 
             product_avg = sum(all_raw_points) / len(all_raw_points)
 
-            # If the aggregate is bad, it's a FAIL regardless of individual checks
             if product_avg < SCI_PASS_THRESHOLD:
                 status = "FAIL"
                 details.insert(0, f"Low Product Average R2: {product_avg:.4f}")
