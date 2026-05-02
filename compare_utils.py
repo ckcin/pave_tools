@@ -2,7 +2,7 @@
 """
 COMPARE-PAVE: Shared Utility Suite
 ==================================
-VERSION: 1.7.6 (Corner Labels + Restored 2x2 Dashboard)
+VERSION: 1.7.8 (Size 18 Corner Labels)
 """
 
 import os
@@ -79,10 +79,10 @@ def get_coords_for_var(ds, var_name):
 # --- CORE PLOTTING ENGINE ---
 
 def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_label, proj=None, extent=None, origin='upper', cmap='viridis'):
-    """The master 2x2 grid engine with updated corner labels and restored dashboard."""
+    """The master 2x2 grid engine with restored upscaled labels (Size 18)."""
     mask_p, mask_g = np.isfinite(data_p), np.isfinite(data_g)
     common = np.logical_and(mask_p, mask_g)
-    
+
     r_sq = 0.0
     num_common = np.count_nonzero(common)
     if num_common > 1:
@@ -110,7 +110,7 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
     h, w = plot_p.shape
     data_ratio = h / w if w > 0 else 1
     is_geo = HAS_CARTOPY and proj is not None
-    
+
     # Scaling
     kwargs = {'cmap': cmap, 'aspect': 'equal', 'origin': origin}
     v_p, v_g = plot_p[np.isfinite(plot_p)], plot_g[np.isfinite(plot_g)]
@@ -120,7 +120,7 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
 
     diff_vmax = np.nanmax(np.abs(valid_diffs)) if len(valid_diffs) > 0 else 1
     diff_kwargs = {'cmap': 'bwr', 'aspect': 'equal', 'origin': origin, 'vmin': -diff_vmax, 'vmax': diff_vmax}
-    
+
     if extent: kwargs['extent'] = diff_kwargs['extent'] = extent
     if is_geo: kwargs['transform'] = diff_kwargs['transform'] = proj
 
@@ -133,16 +133,20 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
                 ax.add_feature(cfeature.STATES, edgecolor='lightgrey', linewidth=0.4, linestyle=':', facecolor='none')
             except: pass
 
-    def _add_corner_labels(ax, source_label):
-        ax.text(0.01, 0.99, source_label, transform=ax.transAxes, color='black', weight='bold', va='top', ha='left', path_effects=halo)
-        ax.text(0.01, 0.01, start_time, transform=ax.transAxes, color='black', fontsize=9, va='bottom', ha='left', path_effects=halo)
+    def _add_corner_labels(ax, source_label, upscale=False):
+        # Increased source label size to 18 for standalone images
+        source_size = 18 if upscale else 11
+        ax.text(0.01, 0.99, source_label, transform=ax.transAxes, color='black',
+                weight='bold', fontsize=source_size, va='top', ha='left', path_effects=halo)
+        ax.text(0.01, 0.01, start_time, transform=ax.transAxes, color='black',
+                fontsize=9, va='bottom', ha='left', path_effects=halo)
 
     def _add_cbar(im, ax):
         if is_geo: return plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
         div = make_axes_locatable(ax)
         return plt.colorbar(im, cax=div.append_axes("right", size="5%", pad=0.05))
 
-    # --- 1. STANDALONE EXPORTS ---
+    # --- 1. STANDALONE EXPORTS (Upscaled Labels Size 18) ---
     ind_h = 10 * data_ratio
     for label, data, kw, suff in [('GCCS', plot_g, kwargs, 'GCCS'), ('On-Prem', plot_p, kwargs, 'PREM'), ('Diff (G-P)', plot_diff, diff_kwargs, 'DIFF')]:
         fig_i = plt.figure(figsize=(10, ind_h))
@@ -150,12 +154,12 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
         ax_i.set_title(f"{product_dsn} | {var}", fontsize=12, color='black', weight='bold', pad=12)
         _setup_geo_ax(ax_i)
         im_i = ax_i.imshow(data, **kw)
-        _add_corner_labels(ax_i, label)
+        _add_corner_labels(ax_i, label, upscale=True)
         _add_cbar(im_i, ax_i)
         fig_i.savefig(tmp_dir / f"{var}_{suff}.png", dpi=100, bbox_inches='tight')
         plt.close(fig_i)
 
-    # --- 2. 2x2 DASHBOARD ---
+    # --- 2. 2x2 DASHBOARD (Standard Labels) ---
     fig_w = 18.0
     w_ax = (fig_w - 2.0) / 2.2
     fig_h_comb = max(min(2 * (w_ax * data_ratio) + 3.0, 40), 8)
@@ -166,9 +170,9 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
     ax2 = fig.add_subplot(222, projection=proj if is_geo else None)
     ax3 = fig.add_subplot(223, projection=proj if is_geo else None)
     ax4 = fig.add_subplot(224)
-    
-    dash_map = [(ax1, plot_p, kwargs, "On-Prem (Operational)"), 
-                (ax2, plot_g, kwargs, "GCCS (Cloud)"), 
+
+    dash_map = [(ax1, plot_p, kwargs, "On-Prem (Operational)"),
+                (ax2, plot_g, kwargs, "GCCS (Cloud)"),
                 (ax3, plot_diff, diff_kwargs, "Difference (G-P)")]
 
     for ax, data, kw, tit in dash_map:
@@ -181,7 +185,7 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
     if len(valid_diffs) > 0:
         ax4.hist(valid_diffs, bins=50, color='dimgray', edgecolor='black')
         ax4.axvline(0, color='red', linestyle='--')
-    
+
     if is_geo:
         sm = plt.cm.ScalarMappable(cmap='viridis'); sm.set_array([])
         plt.colorbar(sm, ax=ax4, fraction=0.046, pad=0.04).ax.set_visible(False)
@@ -191,7 +195,7 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     plt.savefig(tmp_dir / f"{var}_comparison.png", dpi=90)
     plt.close(fig)
-    
+
     return [{'Metric': 'r-squared correlation', 'Value': r_sq}]
 
 # --- AGGREGATION ENGINE ---
@@ -210,7 +214,7 @@ def write_aggregated_summary(dest_root, stats_root, log):
         f.write("Product,Variable,Sat,Metric,Count,Min,Max,Mean,Median,NaN,T1,V1,T2,V2...\n")
         for (p, v, m, s), g in df.groupby(['Product', 'Variable', 'Metric', 'Sat'], sort=False):
             vals = g['Value'].dropna()
-            line = [p, v, s, m, len(g), vals.min() if not vals.empty else 0, vals.max() if not vals.empty else 0, 
+            line = [p, v, s, m, len(g), vals.min() if not vals.empty else 0, vals.max() if not vals.empty else 0,
                     vals.mean() if not vals.empty else 0, vals.median() if not vals.empty else 0, g['Value'].isna().sum()]
             ts = []
             for _, r in g.iterrows(): ts.extend([r['Start'], r['Value']])
