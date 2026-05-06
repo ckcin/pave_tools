@@ -82,6 +82,11 @@ def process_file_pair(p_file, g_file, dest_root, prem_root, log, soft_match=Fals
         if tmp_dir.exists(): shutil.rmtree(tmp_dir)
         return None
 
+    finally:
+        # CRITICAL: Force clear figures and collect garbage after each pair
+        plt.close('all')
+        gc.collect()
+
 class PaveComparator:
     def __init__(self, args, log):
         self.prem_root = Path(args.prem_fld).resolve()
