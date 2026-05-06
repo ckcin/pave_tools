@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
 COMPARE-PAVE Orchestrator
-VERSION: 1.8.0 (Interrupt Integration & Multi-Engine Routing)
+VERSION: 1.8.1 (Interrupt Integration & Multi-Engine Routing)
 """
 import os
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 os.environ['MPLBACKEND'] = 'Agg'
 
 import argparse, csv, shutil, gc, sys, traceback
+import matplotlib.pyplot as plt
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import xarray as xr
