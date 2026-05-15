@@ -2,7 +2,7 @@
 """
 PAVE: Product Analysis & Verification Engine
 ============================================
-VERSION: 1.3.13 (Skip IP Retrieval Option)
+VERSION: 1.4.0 (Satellite Selection Option)
 """
 
 import argparse
@@ -21,6 +21,7 @@ def parse_args():
     parser.add_argument("--times", nargs="+", required=True, help="10-digit timestamps")
     parser.add_argument("--scenes", nargs="*", choices=['f', 'c', 'm1', 'm2'], help="Scene filter")
     parser.add_argument("--channels", nargs="*", help="Channel filter")
+    parser.add_argument("--sat", choices=['18', '19'], help="Limit execution to a specific GOES satellite (18 or 19)")
 
     # 2. Workspace Construction
     parser.add_argument("--prefix", help="Prefix for the job folder name")

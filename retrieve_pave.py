@@ -2,7 +2,7 @@
 """
 RETRIEVE-PAVE: Data Collection Engine
 =====================================
-VERSION: 1.4.0 (Skip IP Integration)
+VERSION: 1.5.0 (Target Satellite Integration)
 """
 
 import argparse
@@ -67,14 +67,16 @@ def get_gccs_products(args, gccs_path, log):
     user_channels = normalize_channels(args.channels)
     discovery_list = []
 
+    # Determine which satellites to target
+    target_sats = [args.sat] if getattr(args, 'sat', None) else [18, 19]
+
     for prod_name in args.products:
         meta = resolve_meta(prod_name)
         meta['prod_base'] = prod_name.split('-')[-1] if '-' in prod_name else prod_name
 
-        for sat in [18, 19]:
+        for sat in target_sats:
             base_prefix = f"{GCCS_PREFIX}/GOES-{sat}/{meta['level']}/{meta['instr']}/"
 
-            # ---> NEW: IP SKIP LOGIC FOR GCCS DISCOVERY
             buckets_to_search = [GCCS_BUCKET] if getattr(args, 'skip_ip', False) else [GCCS_BUCKET, GCCS_IP_BUCKET]
 
             for bucket in buckets_to_search:
@@ -124,6 +126,8 @@ def get_on_prem_products(args, gccs_path, prem_path, log):
     user_channels = [c.upper() for c in normalize_channels(args.channels)]
     sync_map = {}
 
+    target_sats = [args.sat] if getattr(args, 'sat', None) else [18, 19]
+
     for prod in args.products:
         meta = resolve_meta(prod); instr = meta['instr']
         key = (instr, meta['level'].lower(), instr if instr != "SEIS" else "SEISS", prod.lower())
@@ -151,7 +155,7 @@ def get_on_prem_products(args, gccs_path, prem_path, log):
             year, doy, gpas_str = ts[:4], ts[4:7], get_gpas_date(ts)
             for (instr_name, level_str, instr_gpas, p_name), include_tags in sync_map.items():
                 patterns = [f"*{tag}*_s{ts}*.nc" for tag in include_tags]
-                for sat in [18, 19]:
+                for sat in target_sats:
                     s3_uri = f"s3://{PREM_BUCKET}/op/GOES-{sat}/{level_str}/{instr_gpas}/{year}/{gpas_str}/"
                     log.verbose(f"Queuing On-Prem Sync: {s3_uri}")
                     executor.submit(run_s3_sync, s3_uri,
@@ -173,7 +177,6 @@ def get_on_prem_products(args, gccs_path, prem_path, log):
     if tmp_sync_dir.exists(): shutil.rmtree(tmp_sync_dir)
 
 def extract_ips(args, prem_path, gccs_path, log):
-    # ---> NEW: FAST-FAIL IP SKIP LOGIC
     if getattr(args, 'skip_ip', False):
         log.info("Skipping Intermediate Product (IP) recovery as requested.")
         return
@@ -187,9 +190,11 @@ def extract_ips(args, prem_path, gccs_path, log):
     if preserve_ip:
         ip_data_dir.mkdir(parents=True, exist_ok=True)
 
+    target_sats = [args.sat] if getattr(args, 'sat', None) else [18, 19]
+
     with ThreadPoolExecutor(max_workers=args.threads) as executor:
         for ts in args.times:
-            for sat in [18, 19]:
+            for sat in target_sats:
                 tar_name = f"GOES-{sat}_ABI_L2_IntermediateProducts_day{ts[4:7]}_hour{ts[7:9]}.tar"
                 executor.submit(run_s3_sync, f"s3://{EGRESS_ROOT}/GOES-{sat}/", prem_path, tar_name, log, label=f"IP Tar Sync")
 
@@ -260,6 +265,7 @@ def parse_args():
     parser.add_argument("--times", nargs="+", required=True, help="10-digit timestamps")
     parser.add_argument("--scenes", nargs="*", help="Scene filters (f, c, m1, m2)")
     parser.add_argument("--channels", nargs="*", help="Channel list (01-16)")
+    parser.add_argument("--sat", choices=['18', '19'], help="Limit execution to a specific GOES satellite (18 or 19)")
     parser.add_argument("--dest", default=".", help="Workspace root folder")
     parser.add_argument("--preserve-ip", action="store_true", help="Preserve IP tars in ip_data/")
     parser.add_argument("--skip-ip", action="store_true", help="Skip Intermediate Product (IP) retrieval")
