@@ -2,7 +2,7 @@
 """
 PAVE: Continuous Background Scheduler
 =====================================
-VERSION: 2.14.0 (Quirks Shifted to Post-Generation Slots)
+VERSION: 2.25.0 (Unified Super Cloud Grouping)
 
 SCHEDULING & LOAD BALANCING ARCHITECTURE:
 -----------------------------------------
@@ -10,15 +10,32 @@ SCHEDULING & LOAD BALANCING ARCHITECTURE:
    - G19 executes at: 01:00Z, 09:00Z, 17:00Z
    - G18 executes at: 05:00Z, 13:00Z, 21:00Z
 
-2. True Load Balancing (The 5-Day Cycle):
-   - To run EVERY product at EVERY time slot exactly once per week per satellite,
-     the 43 products are divided by 5 days (~9 products per slot).
+2. Persistent Monitor (ACM):
+   - Clear Sky Mask (ACM) executes at the start of EVERY time slot to guarantee
+     baseline masking verification remains continuously active.
+
+3. True Load Balancing (The 5-Day Cycle):
+   - The remaining 33 core products are divided by 5 days (~6-7 products per slot).
    - Algorithm: `(product_index + daily_slot_index) % 5 == cycle_day`
 
-3. Daily Quirks (NBAR & BRDF):
-   - NBAR/BRDF only produce data once per day and are hardcoded.
-   - G19 (12Z Data) executes during its first available post-generation slot: 17:00Z.
-   - G18 (14Z Data) executes during its first available post-generation slot: 21:00Z.
+4. Dependent Triggers (Rad, CMIP, & DMW):
+   - 'RadCMIP' handles radiance and cloud pairs.
+   - Cascades to run 'DMW' (Channels 2, 7, 8, 9, 10) and 'DMWV' (Channel 8).
+
+5. Radiation Product Coupling:
+   - RSR, DSR, PAR, and SWR are combined into a single logical "RadiationGroup".
+
+6. Daily Quirks Coupled to Closest Subsequent LSA Runs:
+   - G19 (12Z Data) executes during the 17:00Z slot alongside the G19 LSA block.
+   - G18 (14Z Data) executes during the 21:00Z slot alongside the G18 LSA block.
+
+7. Thermodynamic Sounding Coupling:
+   - LVMP, LVTP, DSI, TPW, and LSP are combined into a single "SoundingGroup".
+
+8. Unified Cloud Product Coupling:
+   - All cloud physical parameters (macro, micro, enterprise heights, and convective structure)
+     are bound tightly under a single rotating execution sequence.
+   - Group items: ACH, ACT, CTP, ECBH, EOCH, COD, CPS, CCL
 """
 
 import argparse
@@ -51,20 +68,24 @@ SLOT_TO_SAT = {
     21: "18"
 }
 
-# --- PRODUCT ROTATION LIST (43 Entries) ---
+# --- PRODUCT ROTATION LIST (33 Entries) ---
+# NOTE: ACM is a persistent monitor executed on every run.
+# NOTE: DMW/DMWV are dependent triggers on RadCMIP.
+# NOTE: NBAR/BRDF are daily quirks triggered at 17Z/21Z.
 RAW_PRODUCTS = [
     "RadCMIP|01", "RadCMIP|02", "RadCMIP|03", "RadCMIP|04",
     "RadCMIP|05", "RadCMIP|06", "RadCMIP|07", "RadCMIP|08",
     "RadCMIP|09", "RadCMIP|10", "RadCMIP|11", "RadCMIP|12",
     "RadCMIP|13", "RadCMIP|14", "RadCMIP|15", "RadCMIP|16",
-    "MCMIP",  "ACM",
-    "ACH",    "ACT",    "CTP",    "COD",     "CPS",
+    "MCMIP",
     "ADP",    "AOD",
     "FDC",    "FSC",    "LST",
     "LSA",    "BRF",
-    "LVMP",   "LVTP",   "DSI",    "TPW",    "LSP",
-    "RRQPE",  "RSR",    "DSR",    "PAR",    "SWR",
-    "SST",    "AICE",   "AITA"
+    "RRQPE",  "SST",    "AICE",   "AITA",
+    "ESC",    "ESU",    "ETE",
+    "RadiationGroup",           # Group items: RSR, DSR, PAR, SWR
+    "SoundingGroup",            # Group items: LVMP, LVTP, DSI, TPW, LSP
+    "CloudGroup"                # Group items: ACH, ACT, CTP, ECBH, EOCH, COD, CPS, CCL
 ]
 
 def get_now_utc():
@@ -72,12 +93,11 @@ def get_now_utc():
 
 def get_slot_tasks(target_date, slot_hour):
     """
-    Distributes 43 products so EVERY product runs at EVERY time slot exactly once
-    during the 5-day cycle (approx 8-9 products per slot).
+    Distributes 33 products so EVERY product runs at EVERY time slot exactly once
+    during the 5-day cycle (~6-7 products per slot).
     """
     cycle_day = (target_date.weekday() + 1) % 7
 
-    # Map the hour to a 0, 1, or 2 index for staggering the load per satellite
     if slot_hour in [1, 5]: daily_slot_idx = 0
     elif slot_hour in [9, 13]: daily_slot_idx = 1
     else: daily_slot_idx = 2
@@ -149,13 +169,11 @@ def execute_slot(workspace_dir, pave_script, time_slot=None):
         print(f"[{get_now_utc().strftime('%H:%M:%S')} UTC] Target day (Yesterday) was a Friday/Saturday. Standby.")
         return
 
-    # Determine the slot hour
     if time_slot is not None:
         slot_hour = time_slot
     else:
-        # Find the most recently passed valid slot
         current_hour = get_now_utc().hour
-        slot_hour = ALLOWED_SLOTS[-1] # Default to 21Z (yesterday) if we are before 01Z
+        slot_hour = ALLOWED_SLOTS[-1]
         for h in reversed(ALLOWED_SLOTS):
             if current_hour >= h:
                 slot_hour = h
@@ -168,12 +186,30 @@ def execute_slot(workspace_dir, pave_script, time_slot=None):
 
     print(f"\n--- PAVE AUTOMATION | Executing for: {target_date.strftime('%Y-%m-%d')} (Day {target_day_idx}) | Slot {hour_str}:00Z (G{target_sat}) ---")
 
+    # ==========================================
+    # --- PERSISTENT MONITOR INJECTION (ACM) ---
+    # ==========================================
+    try:
+        run_pave("ACM", None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat)
+    except Exception as e:
+        print(f"ERROR: Persistent Monitor ACM failed to execute: {e}")
+
     if not tasks:
-        print("  -> No standard products scheduled for this specific slot iteration.")
+        print("  -> No rotating products scheduled for this specific slot iteration.")
 
     for entry in tasks:
         try:
-            if "|" in entry:
+            if entry == "RadiationGroup":
+                for rad_dsn in ["RSR", "DSR", "PAR", "SWR"]:
+                    run_pave(rad_dsn, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat)
+            elif entry == "SoundingGroup":
+                for snd_dsn in ["LVMP", "LVTP", "DSI", "TPW", "LSP"]:
+                    run_pave(snd_dsn, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat)
+            elif entry == "CloudGroup":
+                # Super Cloud Group encompassing all macro, micro, and structures
+                for cld_dsn in ["ACH", "ACT", "CTP", "ECBH", "EOCH", "COD", "CPS", "CCL"]:
+                    run_pave(cld_dsn, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat)
+            elif "|" in entry:
                 dsn, channel = entry.split("|")
                 if dsn == "RadCMIP":
                     run_pave("Rad", [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat)
@@ -191,16 +227,16 @@ def execute_slot(workspace_dir, pave_script, time_slot=None):
         except Exception as e:
             print(f"ERROR: Task {entry} failed to execute: {e}")
 
-    # ==========================================
-    # --- HARDCODED DAILY QUIRKS (NBAR/BRDF) ---
-    # ==========================================
+    # =========================================================================
+    # --- HARDCODED DAILY QUIRKS (Coupled to the closest subsequent LSA run) ---
+    # =========================================================================
     if slot_hour == 17:
-        print("\n  -> Triggering Daily Quirks (NBAR / BRDF) for G19 at 12Z...")
+        print("\n  -> Triggering Daily Quirks (NBAR / BRDF) for G19 at 12Z (Closest post-generation LSA slot)...")
         for special_dsn in ["NBAR", "BRDF"]:
             run_pave(special_dsn, None, "12", target_date, workspace_dir, pave_script, sat="19")
 
     if slot_hour == 21:
-        print("\n  -> Triggering Daily Quirks (NBAR / BRDF) for G18 at 14Z...")
+        print("\n  -> Triggering Daily Quirks (NBAR / BRDF) for G18 at 14Z (Closest post-generation LSA slot)...")
         for special_dsn in ["NBAR", "BRDF"]:
             run_pave(special_dsn, None, "14", target_date, workspace_dir, pave_script, sat="18")
 
@@ -208,7 +244,6 @@ def wait_for_next_slot():
     now = get_now_utc()
     current_hour = now.hour
 
-    # Find the next upcoming slot in the array
     next_hour = None
     for h in ALLOWED_SLOTS:
         if h > current_hour:
@@ -216,7 +251,6 @@ def wait_for_next_slot():
             break
 
     if next_hour is None:
-        # Rollover to tomorrow's first slot (01:00Z)
         next_time = (now + datetime.timedelta(days=1)).replace(hour=ALLOWED_SLOTS[0], minute=0, second=0, microsecond=0)
     else:
         next_time = now.replace(hour=next_hour, minute=0, second=0, microsecond=0)
