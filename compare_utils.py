@@ -2,7 +2,7 @@
 """
 COMPARE-PAVE: Shared Utility Suite
 ==================================
-VERSION: 1.13.0 (Strict Zero-Indexed Numerical Sorting Schema)
+VERSION: 1.14.0 (Streamlined Master Dashboard Layout)
 """
 
 import os
@@ -84,7 +84,7 @@ def get_coords_for_var(ds, var_name):
 # --- CORE PLOTTING ENGINE ---
 
 def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_label, proj=None, extent=None, origin='upper', cmap='viridis'):
-    """Memory-safe 6-plot engine with log-density, layout symmetry locks, and zero-indexed sorting outputs."""
+    """Memory-safe 6-plot engine with log-density, layout symmetry locks, and standard file categorization."""
     mask_p, mask_g = np.isfinite(data_p), np.isfinite(data_g)
     common = np.logical_and(mask_p, mask_g)
 
@@ -106,7 +106,6 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
         sample_idx = np.random.choice(flat_idx, size=s_size, replace=False)
         try:
             samp_p, samp_g = data_p.ravel()[sample_idx], data_g.ravel()[sample_idx]
-            # Safety Check: Enforce true numerical variance to block constant-mask division errors
             if np.any(samp_p != samp_p[0]) and np.any(samp_g != samp_g[0]):
                 r_sq = float(pearsonr(samp_p, samp_g)[0] ** 2)
                 r_sq_is_na = False
@@ -158,7 +157,7 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
         return plt.colorbar(im, cax=div.append_axes("right", size="5%", pad=0.05), label=label)
 
     try:
-        # --- 1. STANDALONE COMPONENTS (Perfect Numeric Order Sorting Sequence) ---
+        # --- 1. STANDALONE COMPONENTS (Numeric Sorting Schema) ---
         spatial_exports = [
             ('1_GCCS', 'GCCS', data_g, kwargs),
             ('2_PREM', 'PREM', data_p, kwargs),
@@ -178,7 +177,7 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
             finally:
                 plt.close(fig_i)
 
-        # Standalone Density Scatter (Streamlined to index 5)
+        # Standalone Density Scatter (Index 5)
         fig_scat = plt.figure(figsize=(10, 8))
         try:
             ax_scat = fig_scat.add_subplot(111)
@@ -194,7 +193,7 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
         finally:
             plt.close(fig_scat)
 
-        # Standalone Histogram (Streamlined to index 6)
+        # Standalone Histogram (Index 6)
         fig_hist = plt.figure(figsize=(10, 6))
         try:
             ax_hist = fig_hist.add_subplot(111)
@@ -281,8 +280,8 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
                      ha='center', va='center', fontsize=22, weight='bold',
                      bbox=dict(facecolor=b_color, edgecolor='black', boxstyle='round,pad=0.5', alpha=0.9))
 
-            # CRITICAL FIX: Restructured to use the strict zero-index sorting tag
-            plt.savefig(tmp_dir / f"{var}_0_comparison.png", dpi=100)
+            # REMOVED _0_: Saved back to native pure variable signature destination
+            plt.savefig(tmp_dir / f"{var}_comparison.png", dpi=100)
         finally:
             plt.close(fig)
 
