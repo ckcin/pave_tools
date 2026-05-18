@@ -2,7 +2,7 @@
 """
 PAVE: Continuous Background Scheduler
 =====================================
-VERSION: 2.28.0 (Configurable DOY-Driven Rolling Rotation Architecture)
+VERSION: 2.29.0 (Immediate Startup & Production Background Deployment)
 
 SCHEDULING & LOAD BALANCING ARCHITECTURE:
 -----------------------------------------
@@ -40,6 +40,14 @@ SCHEDULING & LOAD BALANCING ARCHITECTURE:
 9. Daily Quirks Coupled to Closest Subsequent LSA Runs:
    - G19 (12Z Data) executes during the 17:00Z slot alongside the G19 LSA block.
    - G18 (14Z Data) executes during the 21:00Z slot alongside the G18 LSA block.
+
+OPERATIONAL BACKGROUND INVOCATIONS (nohup examples):
+----------------------------------------------------
+1. Standard Background Operation:
+   nohup python3 pave_scheduler.py --workspace /path/to/work > scheduler.log 2>&1 &
+
+2. Verbose Background Tracking Operation:
+   nohup python3 pave_scheduler.py --workspace /path/to/work -v > scheduler.log 2>&1 &
 """
 
 import argparse
@@ -106,7 +114,6 @@ def get_slot_tasks(target_date, slot_hour):
     Distributes products so EVERY product group runs at EVERY time slot exactly once
     during the configurable rolling day-of-year loop.
     """
-    # FEATURE UPDATE: Resolved cycle_day via scalar Julian Day instead of weekday index
     julian_day = int(target_date.strftime('%j'))
     cycle_day = julian_day % CYCLE_DAYS
 
@@ -116,7 +123,6 @@ def get_slot_tasks(target_date, slot_hour):
 
     scheduled = []
     for i, entry in enumerate(RAW_PRODUCTS):
-        # Decoupled modulo check to reference global configuration parameter
         if (i + daily_slot_idx) % CYCLE_DAYS == cycle_day:
             scheduled.append(entry)
 
@@ -322,13 +328,18 @@ if __name__ == "__main__":
     if args.time_slot is not None:
         log.info(f"  MODE:          OVERRIDE EXECUTION (Slot {args.time_slot:02d}Z)")
     else:
-        log.info("  MODE:          CONTINUOUS DAEMON")
+        log.info("  MODE:          CONTINUOUS DAEMON (Immediate Boot Trigger Active)")
     log.info("=========================================")
 
     if args.time_slot is not None:
         execute_slot(abs_workspace, abs_pave_script, log, time_slot=args.time_slot)
         log.info("--- OVERRIDE EXECUTION COMPLETE ---")
     else:
+        # FEATURE UPDATE: Run the active slot immediately upon daemon initialization
+        log.info("Boot verification check: Executing target slot for current hour profile...")
+        execute_slot(abs_workspace, abs_pave_script, log)
+
+        # Drop directly into subsequent sequential sleep blocks
         while True:
             wait_for_next_slot(log)
             execute_slot(abs_workspace, abs_pave_script, log)
