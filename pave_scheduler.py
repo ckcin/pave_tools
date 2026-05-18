@@ -2,7 +2,7 @@
 """
 PAVE: Continuous Background Scheduler
 =====================================
-VERSION: 2.29.0 (Immediate Startup & Production Background Deployment)
+VERSION: 2.30.0 (Automated Post-Slot Dashboard Harvesting Integration)
 
 SCHEDULING & LOAD BALANCING ARCHITECTURE:
 -----------------------------------------
@@ -43,8 +43,8 @@ SCHEDULING & LOAD BALANCING ARCHITECTURE:
 
 OPERATIONAL BACKGROUND INVOCATIONS (nohup examples):
 ----------------------------------------------------
-1. Standard Background Operation:
-   nohup python3 pave_scheduler.py --workspace /path/to/work > scheduler.log 2>&1 &
+1. Standard Background Operation with Auto-Dashboard Harvesting:
+   nohup python3 pave_scheduler.py --workspace /path/to/work --dashboard /path/to/archive > scheduler.log 2>&1 &
 
 2. Verbose Background Tracking Operation:
    nohup python3 pave_scheduler.py --workspace /path/to/work -v > scheduler.log 2>&1 &
@@ -146,7 +146,7 @@ def wait_until_pave_finishes(log):
             break
 
 def run_pave(dsn, channels, hour_str, target_date, workspace_dir, pave_script, sat, log):
-    """Executes the pave.py call, passing the specific satellite argument."""
+    """Executes the pave.py call and returns the targeted execution folder path."""
     timestamp = f"{target_date.year}{target_date.strftime('%j')}{hour_str}0"
 
     log_dir = os.path.join(workspace_dir, "logs")
@@ -162,11 +162,16 @@ def run_pave(dsn, channels, hour_str, target_date, workspace_dir, pave_script, s
     ]
 
     channel_str = ""
+    folder_tag = ""
     if channels:
         cmd.extend(["--channels"] + channels)
         ch_tag = f"CH{''.join(channels)}"
         cmd.extend(["--tag", ch_tag])
         channel_str = f"_{ch_tag}"
+        folder_tag = f"_{ch_tag}"
+
+    # Track directory path using prefix, date, and tag matching pave.py specifications
+    target_workspace_folder = os.path.join(workspace_dir, f"{dsn}_{timestamp}{folder_tag}")
 
     execution_time_str = get_now_utc().strftime("%Y%m%d_%H%M%S")
     log_filename = f"pave_run_{dsn}{channel_str}_G{sat}_{timestamp}_{execution_time_str}.log"
@@ -179,7 +184,9 @@ def run_pave(dsn, channels, hour_str, target_date, workspace_dir, pave_script, s
     with open(log_filepath, "w") as log_file:
         subprocess.run(cmd, stdout=log_file, stderr=subprocess.STDOUT, cwd=workspace_dir)
 
-def execute_slot(workspace_dir, pave_script, log, time_slot=None):
+    return target_workspace_folder
+
+def execute_slot(workspace_dir, pave_script, log, dashboard_path=None, time_slot=None):
     """Executes jobs for the specified slot, targeting yesterday's data."""
     target_date = get_now_utc() - datetime.timedelta(days=1)
     target_day_idx = target_date.weekday()
@@ -205,11 +212,15 @@ def execute_slot(workspace_dir, pave_script, log, time_slot=None):
 
     log.info(f"--- PAVE AUTOMATION | Executing for: {target_date.strftime('%Y-%m-%d')} (DOY {target_date.strftime('%j')}) | Slot {hour_str}:00Z (G{target_sat}) ---")
 
+    # Array list to collect folder names that are created by pave.py
+    active_workspaces = []
+
     # ==========================================
     # --- PERSISTENT MONITOR INJECTION (ACM) ---
     # ==========================================
     try:
-        run_pave("ACM", None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log)
+        folder = run_pave("ACM", None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log)
+        active_workspaces.append(folder)
     except Exception as e:
         log.error(f"Persistent Monitor ACM failed to execute: {e}")
 
@@ -220,31 +231,40 @@ def execute_slot(workspace_dir, pave_script, log, time_slot=None):
         try:
             if entry == "SurfaceAlbedoGroup":
                 for surf_dsn in ["LSA", "BRF"]:
-                    run_pave(surf_dsn, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log)
+                    folder = run_pave(surf_dsn, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log)
+                    active_workspaces.append(folder)
             elif entry == "RadiationGroup":
                 for rad_dsn in ["RSR", "DSR", "PAR", "SWR"]:
-                    run_pave(rad_dsn, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log)
+                    folder = run_pave(rad_dsn, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log)
+                    active_workspaces.append(folder)
             elif entry == "SoundingGroup":
                 for snd_dsn in ["LVMP", "LVTP", "DSI", "TPW", "LSP"]:
-                    run_pave(snd_dsn, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log)
+                    folder = run_pave(snd_dsn, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log)
+                    active_workspaces.append(folder)
             elif entry == "CloudGroup":
                 for cld_dsn in ["ACH", "ACT", "CTP", "ECBH", "EOCH", "COD", "CPS", "CCL"]:
-                    run_pave(cld_dsn, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log)
+                    folder = run_pave(cld_dsn, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log)
+                    active_workspaces.append(folder)
             elif "|" in entry:
                 dsn, channel = entry.split("|")
                 if dsn == "RadCMIP":
-                    run_pave("Rad", [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log)
-                    run_pave("CMIP", [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log)
+                    f_rad = run_pave("Rad", [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log)
+                    f_cmip = run_pave("CMIP", [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log)
+                    active_workspaces.extend([f_rad, f_cmip])
 
                     if channel in ["02", "07", "08", "09", "10"]:
-                        run_pave("DMW", [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log)
+                        f_dmw = run_pave("DMW", [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log)
+                        active_workspaces.append(f_dmw)
 
                     if channel == "08":
-                        run_pave("DMWV", [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log)
+                        f_dmwv = run_pave("DMWV", [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log)
+                        active_workspaces.append(f_dmwv)
                 else:
-                    run_pave(dsn, [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log)
+                    folder = run_pave(dsn, [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log)
+                    active_workspaces.append(folder)
             else:
-                run_pave(entry, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log)
+                folder = run_pave(entry, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log)
+                active_workspaces.append(folder)
         except Exception as e:
             log.error(f"Task {entry} failed to execute: {e}")
 
@@ -255,15 +275,38 @@ def execute_slot(workspace_dir, pave_script, log, time_slot=None):
         if slot_hour == 17:
             log.info("Triggering Daily Quirks (NBAR / BRDF) for G19 at 12Z (Closest post-generation LSA slot)...")
             for special_dsn in ["NBAR", "BRDF"]:
-                run_pave(special_dsn, None, "12", target_date, workspace_dir, pave_script, sat="19", log=log)
+                folder = run_pave(special_dsn, None, "12", target_date, workspace_dir, pave_script, sat="19", log=log)
+                active_workspaces.append(folder)
 
         if slot_hour == 21:
             log.info("Triggering Daily Quirks (NBAR / BRDF) for G18 at 14Z (Closest post-generation LSA slot)...")
             for special_dsn in ["NBAR", "BRDF"]:
-                run_pave(special_dsn, None, "14", target_date, workspace_dir, pave_script, sat="18", log=log)
+                folder = run_pave(special_dsn, None, "14", target_date, workspace_dir, pave_script, sat="18", log=log)
+                active_workspaces.append(folder)
     else:
         if slot_hour in [17, 21]:
             log.info(f"Skipping Daily Quirks (NBAR / BRDF) for slot {hour_str}Z: SurfaceAlbedoGroup is not scheduled today in the {CYCLE_DAYS}-day DOY cycle.")
+
+    # =========================================================================
+    # --- AUTOMATED DASHBOARD HARVESTING TRIGGER ---
+    # =========================================================================
+    if dashboard_path and active_workspaces:
+        log.info("Evaluating generated folders for dashboard report aggregation...")
+        dashboard_script = os.path.join(SCRIPT_DIR, "pave_dashboard.py")
+
+        # Filter out folder entries that do not physically exist (e.g., if a task completely failed)
+        valid_paths = [f for f in active_workspaces if os.path.isdir(f)]
+
+        if valid_paths:
+            # Construct command: python3 pave_dashboard.py [dir1] [dir2] ... -o [dashboard_path]
+            dash_cmd = [sys.executable, dashboard_script] + valid_paths + ["--output", dashboard_path]
+            log.info(f"LAUNCHING AUTO-HARVEST SUITE: {' '.join(dash_cmd)}")
+            try:
+                subprocess.run(dash_cmd, cwd=workspace_dir)
+            except Exception as e:
+                log.error(f"Post-slot visual dashboard harvesting failed to execute: {e}")
+        else:
+            log.warn("No active output workspace directories were physically created during this slot cycle.")
 
 def wait_for_next_slot(log):
     now = get_now_utc()
@@ -304,6 +347,11 @@ if __name__ == "__main__":
         choices=[1, 5, 9, 13, 17, 21],
         help="Run a specific time slot immediately and exit (do not enter daemon mode)."
     )
+    parser.add_argument(
+        "--dashboard",
+        type=str,
+        help="Path to the shared dashboard archive folder. Enables automated harvesting."
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose operational details visibility")
     parser.add_argument("-d", "--debug", action="store_true", help="Deep structural metrics tracing details")
     parser.add_argument("-q", "--quiet", action="store_true", help="Restrict engine output print updates")
@@ -325,6 +373,8 @@ if __name__ == "__main__":
     log.info(f"  PAVE Script:   {abs_pave_script}")
     log.info(f"  Workspace Dir: {abs_workspace}")
     log.info(f"  Rotation Loop: {CYCLE_DAYS} Days (DOY-Anchored)")
+    if args.dashboard:
+        log.info(f"  Dashboard Out: {os.path.abspath(args.dashboard)}")
     if args.time_slot is not None:
         log.info(f"  MODE:          OVERRIDE EXECUTION (Slot {args.time_slot:02d}Z)")
     else:
@@ -332,14 +382,12 @@ if __name__ == "__main__":
     log.info("=========================================")
 
     if args.time_slot is not None:
-        execute_slot(abs_workspace, abs_pave_script, log, time_slot=args.time_slot)
+        execute_slot(abs_workspace, abs_pave_script, log, dashboard_path=args.dashboard, time_slot=args.time_slot)
         log.info("--- OVERRIDE EXECUTION COMPLETE ---")
     else:
-        # FEATURE UPDATE: Run the active slot immediately upon daemon initialization
         log.info("Boot verification check: Executing target slot for current hour profile...")
-        execute_slot(abs_workspace, abs_pave_script, log)
+        execute_slot(abs_workspace, abs_pave_script, log, dashboard_path=args.dashboard)
 
-        # Drop directly into subsequent sequential sleep blocks
         while True:
             wait_for_next_slot(log)
-            execute_slot(abs_workspace, abs_pave_script, log)
+            execute_slot(abs_workspace, abs_pave_script, log, dashboard_path=args.dashboard)
