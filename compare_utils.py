@@ -2,7 +2,7 @@
 """
 COMPARE-PAVE: Shared Utility Suite
 ==================================
-VERSION: 1.8.9 (Waterproof Plotting & 6-Plot Suite)
+VERSION: 1.10.0 (R-Squared Dashboard Banner)
 """
 
 import os
@@ -84,7 +84,7 @@ def get_coords_for_var(ds, var_name):
 # --- CORE PLOTTING ENGINE ---
 
 def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_label, proj=None, extent=None, origin='upper', cmap='viridis'):
-    """Memory-safe 6-plot engine with log-density and viridis-difference mapping."""
+    """Memory-safe 6-plot engine with log-density, viridis-difference mapping, and R2 Banner."""
     mask_p, mask_g = np.isfinite(data_p), np.isfinite(data_g)
     common = np.logical_and(mask_p, mask_g)
 
@@ -142,7 +142,7 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
             ax.add_feature(cfeature.STATES, edgecolor='black', linewidth=0.4, linestyle=':', zorder=10)
 
     def _add_corner_labels(ax, label, upscale=False):
-        size = 18 if upscale else 11 # Upscaled for standalone exports
+        size = 18 if upscale else 11
         ax.text(0.01, 0.99, label, transform=ax.transAxes, color='black', weight='bold',
                 fontsize=size, va='top', path_effects=halo, zorder=20)
 
@@ -168,7 +168,7 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
             finally:
                 plt.close(fig_i)
 
-        # Standalone Density Scatter (Viridis, Log)
+        # Standalone Density Scatter
         fig_scat = plt.figure(figsize=(10, 8))
         try:
             ax_scat = fig_scat.add_subplot(111)
@@ -186,7 +186,7 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
         try:
             ax_hist = fig_hist.add_subplot(111)
             if len(valid_diffs) > 0:
-                ax_hist.hist(valid_diffs, bins=100, color='gray', edgecolor='black', log=True)
+                ax_hist.hist(valid_diffs, bins=100, color='gray', edgecolor='black')
                 ax_hist.axvline(0, color='red', linestyle='--')
             ax_hist.set_title(f"{var} Delta Distribution", weight='bold')
             _add_corner_labels(ax_hist, "HIST", upscale=True)
@@ -198,12 +198,12 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
         fig = plt.figure(figsize=(18, 24))
         try:
             plt.suptitle(f"{product_dsn} | {var}\n{pair_info}", fontsize=14, weight='bold', y=0.98)
-            ax1 = fig.add_subplot(321, projection=proj if is_geo else None) # On-Prem
-            ax2 = fig.add_subplot(322, projection=proj if is_geo else None) # GCCS
-            ax3 = fig.add_subplot(323, projection=proj if is_geo else None) # Mismatch
-            ax4 = fig.add_subplot(324)                                     # Density
-            ax5 = fig.add_subplot(325, projection=proj if is_geo else None) # Difference
-            ax6 = fig.add_subplot(326)                                     # Histogram
+            ax1 = fig.add_subplot(321, projection=proj if is_geo else None)
+            ax2 = fig.add_subplot(322, projection=proj if is_geo else None)
+            ax3 = fig.add_subplot(323, projection=proj if is_geo else None)
+            ax4 = fig.add_subplot(324)
+            ax5 = fig.add_subplot(325, projection=proj if is_geo else None)
+            ax6 = fig.add_subplot(326)
 
             dash_map = [(ax1, data_p, kwargs, "On-Prem"), (ax2, data_g, kwargs, "GCCS"),
                         (ax3, mismatch_mask, mismatch_kwargs, "Mismatch (Green=Error)"),
@@ -222,12 +222,26 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
                 _add_cbar(im4, ax4, label='log10(count)')
 
             if len(valid_diffs) > 0:
-                ax6.hist(valid_diffs, bins=100, color='gray', edgecolor='black', log=True)
+                ax6.hist(valid_diffs, bins=100, color='gray', edgecolor='black')
                 ax6.axvline(0, color='red', linestyle='--')
                 ax6.set_title("Distribution of Delta", weight='bold')
-                ax6.set_xlabel("Delta Value"); ax6.set_ylabel("Freq (Log)")
+                ax6.set_xlabel("Delta Value"); ax6.set_ylabel("Frequency")
 
-            plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+            # Adjusted rect bottom from 0.03 to 0.06 to make room for banner
+            plt.tight_layout(rect=[0, 0.06, 1, 0.95])
+
+            # --- R-SQUARED BANNER ---
+            if r_sq >= 0.98:
+                b_color = 'palegreen'
+            elif r_sq >= 0.90:
+                b_color = 'moccasin'
+            else:
+                b_color = 'lightcoral'
+
+            fig.text(0.5, 0.03, f"R-Squared Correlation: {r_sq:.4f}",
+                     ha='center', va='center', fontsize=22, weight='bold',
+                     bbox=dict(facecolor=b_color, edgecolor='black', boxstyle='round,pad=0.5', alpha=0.9))
+
             plt.savefig(tmp_dir / f"{var}_comparison.png", dpi=100)
         finally:
             plt.close(fig)
