@@ -2,7 +2,7 @@
 """
 PAVE-DASHBOARD: Visual Report Consolidation Tool
 ================================================
-VERSION: 1.2.0 (Clean Master Dashboard Structural Target)
+VERSION: 1.6.0 (Strict DOY-Only Subfolder Architecture)
 """
 
 import os
@@ -86,27 +86,27 @@ def harvest_workspace(search_path, output_path, log):
         timestamp = f"{match.group('year')}{doy_group}{match.group('hour')}"
         custom_tag = match.group('tag') if match.group('tag') else ""
         
-        doy_dest_dir = dest_path / doy_group
-        doy_dest_dir.mkdir(parents=True, exist_ok=True)
+        # Enforced strict DOY sub-folder positioning directly under destination root
+        target_dest_dir = dest_path / doy_group
+        target_dest_dir.mkdir(parents=True, exist_ok=True)
         
-        # REMOVED _0_: Restructured query path to pull clean master "_comparison.png" charts
+        # Deep glob targets clean master "_comparison.png" charts
         dashboards = list(val_dir.glob("**/*_comparison.png"))
 
         if not dashboards:
             log.debug(f"No '*_comparison.png' dashboards generated yet inside: {ws_name}")
             continue
 
-        # Filter out standalone sub-plots if they contain numeric indices in their tail string
+        # Filter out standalone numeric component frames (_1_GCCS, _2_PREM, etc.)
         valid_dashboards = [img for img in dashboards if not re.search(r"_\d_[A-Za-z0-9_]+_comparison\.png$", img.name)]
 
         if not valid_dashboards:
             log.debug(f"No true master dashboards found inside: {ws_name}")
             continue
 
-        log.info(f"Harvesting {len(valid_dashboards)} charts from workspace '{ws_name}' -> Subfolder: {doy_group}/")
+        log.info(f"Harvesting {len(valid_dashboards)} charts from '{ws_name}' -> Subfolder: {doy_group}/")
 
         for img in valid_dashboards:
-            # REMOVED _0_: Strip clean master tag from name context
             var_name = img.name.replace("_comparison.png", "")
             
             scene_tag = discover_scene_tag(img, prod, log)
@@ -115,9 +115,8 @@ def harvest_workspace(search_path, output_path, log):
             sat_match = FILE_SAT_REGEX.search(img.name) or FILE_SAT_REGEX.search(str(img))
             sat_id = sat_match.group('sat') if sat_match else "GXX"
 
-            # REMOVED _0_: Saves file natively back to clean timeline naming format
             new_filename = f"{full_prod_name}_{var_name}_{sat_id}_{timestamp}_comparison.png"
-            target_file_path = doy_dest_dir / new_filename
+            target_file_path = target_dest_dir / new_filename
 
             try:
                 shutil.copy2(str(img), str(target_file_path))
@@ -126,12 +125,12 @@ def harvest_workspace(search_path, output_path, log):
             except Exception as e:
                 log.warn(f"  Failed to capture {img.name}: {e}")
 
-    log.info(f"Harvest complete! Successfully consolidated {copied_count} dashboards into day-of-year subfolders under: {dest_path}")
+    log.info(f"Harvest complete! Successfully consolidated {copied_count} dashboards into isolated DOY matrices under: {dest_path}")
 
 def main():
     parser = argparse.ArgumentParser(
         prog="pave_dashboard.py",
-        description="Extract and structure PAVE 3x2 dashboards into day-of-year subfolders."
+        description="Extract and structure PAVE 3x2 dashboards into clean day-of-year subfolders."
     )
     parser.add_argument(
         "paths", 
@@ -141,7 +140,7 @@ def main():
     parser.add_argument(
         "-o", "--output", 
         required=True, 
-        help="Target parent folder to dump the day-of-year subfolders and charts."
+        help="Target parent folder to dump the clean DOY subfolder matrix."
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose tracking visibility")
     parser.add_argument("-d", "--debug", action="store_true", help="Deep diagnostic metrics tracing")
