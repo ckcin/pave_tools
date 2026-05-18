@@ -2,7 +2,7 @@
 """
 PAVE: Continuous Background Scheduler
 =====================================
-VERSION: 2.25.0 (Unified Super Cloud Grouping)
+VERSION: 2.28.0 (Configurable DOY-Driven Rolling Rotation Architecture)
 
 SCHEDULING & LOAD BALANCING ARCHITECTURE:
 -----------------------------------------
@@ -14,9 +14,9 @@ SCHEDULING & LOAD BALANCING ARCHITECTURE:
    - Clear Sky Mask (ACM) executes at the start of EVERY time slot to guarantee
      baseline masking verification remains continuously active.
 
-3. True Load Balancing (The 5-Day Cycle):
-   - The remaining 33 core products are divided by 5 days (~6-7 products per slot).
-   - Algorithm: `(product_index + daily_slot_index) % 5 == cycle_day`
+3. True Load Balancing (The Configurable DOY Cycle):
+   - Core product combinations are divided by a rolling Day-of-Year scalar.
+   - Algorithm: `(product_index + daily_slot_index) % CYCLE_DAYS == (DOY % CYCLE_DAYS)`
 
 4. Dependent Triggers (Rad, CMIP, & DMW):
    - 'RadCMIP' handles radiance and cloud pairs.
@@ -25,17 +25,21 @@ SCHEDULING & LOAD BALANCING ARCHITECTURE:
 5. Radiation Product Coupling:
    - RSR, DSR, PAR, and SWR are combined into a single logical "RadiationGroup".
 
-6. Daily Quirks Coupled to Closest Subsequent LSA Runs:
-   - G19 (12Z Data) executes during the 17:00Z slot alongside the G19 LSA block.
-   - G18 (14Z Data) executes during the 21:00Z slot alongside the G18 LSA block.
-
-7. Thermodynamic Sounding Coupling:
+6. Thermodynamic Sounding Coupling:
    - LVMP, LVTP, DSI, TPW, and LSP are combined into a single "SoundingGroup".
 
-8. Unified Cloud Product Coupling:
+7. Unified Cloud Product Coupling:
    - All cloud physical parameters (macro, micro, enterprise heights, and convective structure)
      are bound tightly under a single rotating execution sequence.
    - Group items: ACH, ACT, CTP, ECBH, EOCH, COD, CPS, CCL
+
+8. Surface Albedo & Reflectance Coupling:
+   - LSA (Land Surface Albedo) and BRF (Bidirectional Reflectance Factor) are bound
+     into a shared "SurfaceAlbedoGroup" to force simultaneous batch slot execution.
+
+9. Daily Quirks Coupled to Closest Subsequent LSA Runs:
+   - G19 (12Z Data) executes during the 17:00Z slot alongside the G19 LSA block.
+   - G18 (14Z Data) executes during the 21:00Z slot alongside the G18 LSA block.
 """
 
 import argparse
@@ -51,12 +55,21 @@ if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
 try:
-    from pave_utils import setup_interrupt_handler
+    from pave_utils import Logger, setup_interrupt_handler
 except ImportError:
-    print(f"WARNING: 'pave_utils.py' not found in {SCRIPT_DIR}. Using default Ctrl-C behavior.")
-    def setup_interrupt_handler(): pass
+    class DummyLogger:
+        def __init__(self, *args, **kwargs): pass
+        def debug(self, m): print(f"[DEBUG] {m}")
+        def info(self, m): print(f"[INFO] {m}")
+        def verbose(self, m): print(f"[VERBOSE] {m}")
+        def warn(self, m): print(f"[WARN] {m}")
+        def error(self, m): print(f"[ERROR] {m}")
+    Logger = DummyLogger
+    print(f"WARNING: 'pave_utils.py' not found in {SCRIPT_DIR}. Falling back to terminal log emulation.")
+    def setup_interrupt_handler(log=None): pass
 
-# --- SCHEDULE DEFINITIONS ---
+# --- SCHEDULE & ROTATION CONFIGURATION ---
+CYCLE_DAYS = 4              # Configurable rotation loop duration (e.g., 3, 4, 5 days)
 ALLOWED_SLOTS = [1, 5, 9, 13, 17, 21]
 
 SLOT_TO_SAT = {
@@ -68,10 +81,7 @@ SLOT_TO_SAT = {
     21: "18"
 }
 
-# --- PRODUCT ROTATION LIST (33 Entries) ---
-# NOTE: ACM is a persistent monitor executed on every run.
-# NOTE: DMW/DMWV are dependent triggers on RadCMIP.
-# NOTE: NBAR/BRDF are daily quirks triggered at 17Z/21Z.
+# --- PRODUCT ROTATION LIST ---
 RAW_PRODUCTS = [
     "RadCMIP|01", "RadCMIP|02", "RadCMIP|03", "RadCMIP|04",
     "RadCMIP|05", "RadCMIP|06", "RadCMIP|07", "RadCMIP|08",
@@ -80,7 +90,7 @@ RAW_PRODUCTS = [
     "MCMIP",
     "ADP",    "AOD",
     "FDC",    "FSC",    "LST",
-    "LSA",    "BRF",
+    "SurfaceAlbedoGroup",       # Combined items: LSA, BRF
     "RRQPE",  "SST",    "AICE",   "AITA",
     "ESC",    "ESU",    "ETE",
     "RadiationGroup",           # Group items: RSR, DSR, PAR, SWR
@@ -93,10 +103,12 @@ def get_now_utc():
 
 def get_slot_tasks(target_date, slot_hour):
     """
-    Distributes 33 products so EVERY product runs at EVERY time slot exactly once
-    during the 5-day cycle (~6-7 products per slot).
+    Distributes products so EVERY product group runs at EVERY time slot exactly once
+    during the configurable rolling day-of-year loop.
     """
-    cycle_day = (target_date.weekday() + 1) % 7
+    # FEATURE UPDATE: Resolved cycle_day via scalar Julian Day instead of weekday index
+    julian_day = int(target_date.strftime('%j'))
+    cycle_day = julian_day % CYCLE_DAYS
 
     if slot_hour in [1, 5]: daily_slot_idx = 0
     elif slot_hour in [9, 13]: daily_slot_idx = 1
@@ -104,12 +116,13 @@ def get_slot_tasks(target_date, slot_hour):
 
     scheduled = []
     for i, entry in enumerate(RAW_PRODUCTS):
-        if (i + daily_slot_idx) % 5 == cycle_day:
+        # Decoupled modulo check to reference global configuration parameter
+        if (i + daily_slot_idx) % CYCLE_DAYS == cycle_day:
             scheduled.append(entry)
 
     return scheduled
 
-def wait_until_pave_finishes():
+def wait_until_pave_finishes(log):
     """Ensures no other pave.py instance is running before launching."""
     cmd = "ps aux | grep '[p]ave.py' | grep -v 'pave_scheduler.py'"
     first_wait = True
@@ -118,7 +131,7 @@ def wait_until_pave_finishes():
             output = subprocess.check_output(cmd, shell=True).decode()
             if output.strip():
                 if first_wait:
-                    print(f"[{get_now_utc().strftime('%H:%M:%S')} UTC] ⚠️  Active pave.py process detected. Waiting in queue...")
+                    log.warn("Active pave.py process detected. Waiting in queue...")
                     first_wait = False
                 time.sleep(60)
             else:
@@ -126,7 +139,7 @@ def wait_until_pave_finishes():
         except subprocess.CalledProcessError:
             break
 
-def run_pave(dsn, channels, hour_str, target_date, workspace_dir, pave_script, sat):
+def run_pave(dsn, channels, hour_str, target_date, workspace_dir, pave_script, sat, log):
     """Executes the pave.py call, passing the specific satellite argument."""
     timestamp = f"{target_date.year}{target_date.strftime('%j')}{hour_str}0"
 
@@ -153,20 +166,20 @@ def run_pave(dsn, channels, hour_str, target_date, workspace_dir, pave_script, s
     log_filename = f"pave_run_{dsn}{channel_str}_G{sat}_{timestamp}_{execution_time_str}.log"
     log_filepath = os.path.join(log_dir, log_filename)
 
-    wait_until_pave_finishes()
+    wait_until_pave_finishes(log)
 
-    print(f"[{get_now_utc().strftime('%Y-%m-%d %H:%M:%S')} UTC] EXECUTING: {' '.join(cmd)}")
+    log.info(f"EXECUTING: {' '.join(cmd)}")
 
     with open(log_filepath, "w") as log_file:
         subprocess.run(cmd, stdout=log_file, stderr=subprocess.STDOUT, cwd=workspace_dir)
 
-def execute_slot(workspace_dir, pave_script, time_slot=None):
+def execute_slot(workspace_dir, pave_script, log, time_slot=None):
     """Executes jobs for the specified slot, targeting yesterday's data."""
     target_date = get_now_utc() - datetime.timedelta(days=1)
     target_day_idx = target_date.weekday()
 
     if target_day_idx in [4, 5]:
-        print(f"[{get_now_utc().strftime('%H:%M:%S')} UTC] Target day (Yesterday) was a Friday/Saturday. Standby.")
+        log.info("Target day (Yesterday) was a Friday/Saturday. Standby.")
         return
 
     if time_slot is not None:
@@ -184,63 +197,69 @@ def execute_slot(workspace_dir, pave_script, time_slot=None):
 
     tasks = get_slot_tasks(target_date, slot_hour)
 
-    print(f"\n--- PAVE AUTOMATION | Executing for: {target_date.strftime('%Y-%m-%d')} (Day {target_day_idx}) | Slot {hour_str}:00Z (G{target_sat}) ---")
+    log.info(f"--- PAVE AUTOMATION | Executing for: {target_date.strftime('%Y-%m-%d')} (DOY {target_date.strftime('%j')}) | Slot {hour_str}:00Z (G{target_sat}) ---")
 
     # ==========================================
     # --- PERSISTENT MONITOR INJECTION (ACM) ---
     # ==========================================
     try:
-        run_pave("ACM", None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat)
+        run_pave("ACM", None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log)
     except Exception as e:
-        print(f"ERROR: Persistent Monitor ACM failed to execute: {e}")
+        log.error(f"Persistent Monitor ACM failed to execute: {e}")
 
     if not tasks:
-        print("  -> No rotating products scheduled for this specific slot iteration.")
+        log.info("  -> No rotating products scheduled for this specific slot iteration.")
 
     for entry in tasks:
         try:
-            if entry == "RadiationGroup":
+            if entry == "SurfaceAlbedoGroup":
+                for surf_dsn in ["LSA", "BRF"]:
+                    run_pave(surf_dsn, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log)
+            elif entry == "RadiationGroup":
                 for rad_dsn in ["RSR", "DSR", "PAR", "SWR"]:
-                    run_pave(rad_dsn, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat)
+                    run_pave(rad_dsn, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log)
             elif entry == "SoundingGroup":
                 for snd_dsn in ["LVMP", "LVTP", "DSI", "TPW", "LSP"]:
-                    run_pave(snd_dsn, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat)
+                    run_pave(snd_dsn, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log)
             elif entry == "CloudGroup":
-                # Super Cloud Group encompassing all macro, micro, and structures
                 for cld_dsn in ["ACH", "ACT", "CTP", "ECBH", "EOCH", "COD", "CPS", "CCL"]:
-                    run_pave(cld_dsn, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat)
+                    run_pave(cld_dsn, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log)
             elif "|" in entry:
                 dsn, channel = entry.split("|")
                 if dsn == "RadCMIP":
-                    run_pave("Rad", [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat)
-                    run_pave("CMIP", [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat)
+                    run_pave("Rad", [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log)
+                    run_pave("CMIP", [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log)
 
                     if channel in ["02", "07", "08", "09", "10"]:
-                        run_pave("DMW", [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat)
+                        run_pave("DMW", [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log)
 
                     if channel == "08":
-                        run_pave("DMWV", [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat)
+                        run_pave("DMWV", [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log)
                 else:
-                    run_pave(dsn, [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat)
+                    run_pave(dsn, [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log)
             else:
-                run_pave(entry, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat)
+                run_pave(entry, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log)
         except Exception as e:
-            print(f"ERROR: Task {entry} failed to execute: {e}")
+            log.error(f"Task {entry} failed to execute: {e}")
 
     # =========================================================================
     # --- HARDCODED DAILY QUIRKS (Coupled to the closest subsequent LSA run) ---
     # =========================================================================
-    if slot_hour == 17:
-        print("\n  -> Triggering Daily Quirks (NBAR / BRDF) for G19 at 12Z (Closest post-generation LSA slot)...")
-        for special_dsn in ["NBAR", "BRDF"]:
-            run_pave(special_dsn, None, "12", target_date, workspace_dir, pave_script, sat="19")
+    if "SurfaceAlbedoGroup" in tasks:
+        if slot_hour == 17:
+            log.info("Triggering Daily Quirks (NBAR / BRDF) for G19 at 12Z (Closest post-generation LSA slot)...")
+            for special_dsn in ["NBAR", "BRDF"]:
+                run_pave(special_dsn, None, "12", target_date, workspace_dir, pave_script, sat="19", log=log)
 
-    if slot_hour == 21:
-        print("\n  -> Triggering Daily Quirks (NBAR / BRDF) for G18 at 14Z (Closest post-generation LSA slot)...")
-        for special_dsn in ["NBAR", "BRDF"]:
-            run_pave(special_dsn, None, "14", target_date, workspace_dir, pave_script, sat="18")
+        if slot_hour == 21:
+            log.info("Triggering Daily Quirks (NBAR / BRDF) for G18 at 14Z (Closest post-generation LSA slot)...")
+            for special_dsn in ["NBAR", "BRDF"]:
+                run_pave(special_dsn, None, "14", target_date, workspace_dir, pave_script, sat="18", log=log)
+    else:
+        if slot_hour in [17, 21]:
+            log.info(f"Skipping Daily Quirks (NBAR / BRDF) for slot {hour_str}Z: SurfaceAlbedoGroup is not scheduled today in the {CYCLE_DAYS}-day DOY cycle.")
 
-def wait_for_next_slot():
+def wait_for_next_slot(log):
     now = get_now_utc()
     current_hour = now.hour
 
@@ -256,12 +275,10 @@ def wait_for_next_slot():
         next_time = now.replace(hour=next_hour, minute=0, second=0, microsecond=0)
 
     sleep_seconds = (next_time - now).total_seconds()
-    print(f"\n[{now.strftime('%Y-%m-%d %H:%M:%S')} UTC] Sleeping for {sleep_seconds/3600:.2f} hours until {next_time.strftime('%H:%M:%S')} UTC...")
+    log.info(f"Sleeping for {sleep_seconds/3600:.2f} hours until {next_time.strftime('%H:%M:%S')} UTC...")
     time.sleep(sleep_seconds)
 
 if __name__ == "__main__":
-    setup_interrupt_handler()
-
     parser = argparse.ArgumentParser(description="PAVE Continuous Background Scheduler")
     parser.add_argument(
         "--workspace",
@@ -281,29 +298,37 @@ if __name__ == "__main__":
         choices=[1, 5, 9, 13, 17, 21],
         help="Run a specific time slot immediately and exit (do not enter daemon mode)."
     )
+    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose operational details visibility")
+    parser.add_argument("-d", "--debug", action="store_true", help="Deep structural metrics tracing details")
+    parser.add_argument("-q", "--quiet", action="store_true", help="Restrict engine output print updates")
     args = parser.parse_args()
+
+    lvl = "DEBUG" if args.debug else "VERBOSE" if args.verbose else "QUIET" if args.quiet else "INFO"
+    log = Logger(lvl)
+    setup_interrupt_handler(log)
 
     abs_workspace = os.path.abspath(args.workspace)
     abs_pave_script = os.path.abspath(args.pave_script)
 
     if not os.path.isfile(abs_pave_script):
-        print(f"CRITICAL ERROR: 'pave.py' not found at: {abs_pave_script}")
+        log.error(f"CRITICAL ERROR: 'pave.py' not found at: {abs_pave_script}")
         sys.exit(1)
 
-    print("=========================================")
-    print("  PAVE SCHEDULER INITIALIZED")
-    print(f"  PAVE Script:   {abs_pave_script}")
-    print(f"  Workspace Dir: {abs_workspace}")
+    log.info("=========================================")
+    log.info("  PAVE SCHEDULER INITIALIZED")
+    log.info(f"  PAVE Script:   {abs_pave_script}")
+    log.info(f"  Workspace Dir: {abs_workspace}")
+    log.info(f"  Rotation Loop: {CYCLE_DAYS} Days (DOY-Anchored)")
     if args.time_slot is not None:
-        print(f"  MODE:          OVERRIDE EXECUTION (Slot {args.time_slot:02d}Z)")
+        log.info(f"  MODE:          OVERRIDE EXECUTION (Slot {args.time_slot:02d}Z)")
     else:
-        print(f"  MODE:          CONTINUOUS DAEMON")
-    print("=========================================")
+        log.info("  MODE:          CONTINUOUS DAEMON")
+    log.info("=========================================")
 
     if args.time_slot is not None:
-        execute_slot(abs_workspace, abs_pave_script, time_slot=args.time_slot)
-        print("\n--- OVERRIDE EXECUTION COMPLETE ---")
+        execute_slot(abs_workspace, abs_pave_script, log, time_slot=args.time_slot)
+        log.info("--- OVERRIDE EXECUTION COMPLETE ---")
     else:
         while True:
-            wait_for_next_slot()
-            execute_slot(abs_workspace, abs_pave_script)
+            wait_for_next_slot(log)
+            execute_slot(abs_workspace, abs_pave_script, log)
