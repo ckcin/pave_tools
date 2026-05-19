@@ -2,7 +2,7 @@
 """
 COMPARE-PAVE: Shared Utility Suite
 ==================================
-VERSION: 1.14.0 (Streamlined Master Dashboard Layout)
+VERSION: 1.15.0 (Vector Engine Support & Symmetric Layout Locks)
 """
 
 import os
@@ -81,7 +81,7 @@ def get_coords_for_var(ds, var_name):
     lon_v = next((v for v in ds.variables if 'lon' in v.lower()), None)
     return lat_v, lon_v
 
-# --- CORE PLOTTING ENGINE ---
+# --- CORE PLOTTING ENGINES ---
 
 def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_label, proj=None, extent=None, origin='upper', cmap='viridis'):
     """Memory-safe 6-plot engine with log-density, layout symmetry locks, and standard file categorization."""
@@ -280,7 +280,6 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
                      ha='center', va='center', fontsize=22, weight='bold',
                      bbox=dict(facecolor=b_color, edgecolor='black', boxstyle='round,pad=0.5', alpha=0.9))
 
-            # REMOVED _0_: Saved back to native pure variable signature destination
             plt.savefig(tmp_dir / f"{var}_comparison.png", dpi=100)
         finally:
             plt.close(fig)
@@ -290,6 +289,75 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
         raise e
 
     return [{'Metric': 'r-squared correlation', 'Value': np.nan if r_sq_is_na else r_sq}]
+
+
+def compare_sparse_vectors(ds_p, ds_g, vt, v1, v2, tmp_dir, pair_info, instr, prod_name):
+    """
+    FEATURE FIX: Generates vector flow quiver comparisons for sparse DMW datasets.
+    Converts meteorologic Speed/Direction tracking variables into Cartesian coordinates.
+    """
+    lat_v, lon_v = get_coords_for_var(ds_p, v1)
+    if not lat_v or not lon_v:
+        return
+
+    try:
+        lat_p, lon_p = ds_p[lat_v].values.ravel(), ds_p[lon_v].values.ravel()
+        spd_p, dir_p = ds_p[v1].values.astype(np.float32).ravel(), ds_p[v2].values.astype(np.float32).ravel()
+
+        lat_g, lon_g = ds_g[lat_v].values.ravel(), ds_g[lon_v].values.ravel()
+        spd_g, dir_g = ds_g[v1].values.astype(np.float32).ravel(), ds_g[v2].values.astype(np.float32).ravel()
+    except:
+        return
+
+    # Filter out missing data or fill values
+    mask_p = np.isfinite(lat_p) & np.isfinite(lon_p) & np.isfinite(spd_p) & np.isfinite(dir_p) & (spd_p >= 0)
+    mask_g = np.isfinite(lat_g) & np.isfinite(lon_g) & np.isfinite(spd_g) & np.isfinite(dir_g) & (spd_g >= 0)
+
+    def _convert_to_uv(spd, heading):
+        # Convert degrees to radians and derive vector coordinates
+        rad = heading * np.pi / 180.0
+        u = -spd * np.sin(rad)
+        v = -spd * np.cos(rad)
+        return u, v
+
+    u_p, v_p = _convert_to_uv(spd_p[mask_p], dir_p[mask_p])
+    u_g, v_g = _convert_to_uv(spd_g[mask_g], dir_g[mask_g])
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 10), sharex=True, sharey=True)
+    try:
+        # Down-sample heavy vector meshes to ensure clean scannability
+        step_p = max(1, len(u_p) // 800)
+        step_g = max(1, len(u_g) // 800)
+
+        if len(u_p) > 0:
+            ax1.quiver(lon_p[mask_p][::step_p], lat_p[mask_p][::step_p], u_p[::step_p], v_p[::step_p],
+                       spd_p[mask_p][::step_p], cmap='viridis', scale=400, width=0.003)
+        ax1.set_title("On-Prem Wind Vector Flow", weight='bold', fontsize=12)
+        ax1.set_xlabel("Longitude"); ax1.set_ylabel("Latitude")
+        ax1.grid(True, linestyle=':', alpha=0.5)
+
+        if len(u_g) > 0:
+            im = ax2.quiver(lon_g[mask_g][::step_g], lat_g[mask_g][::step_g], u_g[::step_g], v_g[::step_g],
+                            spd_g[mask_g][::step_g], cmap='viridis', scale=400, width=0.003)
+            plt.colorbar(im, ax=ax2, label='Wind Speed (m/s)', fraction=0.046, pad=0.04)
+        ax2.set_title("GCCS Wind Vector Flow", weight='bold', fontsize=12)
+        ax2.set_xlabel("Longitude")
+        ax2.grid(True, linestyle=':', alpha=0.5)
+
+        m = GOES_REGEX.search(pair_info)
+        product_dsn = m.group('dsn') if m else "Unknown"
+        if " <-> " in pair_info:
+            prem_name, gccs_name = pair_info.split(" <-> ", 1)
+        else:
+            prem_name, gccs_name = pair_info, "Unknown"
+
+        plt.suptitle(f"{product_dsn} | {v1.upper()} FLOW FIELDS\nPrem: {prem_name}\nGCCS: {gccs_name}",
+                     fontsize=12, weight='bold', y=0.96, linespacing=1.3)
+
+        plt.savefig(tmp_dir / f"{v1}_vector_comparison.png", dpi=100, bbox_inches='tight')
+    finally:
+        plt.close(fig)
+
 
 # --- AGGREGATION ENGINE ---
 
