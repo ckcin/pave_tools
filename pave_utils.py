@@ -2,7 +2,7 @@
 """
 PAVE UTILS: Shared Infrastructure Module
 ========================================
-VERSION: 1.4.2 (Robust Metadata Resolution)
+VERSION: 1.5.0 (Automated Stream Isolation & TTY Logging Guard)
 """
 
 import os
@@ -60,16 +60,36 @@ PRODUCT_MAP = {
 # LOGGING ENGINE
 # =============================================================================
 class Logger:
-    def __init__(self, level="INFO"):
+    def __init__(self, level="INFO", use_colors=None):
         self.levels = {
             "DEBUG": 0, "VERBOSE": 1, "INFO": 2,
             "QUIET": 3, "WARN": 3, "ERROR": 4
         }
         self.current_level = self.levels.get(level.upper(), 2)
-        self.colors = {
-            "DEBUG": "\033[94m", "VERBOSE": "\033[36m", "INFO": "\033[92m",
-            "WARN": "\033[93m", "ERROR": "\033[91m", "RESET": "\033[0m"
-        }
+
+        # -----------------------------------------------------------------
+        # --- FEATURE PATCH: SMART AUTODETECT STREAM CLASSIFICATION ---
+        # -----------------------------------------------------------------
+        if use_colors is not None:
+            has_colors = use_colors
+        else:
+            # Drop colors if stdout is diverted to a file stream (nohup redirection)
+            is_a_tty = sys.stdout.isatty() if hasattr(sys.stdout, 'isatty') else False
+            has_no_color_env = "NO_COLOR" in os.environ
+            has_colors = is_a_tty and not has_no_color_env
+
+        if has_colors:
+            self.colors = {
+                "DEBUG": "\033[94m", "VERBOSE": "\033[36m", "INFO": "\033[92m",
+                "WARN": "\033[93m", "ERROR": "\033[91m", "RESET": "\033[0m"
+            }
+        else:
+            # Flatten everything out to clean plain strings for log file readers
+            self.colors = {
+                "DEBUG": "", "VERBOSE": "", "INFO": "",
+                "WARN": "", "ERROR": "", "RESET": ""
+            }
+        # -----------------------------------------------------------------
 
     def _msg(self, level, text):
         if self.levels.get(level, 2) >= self.current_level:
@@ -190,21 +210,21 @@ def resolve_meta(folder_name):
     """
     f_low = folder_name.lower()
     best_match = None
-    
+
     # Check if any key exists within the given string (e.g., 'dmw' in 'abi-l2-dmwf')
     for key in PRODUCT_MAP.keys():
         if key in f_low:
-            if best_match is None or len(key) > len(best_match): 
+            if best_match is None or len(key) > len(best_match):
                 best_match = key
-    
-    if best_match: 
+
+    if best_match:
         return PRODUCT_MAP[best_match]
-        
+
     # Safe fallback mapping for unknown products
     return {
-        "instr": "ABI", 
-        "level": "L2", 
-        "tag": folder_name.upper(), 
+        "instr": "ABI",
+        "level": "L2",
+        "tag": folder_name.upper(),
         "comp_type": "standard"
     }
 
