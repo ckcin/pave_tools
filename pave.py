@@ -2,7 +2,7 @@
 """
 PAVE: Product Analysis & Verification Engine
 ============================================
-VERSION: 1.4.0 (Satellite Selection Option)
+VERSION: 1.4.1 (Relaxed Matching Argument Support)
 """
 
 import argparse
@@ -42,6 +42,7 @@ def parse_args():
 
     # 5. Operational Flags
     parser.add_argument("--preserve-ip", action="store_true", help="Move IP tars to ip_data/ instead of deleting")
+    parser.add_argument("--relax-match", action="store_true", help="Relax matching constraints to evaluate pairing strictly on start time (_s)")
     parser.add_argument("-j", "--threads", type=int, default=8, help="S3 sync threads")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose logs")
     parser.add_argument("-d", "--debug", action="store_true", help="Debug logs")
@@ -50,9 +51,9 @@ def parse_args():
 
     return parser.parse_args()
 
-def run_symmetry_audit(ws, log):
+def run_symmetry_audit(ws, log, relax_match=False):
     log.info("--- WORKSPACE SYMMETRY AUDIT ---")
-    print_symmetry_table(ws['prem'], ws['gccs'], log)
+    print_symmetry_table(ws['prem'], ws['gccs'], log, relax_match=relax_match)
 
 def initialize_workspace(args, log):
     parts = []
@@ -93,7 +94,7 @@ def main():
         args.dest = str(ws['root'])
         retrieve_pave.run_collection(args, log)
 
-    run_symmetry_audit(ws, log)
+    run_symmetry_audit(ws, log, relax_match=args.relax_match)
 
     # --- STAGE 2: METADATA AUDIT ---
     if not args.skip_meta:
@@ -111,7 +112,8 @@ def main():
         import compare_pave
         comp_args = argparse.Namespace(
             prem_fld=ws['prem'], gccs_fld=ws['gccs'], dest_fld=ws['validation'],
-            stats_fld=ws['stats'], threads=args.threads, verbose=args.verbose, debug=args.debug
+            stats_fld=ws['stats'], threads=args.threads, verbose=args.verbose, debug=args.debug,
+            relax_match=args.relax_match  # Forwarded down to downstream worker pools
         )
         compare_pave.PaveComparator(comp_args, log).execute()
         args.skip_stats = True

@@ -2,7 +2,7 @@
 """
 PAVE UTILS: Shared Infrastructure Module
 ========================================
-VERSION: 1.5.0 (Automated Stream Isolation & TTY Logging Guard)
+VERSION: 1.5.1 (Automated Stream Isolation & TTY Logging Guard with Relaxed Audit)
 """
 
 import os
@@ -67,13 +67,9 @@ class Logger:
         }
         self.current_level = self.levels.get(level.upper(), 2)
 
-        # -----------------------------------------------------------------
-        # --- FEATURE PATCH: SMART AUTODETECT STREAM CLASSIFICATION ---
-        # -----------------------------------------------------------------
         if use_colors is not None:
             has_colors = use_colors
         else:
-            # Drop colors if stdout is diverted to a file stream (nohup redirection)
             is_a_tty = sys.stdout.isatty() if hasattr(sys.stdout, 'isatty') else False
             has_no_color_env = "NO_COLOR" in os.environ
             has_colors = is_a_tty and not has_no_color_env
@@ -84,12 +80,10 @@ class Logger:
                 "WARN": "\033[93m", "ERROR": "\033[91m", "RESET": "\033[0m"
             }
         else:
-            # Flatten everything out to clean plain strings for log file readers
             self.colors = {
                 "DEBUG": "", "VERBOSE": "", "INFO": "",
                 "WARN": "", "ERROR": "", "RESET": ""
             }
-        # -----------------------------------------------------------------
 
     def _msg(self, level, text):
         if self.levels.get(level, 2) >= self.current_level:
@@ -122,7 +116,8 @@ def setup_interrupt_handler(logger=None):
 # SYMMETRY ENGINE
 # =============================================================================
 
-def print_symmetry_table(prem_fld, gccs_fld, log):
+def print_symmetry_table(prem_fld, gccs_fld, log, relax_match=False):
+    """Generates an operational summary matrix tracking data balance between nodes."""
     p_root = Path(prem_fld).resolve()
     g_root = Path(gccs_fld).resolve()
 
@@ -140,12 +135,18 @@ def print_symmetry_table(prem_fld, gccs_fld, log):
         stats[prod]["prem"] += 1
 
         rel_dir = pf.relative_to(p_root).parent
-        m_key = pf.name.split('_c')[0] if "_c" in pf.name else pf.name
         t_dir = g_root / rel_dir
 
         if t_dir.exists():
-            matches = list(t_dir.glob(f"{m_key}_c*.nc")) if "_c" in pf.name else \
-                      [t_dir / pf.name] if (t_dir / pf.name).exists() else []
+            # FEATURE UPDATE: Evaluate spatial parity using relaxed start time mapping keys
+            if relax_match and "_e" in pf.name:
+                m_key = pf.name.split('_e')[0]
+                matches = list(t_dir.glob(f"{m_key}_e*.nc"))
+            else:
+                m_key = pf.name.split('_c')[0] if "_c" in pf.name else pf.name
+                matches = list(t_dir.glob(f"{m_key}_c*.nc")) if "_c" in pf.name else \
+                          [t_dir / pf.name] if (t_dir / pf.name).exists() else []
+
             if matches:
                 stats[prod]["pairs"] += 1
 
@@ -204,14 +205,9 @@ def archive_directory(path, logger):
         logger.warn(f"Cleanup: Process failed for {path.name}: {e}")
 
 def resolve_meta(folder_name):
-    """
-    Resolves product string into routing metadata using the PRODUCT_MAP.
-    Now correctly searches for the key INSIDE the folder_name to support DSN resolution.
-    """
     f_low = folder_name.lower()
     best_match = None
 
-    # Check if any key exists within the given string (e.g., 'dmw' in 'abi-l2-dmwf')
     for key in PRODUCT_MAP.keys():
         if key in f_low:
             if best_match is None or len(key) > len(best_match):
@@ -220,7 +216,6 @@ def resolve_meta(folder_name):
     if best_match:
         return PRODUCT_MAP[best_match]
 
-    # Safe fallback mapping for unknown products
     return {
         "instr": "ABI",
         "level": "L2",

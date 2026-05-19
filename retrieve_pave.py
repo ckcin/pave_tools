@@ -2,7 +2,7 @@
 """
 RETRIEVE-PAVE: Data Collection Engine
 =====================================
-VERSION: 1.5.0 (Target Satellite Integration)
+VERSION: 1.5.1 (Relaxed Matching Flag Architecture Support)
 """
 
 import argparse
@@ -25,7 +25,6 @@ from pave_utils import (
 )
 
 # --- FOLDER ALIAS MAPPING ---
-# Applies strictly to GCCS S3 Discovery
 FOLDER_ALIASES = {
     'brdf': 'olsa',
     'brdff20': 'olsa',
@@ -67,7 +66,6 @@ def get_gccs_products(args, gccs_path, log):
     user_channels = normalize_channels(args.channels)
     discovery_list = []
 
-    # Determine which satellites to target
     target_sats = [args.sat] if getattr(args, 'sat', None) else [18, 19]
 
     for prod_name in args.products:
@@ -253,6 +251,9 @@ def run_collection(args, log):
     gccs, prem = dest_root / "gccs", dest_root / "prem"
     gccs.mkdir(parents=True, exist_ok=True); prem.mkdir(parents=True, exist_ok=True)
 
+    if getattr(args, 'relax_match', False):
+        log.info("Relaxed matching constraint enabled. Pipeline objects downstream will lock exclusively to start time (_s).")
+
     if not getattr(args, 'skip_gccs', False):
         get_gccs_products(args, gccs, log); prune_empty_folders(gccs)
 
@@ -269,6 +270,7 @@ def parse_args():
     parser.add_argument("--dest", default=".", help="Workspace root folder")
     parser.add_argument("--preserve-ip", action="store_true", help="Preserve IP tars in ip_data/")
     parser.add_argument("--skip-ip", action="store_true", help="Skip Intermediate Product (IP) retrieval")
+    parser.add_argument("--relax-match", action="store_true", help="Relax matching constraints to evaluate pairing strictly on start time (_s)")
     parser.add_argument("-j", "--threads", type=int, default=8, help="Sync threads")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
     parser.add_argument("-d", "--debug", action="store_true", help="Enable debug logging")
