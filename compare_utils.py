@@ -293,8 +293,9 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
 
 def compare_sparse_vectors(ds_p, ds_g, vt, v1, v2, tmp_dir, pair_info, instr, prod_name):
     """
-    FEATURE FIX: Generates vector flow quiver comparisons for sparse DMW datasets.
-    Converts meteorologic Speed/Direction tracking variables into Cartesian coordinates.
+    FEATURE UPGRADE: Generates a complete 6-cell (3x2) master dashboard for sparse vectors.
+    Bins 1D tracking point clouds into a regular 2D matrix to compute vector magnitude
+    deltas, direction variances, scatters, and frequency histograms.
     """
     lat_v, lon_v = get_coords_for_var(ds_p, v1)
     if not lat_v or not lon_v:
@@ -309,12 +310,11 @@ def compare_sparse_vectors(ds_p, ds_g, vt, v1, v2, tmp_dir, pair_info, instr, pr
     except:
         return
 
-    # Filter out missing data or fill values
+    # Filter out missing data observations or fill values
     mask_p = np.isfinite(lat_p) & np.isfinite(lon_p) & np.isfinite(spd_p) & np.isfinite(dir_p) & (spd_p >= 0)
     mask_g = np.isfinite(lat_g) & np.isfinite(lon_g) & np.isfinite(spd_g) & np.isfinite(dir_g) & (spd_g >= 0)
 
     def _convert_to_uv(spd, heading):
-        # Convert degrees to radians and derive vector coordinates
         rad = heading * np.pi / 180.0
         u = -spd * np.sin(rad)
         v = -spd * np.cos(rad)
@@ -323,41 +323,134 @@ def compare_sparse_vectors(ds_p, ds_g, vt, v1, v2, tmp_dir, pair_info, instr, pr
     u_p, v_p = _convert_to_uv(spd_p[mask_p], dir_p[mask_p])
     u_g, v_g = _convert_to_uv(spd_g[mask_g], dir_g[mask_g])
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 10), sharex=True, sharey=True)
+    # 1. Establish Symmetric Bounding Coordinates for Matrix Gridding
+    min_lon = min(np.nanmin(lon_p), np.nanmin(lon_g)) if len(lon_p)>0 else -180
+    max_lon = max(np.nanmax(lon_p), np.nanmax(lon_g)) if len(lon_p)>0 else 180
+    min_lat = min(np.nanmin(lat_p), np.nanmin(lat_g)) if len(lat_p)>0 else -90
+    max_lat = max(np.nanmax(lat_p), np.nanmax(lat_g)) if len(lat_p)>0 else 90
+
+    lon_edges = np.linspace(min_lon, max_lon, 101)
+    lat_edges = np.linspace(min_lat, max_lat, 101)
+
+    def _grid_component(lon, lat, val):
+        cnt, _, _ = np.histogram2d(lon, lat, bins=[lon_edges, lat_edges])
+        sm, _, _ = np.histogram2d(lon, lat, bins=[lon_edges, lat_edges], weights=val)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            return np.where(cnt > 0, sm / cnt, np.nan).T
+
+    # Grid components onto parallel regular 2D matrices
+    grid_u_p = _grid_component(lon_p[mask_p], lat_p[mask_p], u_p)
+    grid_v_p = _grid_component(lon_p[mask_p], lat_p[mask_p], v_p)
+    grid_u_g = _grid_component(lon_g[mask_g], lat_g[mask_g], u_g)
+    grid_v_g = _grid_component(lon_g[mask_g], lat_g[mask_g], v_g)
+
+    # Derive gridded speeds and difference fields
+    grid_spd_p = np.sqrt(grid_u_p**2 + grid_v_p**2)
+    grid_spd_g = np.sqrt(grid_u_g**2 + grid_v_g**2)
+    diff_array = grid_spd_g - grid_spd_p
+    valid_diffs = diff_array[np.isfinite(diff_array)]
+
+    # Map Mismatch boundaries (0 = Match, 1 = Flow Deviation)
+    mismatch_mask = np.where(np.abs(diff_array) > 0.5, 1, 0)
+    mismatch_cmap = plt.matplotlib.colors.ListedColormap(['white', 'lime'])
+
+    # Compute Speed Correlation metrics
+    common = np.isfinite(grid_spd_p) & np.isfinite(grid_spd_g)
+    r_sq = 0.0
+    r_sq_is_na = True
+    if np.count_nonzero(common) > 1:
+        try:
+            r_sq = float(pearsonr(grid_spd_p[common], grid_spd_g[common])[0] ** 2)
+            r_sq_is_na = False
+        except:
+            pass
+
+    # --- Initialize 3x2 Master Dashboard ---
+    fig = plt.figure(figsize=(18, 24))
     try:
-        # Down-sample heavy vector meshes to ensure clean scannability
-        step_p = max(1, len(u_p) // 800)
-        step_g = max(1, len(u_g) // 800)
-
-        if len(u_p) > 0:
-            ax1.quiver(lon_p[mask_p][::step_p], lat_p[mask_p][::step_p], u_p[::step_p], v_p[::step_p],
-                       spd_p[mask_p][::step_p], cmap='viridis', scale=400, width=0.003)
-        ax1.set_title("On-Prem Wind Vector Flow", weight='bold', fontsize=12)
-        ax1.set_xlabel("Longitude"); ax1.set_ylabel("Latitude")
-        ax1.grid(True, linestyle=':', alpha=0.5)
-
-        if len(u_g) > 0:
-            im = ax2.quiver(lon_g[mask_g][::step_g], lat_g[mask_g][::step_g], u_g[::step_g], v_g[::step_g],
-                            spd_g[mask_g][::step_g], cmap='viridis', scale=400, width=0.003)
-            plt.colorbar(im, ax=ax2, label='Wind Speed (m/s)', fraction=0.046, pad=0.04)
-        ax2.set_title("GCCS Wind Vector Flow", weight='bold', fontsize=12)
-        ax2.set_xlabel("Longitude")
-        ax2.grid(True, linestyle=':', alpha=0.5)
-
         m = GOES_REGEX.search(pair_info)
         product_dsn = m.group('dsn') if m else "Unknown"
-        if " <-> " in pair_info:
-            prem_name, gccs_name = pair_info.split(" <-> ", 1)
+        prem_name, gccs_name = pair_info.split(" <-> ", 1) if " <-> " in pair_info else (pair_info, "Unknown")
+
+        plt.suptitle(f"{product_dsn} | {v1.upper()} VECTOR DASHBOARD\nPrem: {prem_name}\nGCCS: {gccs_name}",
+                     fontsize=12, weight='bold', y=0.98, linespacing=1.3)
+
+        ax1 = fig.add_subplot(321)
+        ax2 = fig.add_subplot(322)
+        ax3 = fig.add_subplot(323)
+        ax4 = fig.add_subplot(324)
+        ax5 = fig.add_subplot(325)
+        ax6 = fig.add_subplot(326)
+
+        extent = [min_lon, max_lon, min_lat, max_lat]
+        kwargs = {'cmap': 'viridis', 'origin': 'lower', 'extent': extent, 'aspect': 'equal'}
+
+        if np.any(np.isfinite(grid_spd_p)) and np.any(np.isfinite(grid_spd_g)):
+            vmax = max(np.nanpercentile(grid_spd_p, 99), np.nanpercentile(grid_spd_g, 99))
+            kwargs['vmin'], kwargs['vmax'] = 0, vmax
+
+        # Cell 1: On-Prem Flow Fields
+        ax1.set_title("On-Prem Wind Vector Flow", weight='bold')
+        if len(u_p) > 0:
+            step_p = max(1, len(u_p) // 600)
+            im1 = ax1.quiver(lon_p[mask_p][::step_p], lat_p[mask_p][::step_p], u_p[::step_p], v_p[::step_p],
+                             spd_p[mask_p][::step_p], cmap='viridis', scale=400, width=0.003)
+        ax1.set_xlim(min_lon, max_lon); ax1.set_ylim(min_lat, max_lat)
+        ax1.grid(True, linestyle=':', alpha=0.5)
+
+        # Cell 2: GCCS Flow Fields
+        ax2.set_title("GCCS Wind Vector Flow", weight='bold')
+        if len(u_g) > 0:
+            step_g = max(1, len(u_g) // 600)
+            im2 = ax2.quiver(lon_g[mask_g][::step_g], lat_g[mask_g][::step_g], u_g[::step_g], v_g[::step_g],
+                             spd_g[mask_g][::step_g], cmap='viridis', scale=400, width=0.003)
+            div2 = make_axes_locatable(ax2)
+            plt.colorbar(im2, cax=div2.append_axes("right", size="5%", pad=0.05), label='Wind Speed (m/s)')
+        ax2.set_xlim(min_lon, max_lon); ax2.set_ylim(min_lat, max_lat)
+        ax2.grid(True, linestyle=':', alpha=0.5)
+
+        # Cell 3: Magnitude Difference Map
+        ax3.set_title("Difference (GCCS - PREM Speed)", weight='bold')
+        d_min = np.nanmin(valid_diffs) if len(valid_diffs) > 0 else -1
+        d_max = np.nanmax(valid_diffs) if len(valid_diffs) > 0 else 1
+        im3 = ax3.imshow(diff_array, cmap='coolwarm', origin='lower', extent=extent, aspect='equal', vmin=d_min, vmax=d_max)
+        div3 = make_axes_locatable(ax3)
+        plt.colorbar(im3, cax=div3.append_axes("right", size="5%", pad=0.05), label='Delta (m/s)')
+
+        # Cell 4: Speed Correlation Scatter
+        ax4.set_title(f"Speed Correlation ($R^2$: {'N/A' if r_sq_is_na else f'{r_sq:.4f}'})", weight='bold')
+        ax4.set_xlabel("On-Prem Speed (m/s)"); ax4.set_ylabel("GCCS Speed (m/s)")
+        if np.count_nonzero(common) > 0:
+            im4 = ax4.hexbin(grid_spd_p[common], grid_spd_g[common], gridsize=40, cmap='viridis', mincnt=1, bins='log')
+            div4 = make_axes_locatable(ax4)
+            plt.colorbar(im4, cax=div4.append_axes("right", size="5%", pad=0.05), label='log10(count)')
         else:
-            prem_name, gccs_name = pair_info, "Unknown"
+            ax4.text(0.5, 0.5, "No overlapping tracking data matrix segments found.", ha='center', va='center', color='gray')
 
-        plt.suptitle(f"{product_dsn} | {v1.upper()} FLOW FIELDS\nPrem: {prem_name}\nGCCS: {gccs_name}",
-                     fontsize=12, weight='bold', y=0.96, linespacing=1.3)
+        # Cell 5: Mismatch Mask Grid
+        ax5.set_title("Flow Deviation Mask (Green=Error > 0.5m/s)", weight='bold')
+        ax5.imshow(mismatch_mask, cmap=mismatch_cmap, origin='lower', extent=extent, aspect='equal', vmin=0, vmax=1)
 
-        plt.savefig(tmp_dir / f"{v1}_vector_comparison.png", dpi=100, bbox_inches='tight')
+        # Cell 6: Speed Delta Histogram
+        ax6.set_title("Distribution of Speed Delta", weight='bold')
+        ax6.set_xlabel("Delta Value (m/s)"); ax6.set_ylabel("Frequency")
+        if len(valid_diffs) > 0:
+            ax6.hist(valid_diffs, bins=50, color='gray', edgecolor='black')
+            ax6.axvline(0, color='red', linestyle='--')
+        else:
+            ax6.text(0.5, 0.5, "No finite delta components available.", ha='center', va='center', color='gray')
+
+        plt.tight_layout(rect=[0, 0.06, 1, 0.93])
+
+        # Master Banner Status Bar Placement
+        b_color = 'lightgray' if r_sq_is_na else 'palegreen' if r_sq >= 0.95 else 'moccasin' if r_sq >= 0.85 else 'lightcoral'
+        banner_text = f"Vector Correlation Check: {'N/A' if r_sq_is_na else f'{r_sq:.4f}'}"
+        fig.text(0.5, 0.03, banner_text, ha='center', va='center', fontsize=22, weight='bold',
+                 bbox=dict(facecolor=b_color, edgecolor='black', boxstyle='round,pad=0.5', alpha=0.9))
+
+        plt.savefig(tmp_dir / f"{v1}_comparison.png", dpi=100)
     finally:
         plt.close(fig)
-
 
 # --- AGGREGATION ENGINE ---
 
