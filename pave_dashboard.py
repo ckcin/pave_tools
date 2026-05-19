@@ -2,7 +2,7 @@
 """
 PAVE-DASHBOARD: Visual Report Consolidation Tool
 ================================================
-VERSION: 1.6.0 (Strict DOY-Only Subfolder Architecture)
+VERSION: 1.9.0 (Extended DSN Naming Layout: ShortName_Sat_Variable)
 """
 
 import os
@@ -15,9 +15,9 @@ from pathlib import Path
 # Natively bind to your unified running infrastructure
 from pave_utils import Logger, setup_interrupt_handler
 
-# Captures parameters from your root folders: e.g., ACM_2026137010
+# Captures temporal parameters from your root folders: e.g., ACM_2026137010
 WORKSPACE_REGEX = re.compile(
-    r"^(?P<prod>[A-Za-z0-9_]+)_(?P<year>\d{4})(?P<doy>\d{3})(?P<hour>\d{2})\d+(?P<tag>_.*)?$"
+    r"^[A-Za-z0-9_]+_(?P<year>\d{4})(?P<doy>\d{3})(?P<hour>\d{2})\d+(?P<tag>_.*)?$"
 )
 
 # Extracts satellite ID safely from the native filename inside validation
@@ -25,7 +25,7 @@ FILE_SAT_REGEX = re.compile(r"_(?P<sat>G1[89])_")
 
 def extract_workspace_meta(validation_dir, log):
     """
-    Climbs upward from the deep validation subfolder to locate and 
+    Climbs upward from the deep validation subfolder to locate and
     parse the true PAVE execution root workspace name.
     """
     current = validation_dir.resolve()
@@ -36,22 +36,6 @@ def extract_workspace_meta(validation_dir, log):
             return current.name, match
         current = current.parent
     return None, None
-
-def discover_scene_tag(image_path, base_prod, log):
-    """
-    Inspects the directory path between 'validation' and the file to find the 
-    instrument/product subfolder (e.g. acmc, acmf) and isolate the scene code (c, f, m1, m2).
-    """
-    path_parts = [p.lower() for p in image_path.parts]
-    base_lower = base_prod.lower()
-
-    for part in path_parts:
-        if base_lower in part and part != base_lower:
-            scene_suffix = part.replace(base_lower, "").strip()
-            if scene_suffix in ['f', 'c', 'm1', 'm2']:
-                log.debug(f"Isolated scene identifier via path tracking: '{scene_suffix.upper()}'")
-                return f"_{scene_suffix.upper()}"
-    return ""
 
 def harvest_workspace(search_path, output_path, log):
     root_path = Path(search_path).resolve()
@@ -64,9 +48,8 @@ def harvest_workspace(search_path, output_path, log):
     log.info(f"Scanning directory tree: {root_path}")
     dest_path.mkdir(parents=True, exist_ok=True)
 
-    # Natively find all deep 'validation' endpoints under the CLI inputs
     validation_dirs = [p for p in root_path.rglob("validation") if p.is_dir()]
-    
+
     if not validation_dirs:
         log.warn(f"No active 'validation' folders found under {root_path.name}")
         return
@@ -76,30 +59,26 @@ def harvest_workspace(search_path, output_path, log):
 
     for val_dir in validation_dirs:
         ws_name, match = extract_workspace_meta(val_dir, log)
-        
+
         if not match:
             log.warn(f"SKIPPED deep node '{val_dir}' because no ancestor folder matched the PAVE workspace naming schema.")
             continue
 
-        prod = match.group('prod')
         doy_group = match.group('doy')
         timestamp = f"{match.group('year')}{doy_group}{match.group('hour')}"
-        custom_tag = match.group('tag') if match.group('tag') else ""
-        
-        # Enforced strict DOY sub-folder positioning directly under destination root
+        folder_fallback_prefix = ws_name.split('_')[0]
+
+        # Enforce strict flat DOY subdirectory management layer
         target_dest_dir = dest_path / doy_group
         target_dest_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Deep glob targets clean master "_comparison.png" charts
-        dashboards = list(val_dir.glob("**/*_comparison.png"))
 
+        dashboards = list(val_dir.glob("**/*_comparison.png"))
         if not dashboards:
             log.debug(f"No '*_comparison.png' dashboards generated yet inside: {ws_name}")
             continue
 
         # Filter out standalone numeric component frames (_1_GCCS, _2_PREM, etc.)
         valid_dashboards = [img for img in dashboards if not re.search(r"_\d_[A-Za-z0-9_]+_comparison\.png$", img.name)]
-
         if not valid_dashboards:
             log.debug(f"No true master dashboards found inside: {ws_name}")
             continue
@@ -108,15 +87,29 @@ def harvest_workspace(search_path, output_path, log):
 
         for img in valid_dashboards:
             var_name = img.name.replace("_comparison.png", "")
-            
-            scene_tag = discover_scene_tag(img, prod, log)
-            full_prod_name = f"{prod}{scene_tag}{custom_tag.upper()}"
+
+            # Target immediate housing folder to derive raw product configurations
+            folder_holding_file = img.parent.name
+            dsn_match = re.search(r"OR_(?P<dsn>.*?)_s", folder_holding_file)
+
+            if dsn_match:
+                true_dsn = dsn_match.group('dsn')
+                # Strip out trailing satellite flags if present so we can construct it symmetrically
+                true_dsn = re.sub(r"_(?:G18|G19)$", "", true_dsn)
+                log.debug(f"Successfully derived base Data ShortName from housing folder: {true_dsn}")
+            else:
+                true_dsn = folder_fallback_prefix
+                log.debug(f"Housing folder pattern mismatch for '{folder_holding_file}'. Using fallback: {true_dsn}")
 
             sat_match = FILE_SAT_REGEX.search(img.name) or FILE_SAT_REGEX.search(str(img))
             sat_id = sat_match.group('sat') if sat_match else "GXX"
 
-            new_filename = f"{full_prod_name}_{var_name}_{sat_id}_{timestamp}_comparison.png"
+            # -----------------------------------------------------------------
+            # --- FEATURE UPDATE: LOCKED SAT_ID BEFORE VARIABLE (EXTENDED DSN) ---
+            # -----------------------------------------------------------------
+            new_filename = f"{true_dsn}_{sat_id}_{var_name}_{timestamp}_comparison.png"
             target_file_path = target_dest_dir / new_filename
+            # -----------------------------------------------------------------
 
             try:
                 shutil.copy2(str(img), str(target_file_path))
@@ -130,16 +123,16 @@ def harvest_workspace(search_path, output_path, log):
 def main():
     parser = argparse.ArgumentParser(
         prog="pave_dashboard.py",
-        description="Extract and structure PAVE 3x2 dashboards into clean day-of-year subfolders."
+        description="Extract and structure PAVE 3x2 dashboards into clean day-of-year subfolders using immediate parent housing folder tokens."
     )
     parser.add_argument(
-        "paths", 
-        nargs="+", 
+        "paths",
+        nargs="+",
         help="One or more run workspace roots to scan recursively."
     )
     parser.add_argument(
-        "-o", "--output", 
-        required=True, 
+        "-o", "--output",
+        required=True,
         help="Target parent folder to dump the clean DOY subfolder matrix."
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose tracking visibility")
@@ -147,7 +140,7 @@ def main():
     parser.add_argument("-q", "--quiet", action="store_true", help="Restrict engine print feedback")
 
     args = parser.parse_args()
-    
+
     lvl = "DEBUG" if args.debug else "VERBOSE" if args.verbose else "QUIET" if args.quiet else "INFO"
     log = Logger(lvl)
     setup_interrupt_handler(log)
