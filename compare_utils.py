@@ -2,7 +2,7 @@
 """
 COMPARE-PAVE: Shared Utility Suite
 ==================================
-VERSION: 1.21.1 (Whitespace Compression & Expanded Statistical Analysis Tables - High Vis Fonts)
+VERSION: 1.25.0 (Dynamic Bounding Box Table Filling)
 """
 
 import os
@@ -85,9 +85,8 @@ def get_coords_for_var(ds, var_name):
 # --- CORE PLOTTING ENGINES ---
 
 def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_label, proj=None, extent=None, origin='upper', cmap='viridis'):
-    """Memory-safe plotting engine with optimized row scaling and expanded summary metrics table."""
+    """Memory-safe plotting engine with horizontal grid layouts and bounding box filled tables."""
 
-    # Squeeze out empty leading singleton dimensions
     data_p = np.squeeze(data_p)
     data_g = np.squeeze(data_g)
 
@@ -99,7 +98,6 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
     only_one_mask = np.logical_xor(mask_p, mask_g)
     only_one_frac = np.count_nonzero(only_one_mask) / data_p.size if data_p.size > 0 else 0.0
 
-    # Core Arrays Differential Calculations
     diff_array = data_g - data_p
     valid_diffs = diff_array[np.isfinite(diff_array)]
     abs_diffs = np.abs(valid_diffs) if len(valid_diffs) > 0 else np.array([])
@@ -218,25 +216,29 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
         finally:
             plt.close(fig_hist)
 
-        # --- 2. MASTER DASHBOARD (Squeezed 18x20 Canvas Layout) ---
-        fig = plt.figure(figsize=(18, 20))
+        # --- 2. MASTER DASHBOARD (Landscape Optimization Format) ---
+        fig = plt.figure(figsize=(24, 12))
         try:
             prem_name, gccs_name = pair_info.split(" <-> ", 1) if " <-> " in pair_info else (pair_info, "Unknown")
             unified_title = f"{product_dsn} | {var.upper()}\nPrem: {prem_name}\nGCCS: {gccs_name}"
 
-            # INCREASED MAIN TITLE FONT SIZE HERE
-            plt.suptitle(unified_title, fontsize=22, weight='bold', y=0.98, linespacing=1.3)
+            plt.suptitle(unified_title, fontsize=14, weight='bold', y=0.97, linespacing=1.3)
 
-            gs = GridSpec(3, 6, figure=fig)
+            # Establish the balanced 2x8 workspace matrix block
+            gs = GridSpec(2, 8, figure=fig)
 
-            ax1 = fig.add_subplot(gs[0, 0:3], projection=proj if is_geo else None)
-            ax2 = fig.add_subplot(gs[0, 3:6], projection=proj if is_geo else None)
-            ax3 = fig.add_subplot(gs[1, 0:3], projection=proj if is_geo else None)
-            ax5 = fig.add_subplot(gs[1, 3:6], projection=proj if is_geo else None)
+            # Row 1 (Top Layer) -> Prem, GCCS, Scatter
+            ax1 = fig.add_subplot(gs[0, 0:2], projection=proj if is_geo else None)
+            ax2 = fig.add_subplot(gs[0, 2:4], projection=proj if is_geo else None)
+            ax4 = fig.add_subplot(gs[0, 4:6])
 
-            ax4 = fig.add_subplot(gs[2, 0:2])
-            ax6 = fig.add_subplot(gs[2, 2:4])
-            ax_table = fig.add_subplot(gs[2, 4:6])
+            # Row 2 (Bottom Layer) -> Mismatch, Difference, Histogram
+            ax3 = fig.add_subplot(gs[1, 0:2], projection=proj if is_geo else None)
+            ax5 = fig.add_subplot(gs[1, 2:4], projection=proj if is_geo else None)
+            ax6 = fig.add_subplot(gs[1, 4:6])
+
+            # Spanned Metrics Table Core (Far Right Boundary Columns)
+            ax_table = fig.add_subplot(gs[0:2, 6:8])
 
             dash_map = [(ax1, data_p, kwargs, "On-Prem"), (ax2, data_g, kwargs, "GCCS"),
                         (ax3, mismatch_mask, mismatch_kwargs, "Mismatch (Green=Error)"),
@@ -248,7 +250,7 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
                 im = ax.imshow(data, **kw)
                 if "Mismatch" not in tit: _add_cbar(im, ax)
 
-            # Cell 4: Scatter
+            # Scatter Subplot Box Adjustments
             ax4.set_box_aspect(1)
             ax4.set_xlabel("On-Prem", fontsize=11); ax4.set_ylabel("GCCS", fontsize=11)
             if len(v_p) > 0 and not r_sq_is_na:
@@ -262,7 +264,7 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
                 ax4.set_title("Correlation ($R^2$: N/A)", weight='bold', fontsize=12)
                 ax4.text(0.5, 0.5, "Data Constant or N/A\nNo Variance to Plot", ha='center', va='center', color='gray', weight='bold', transform=ax4.transAxes)
 
-            # Cell 6: Histogram
+            # Histogram Subplot Box Adjustments
             ax6.set_box_aspect(1)
             ax6.set_xlabel("Delta Value", fontsize=11); ax6.set_ylabel("Frequency", fontsize=11)
             if len(valid_diffs) > 0:
@@ -273,9 +275,9 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
                 ax6.set_title("Distribution of Delta (N/A)", weight='bold', fontsize=12)
                 ax6.text(0.5, 0.5, "No Finite Deltas Available", ha='center', va='center', color='gray', weight='bold', transform=ax6.transAxes)
 
-            # Cell 7: Table Component
+            # Summary Analytics Comprehensive Data Table
             ax_table.axis('off')
-            ax_table.set_title("Comprehensive Statistical Summary", weight='bold', pad=5, fontsize=12)
+            ax_table.set_title("Comprehensive Statistical Summary", weight='bold', pad=10, fontsize=14)
 
             num_mismatches = np.count_nonzero(mismatch_mask == 1)
             prem_nans = np.count_nonzero(~mask_p)
@@ -291,41 +293,46 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
             g_med = np.nanmedian(data_g) if np.any(mask_g) else np.nan
 
             table_content = [
-                ["Statistical Metric Description", "Observed Value (Prem / GCCS)"],
-                ["Dataset Matrix Dimensions", f"{data_p.shape}"],
-                ["Total Bounding Pixels", f"{data_p.size:,}"],
-                ["Valid Common Intersections", f"{num_common:,}"],
-                ["Mismatched Pixels (>1e-6 Threshold)", f"{num_mismatches:,}"],
-                ["Coefficient of Determination ($R^2$)", "N/A" if r_sq_is_na else f"{r_sq:.4f}"],
-                ["Finite in Only One Fraction (XOR)", f"{only_one_frac:.6f}"],
-                ["Observed Maximum Value", f"{p_max:.4f} / {g_max:.4f}"],
-                ["Observed Mean Value", f"{p_mean:.4f} / {g_mean:.4f}"],
-                ["Observed Median Value", f"{p_med:.4f} / {g_med:.4f}"],
-                ["Observed Minimum Value", f"{p_min:.4f} / {g_min:.4f}"],
-                ["Missing Observations (NaNs)", f"{prem_nans:,} / {gccs_nans:,}"],
-                ["Maximum Delta ($GCCS - PREM$)", f"{np.nanmax(valid_diffs):.4f}" if len(valid_diffs) > 0 else "N/A"],
-                ["Minimum Delta ($GCCS - PREM$)", f"{np.nanmin(valid_diffs):.4f}" if len(valid_diffs) > 0 else "N/A"],
-                ["Mean Delta Error Bias", f"{np.nanmean(valid_diffs):.4f}" if len(valid_diffs) > 0 else "N/A"],
-                ["Maximum Absolute Difference ($|\\Delta|$)", f"{np.max(abs_diffs):.4f}" if len(abs_diffs) > 0 else "N/A"],
-                ["Minimum Absolute Difference ($|\\Delta|$)", f"{np.min(abs_diffs):.4f}" if len(abs_diffs) > 0 else "N/A"],
-                ["Mean Absolute Error Dispersion", f"{np.mean(abs_diffs):.4f}" if len(abs_diffs) > 0 else "N/A"]
+                ["Statistical Metric Description", "Observed Target Value"],
+                ["Dataset Matrix\nDimensions", f"{data_p.shape}"],
+                ["Total Bounding\nPixels", f"{data_p.size:,}"],
+                ["Valid Common\nIntersections", f"{num_common:,}"],
+                ["Mismatched Pixels\n(>1e-6 Threshold)", f"{num_mismatches:,}"],
+                ["Coefficient of\nDetermination ($R^2$)", "N/A" if r_sq_is_na else f"{r_sq:.4f}"],
+                ["Finite in Only\nOne Fraction (XOR)", f"{only_one_frac:.6f}"],
+                ["Observed Maximum\nValue", f"Prem: {p_max:.4f}\nGCCS: {g_max:.4f}"],
+                ["Observed Mean\nValue", f"Prem: {p_mean:.4f}\nGCCS: {g_mean:.4f}"],
+                ["Observed Median\nValue", f"Prem: {p_med:.4f}\nGCCS: {g_med:.4f}"],
+                ["Observed Minimum\nValue", f"Prem: {p_min:.4f}\nGCCS: {g_min:.4f}"],
+                ["Missing Observations\n(NaNs)", f"Prem: {prem_nans:,}\nGCCS: {gccs_nans:,}"],
+                ["Maximum Delta\n($GCCS - PREM$)", f"{np.nanmax(valid_diffs):.4f}" if len(valid_diffs) > 0 else "N/A"],
+                ["Minimum Delta\n($GCCS - PREM$)", f"{np.nanmin(valid_diffs):.4f}" if len(valid_diffs) > 0 else "N/A"],
+                ["Mean Delta\nError Bias", f"{np.nanmean(valid_diffs):.4f}" if len(valid_diffs) > 0 else "N/A"],
+                ["Maximum Absolute\nDifference ($|\\Delta|$)", f"{np.max(abs_diffs):.4f}" if len(abs_diffs) > 0 else "N/A"],
+                ["Minimum Absolute\nDifference ($|\\Delta|$)", f"{np.min(abs_diffs):.4f}" if len(abs_diffs) > 0 else "N/A"],
+                ["Mean Absolute\nError Dispersion", f"{np.mean(abs_diffs):.4f}" if len(abs_diffs) > 0 else "N/A"]
             ]
 
-            metric_table = ax_table.table(cellText=table_content, loc='center', cellLoc='center', colWidths=[0.60, 0.40])
+            # FEATURE UPDATE: Force table to dynamically stretch and fill the exact bounds of its 2x2 GridSpec slot
+            # colWidths sum strictly to 1.0 so it utilizes the entirety of the horizontal bbox limit
+            metric_table = ax_table.table(
+                cellText=table_content,
+                loc='center',
+                cellLoc='center',
+                colWidths=[0.55, 0.45],
+                bbox=[0.0, 0.0, 1.0, 0.95]
+            )
             metric_table.auto_set_font_size(False)
+            metric_table.set_fontsize(12)  # Expanded typography readability
 
-            # INCREASED TABLE FONT AND SCALE HERE
-            metric_table.set_fontsize(12)
-            metric_table.scale(1.0, 2.0)
-
-            plt.tight_layout(rect=[0, 0.04, 1, 0.96])
+            plt.tight_layout(rect=[0, 0.05, 1, 0.95])
 
             if r_sq_is_na: b_color = 'lightgray'; banner_text = "R-Squared Correlation: N/A"
             elif r_sq >= 0.98: b_color = 'palegreen'; banner_text = f"R-Squared Correlation: {r_sq:.4f}"
             elif r_sq >= 0.90: b_color = 'moccasin'; banner_text = f"R-Squared Correlation: {r_sq:.4f}"
             else: b_color = 'lightcoral'; banner_text = f"R-Squared Correlation: {r_sq:.4f}"
 
-            fig.text(0.5, 0.025, banner_text, ha='center', va='center', fontsize=22, weight='bold',
+            fig.text(0.5, 0.03, banner_text, ha='center', va='center', fontsize=22, weight='bold',
                      bbox=dict(facecolor=b_color, edgecolor='black', boxstyle='round,pad=0.5', alpha=0.9))
 
             plt.savefig(tmp_dir / f"{var}_comparison.png", dpi=100)
@@ -340,7 +347,7 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
 
 
 def compare_sparse_vectors(ds_p, ds_g, vt, v1, v2, tmp_dir, pair_info, instr, prod_name):
-    """Generates an asymmetric master dashboard for sparse vector datasets with square spatial and analytical panels."""
+    """Generates an asymmetric master dashboard for sparse vector datasets matching optimized alignment grids."""
     lat_v, lon_v = get_coords_for_var(ds_p, v1)
     if not lat_v or not lon_v: return
 
@@ -407,26 +414,28 @@ def compare_sparse_vectors(ds_p, ds_g, vt, v1, v2, tmp_dir, pair_info, instr, pr
         except:
             pass
 
-    fig = plt.figure(figsize=(18, 20))
+    fig = plt.figure(figsize=(24, 12))
     try:
         m = GOES_REGEX.search(pair_info)
         product_dsn = m.group('dsn') if m else "Unknown"
         prem_name, gccs_name = pair_info.split(" <-> ", 1) if " <-> " in pair_info else (pair_info, "Unknown")
 
-        # INCREASED SPARSE TITLE FONT SIZE HERE
         plt.suptitle(f"{product_dsn} | {v1.upper()} VECTOR DASHBOARD\nPrem: {prem_name}\nGCCS: {gccs_name}",
-                     fontsize=22, weight='bold', y=0.98, linespacing=1.3)
+                     fontsize=14, weight='bold', y=0.97, linespacing=1.3)
 
-        gs = GridSpec(3, 6, figure=fig)
+        gs = GridSpec(2, 8, figure=fig)
 
-        ax1 = fig.add_subplot(gs[0, 0:3])
-        ax2 = fig.add_subplot(gs[0, 3:6])
-        ax3 = fig.add_subplot(gs[1, 0:3])
-        ax5 = fig.add_subplot(gs[1, 3:6])
+        # Row 1 Tasks -> Prem, GCCS, Scatter
+        ax1 = fig.add_subplot(gs[0, 0:2])
+        ax2 = fig.add_subplot(gs[0, 2:4])
+        ax4 = fig.add_subplot(gs[0, 4:6])
 
-        ax4 = fig.add_subplot(gs[2, 0:2])
-        ax6 = fig.add_subplot(gs[2, 2:4])
-        ax_table = fig.add_subplot(gs[2, 4:6])
+        # Row 2 Tasks -> Mismatch, Difference, Histogram
+        ax3 = fig.add_subplot(gs[1, 0:2])
+        ax5 = fig.add_subplot(gs[1, 2:4])
+        ax6 = fig.add_subplot(gs[1, 4:6])
+
+        ax_table = fig.add_subplot(gs[0:2, 6:8])
 
         extent = [min_lon, max_lon, min_lat, max_lat]
         kwargs = {'cmap': 'viridis', 'origin': 'lower', 'extent': extent, 'aspect': 'equal'}
@@ -435,7 +444,7 @@ def compare_sparse_vectors(ds_p, ds_g, vt, v1, v2, tmp_dir, pair_info, instr, pr
             vmax = max(np.nanpercentile(grid_spd_p, 99), np.nanpercentile(grid_spd_g, 99))
             kwargs['vmin'], kwargs['vmax'] = 0, vmax
 
-        # Cell 1: On-Prem
+        # Cell 1: On-Prem Wind Field Flow Map
         ax1.set_title("On-Prem Wind Vector Flow", weight='bold', fontsize=12)
         if len(u_p) > 0:
             step_p = max(1, len(u_p) // 600)
@@ -443,7 +452,7 @@ def compare_sparse_vectors(ds_p, ds_g, vt, v1, v2, tmp_dir, pair_info, instr, pr
                              spd_p[mask_p][::step_p], cmap='viridis', scale=400, width=0.003)
         ax1.set_xlim(min_lon, max_lon); ax1.set_ylim(min_lat, max_lat); ax1.grid(True, linestyle=':', alpha=0.5)
 
-        # Cell 2: GCCS
+        # Cell 2: GCCS Wind Field Flow Map
         ax2.set_title("GCCS Wind Vector Flow", weight='bold', fontsize=12)
         if len(u_g) > 0:
             step_g = max(1, len(u_g) // 600)
@@ -453,15 +462,19 @@ def compare_sparse_vectors(ds_p, ds_g, vt, v1, v2, tmp_dir, pair_info, instr, pr
             plt.colorbar(im2, cax=div2.append_axes("right", size="5%", pad=0.05), label='Wind Speed (m/s)')
         ax2.set_xlim(min_lon, max_lon); ax2.set_ylim(min_lat, max_lat); ax2.grid(True, linestyle=':', alpha=0.5)
 
-        # Cell 3: Difference
-        ax3.set_title("Difference (GCCS - PREM Speed)", weight='bold', fontsize=12)
+        # Cell 3: Flow Deviation Mask
+        ax3.set_title("Flow Deviation Mask (Green=Error > 0.5m/s)", weight='bold', fontsize=12)
+        ax3.imshow(mismatch_mask, cmap=mismatch_cmap, origin='lower', extent=extent, aspect='equal', vmin=0, vmax=1)
+
+        # Cell 5: Speed Difference Map
+        ax5.set_title("Difference (GCCS - PREM Speed)", weight='bold', fontsize=12)
         d_min = np.nanmin(valid_diffs) if len(valid_diffs) > 0 else -1
         d_max = np.nanmax(valid_diffs) if len(valid_diffs) > 0 else 1
-        im3 = ax3.imshow(diff_array, cmap='coolwarm', origin='lower', extent=extent, aspect='equal', vmin=d_min, vmax=d_max)
-        div3 = make_axes_locatable(ax3)
+        im3 = ax5.imshow(diff_array, cmap='coolwarm', origin='lower', extent=extent, aspect='equal', vmin=d_min, vmax=d_max)
+        div3 = make_axes_locatable(ax5)
         plt.colorbar(im3, cax=div3.append_axes("right", size="5%", pad=0.05), label='Delta (m/s)')
 
-        # Cell 4: Scatter
+        # Cell 4: Speed Scatter Correlation Plot
         ax4.set_box_aspect(1)
         ax4.set_xlabel("On-Prem Speed (m/s)", fontsize=11); ax4.set_ylabel("GCCS Speed (m/s)", fontsize=11)
         if np.count_nonzero(common) > 0:
@@ -475,11 +488,7 @@ def compare_sparse_vectors(ds_p, ds_g, vt, v1, v2, tmp_dir, pair_info, instr, pr
             ax4.set_title("Speed Correlation ($R^2$: N/A)", weight='bold', fontsize=12)
             ax4.text(0.5, 0.5, "No overlapping tracking data matrix segments found.", ha='center', va='center', color='gray')
 
-        # Cell 5: Mask
-        ax5.set_title("Flow Deviation Mask (Green=Error > 0.5m/s)", weight='bold', fontsize=12)
-        ax5.imshow(mismatch_mask, cmap=mismatch_cmap, origin='lower', extent=extent, aspect='equal', vmin=0, vmax=1)
-
-        # Cell 6: Histogram
+        # Cell 6: Speed Delta Histogram
         ax6.set_box_aspect(1)
         ax6.set_title("Distribution of Speed Delta", weight='bold', fontsize=12)
         ax6.set_xlabel("Delta Value (m/s)", fontsize=11); ax6.set_ylabel("Frequency", fontsize=11)
@@ -489,10 +498,11 @@ def compare_sparse_vectors(ds_p, ds_g, vt, v1, v2, tmp_dir, pair_info, instr, pr
         else:
             ax6.text(0.5, 0.5, "No finite delta components available.", ha='center', va='center', color='gray')
 
-        # Cell 7: Table Component
+        # Cell 7: Full Height Table Component
         ax_table.axis('off')
-        ax_table.set_title("Vector Statistical Metrics", weight='bold', pad=5, fontsize=12)
+        ax_table.set_title("Vector Statistical Metrics", weight='bold', pad=10, fontsize=14)
 
+        num_mismatches = np.count_nonzero(mismatch_mask == 1)
         prem_nans_g = np.count_nonzero(~mask_p_grid)
         gccs_nans_g = np.count_nonzero(~mask_g_grid)
         p_max_g = np.nanmax(grid_spd_p) if np.any(mask_p_grid) else np.nan
@@ -505,38 +515,42 @@ def compare_sparse_vectors(ds_p, ds_g, vt, v1, v2, tmp_dir, pair_info, instr, pr
         g_med_g = np.nanmedian(grid_spd_g) if np.any(mask_g_grid) else np.nan
 
         table_content = [
-            ["Vector Metric Description", "Observed Value (Prem / GCCS)"],
-            ["Binned Matrix Grid Dimensions", f"{grid_spd_p.shape}"],
+            ["Vector Metric Description", "Observed Target Value"],
+            ["Binned Matrix Grid\nDimensions", f"{grid_spd_p.shape}"],
             ["Total Grid Spaces", f"{grid_spd_p.size:,}"],
-            ["Valid Binned Intersections", f"{num_common:,}"],
-            ["Deviated Cells (>0.5m/s Margin)", f"{num_mismatches:,}"],
+            ["Valid Binned\nIntersections", f"{num_common:,}"],
+            ["Deviated Cells\n(>0.5m/s Margin)", f"{num_mismatches:,}"],
             ["Calculated Speed R² Fit", "N/A" if r_sq_is_na else f"{r_sq:.4f}"],
-            ["Finite in Only One Fraction (XOR)", f"{only_one_frac_g:.6f}"],
-            ["Binned Maximum Speed", f"{p_max_g:.4f} / {g_max_g:.4f}"],
-            ["Binned Mean Speed", f"{p_mean_g:.4f} / {g_mean_g:.4f}"],
-            ["Binned Median Speed", f"{p_med_g:.4f} / {g_med_g:.4f}"],
-            ["Binned Minimum Speed", f"{p_min_g:.4f} / {g_min_g:.4f}"],
-            ["Empty Unpopulated Grid Cells", f"{prem_nans_g:,} / {gccs_nans_g:,}"],
-            ["Maximum Delta ($GCCS - PREM$)", f"{np.nanmax(valid_diffs):.4f}" if len(valid_diffs) > 0 else "N/A"],
-            ["Minimum Delta ($GCCS - PREM$)", f"{np.nanmin(valid_diffs):.4f}" if len(valid_diffs) > 0 else "N/A"],
+            ["Finite in Only\nOne Fraction (XOR)", f"{only_one_frac_g:.6f}"],
+            ["Binned Maximum Speed", f"Prem: {p_max_g:.4f}\nGCCS: {g_max_g:.4f}"],
+            ["Binned Mean Speed", f"Prem: {p_mean_g:.4f}\nGCCS: {g_mean_g:.4f}"],
+            ["Binned Median Speed", f"Prem: {p_med_g:.4f}\nGCCS: {g_med_g:.4f}"],
+            ["Binned Minimum Speed", f"Prem: {p_min_g:.4f}\nGCCS: {g_min_g:.4f}"],
+            ["Empty Unpopulated\nGrid Cells", f"Prem: {prem_nans_g:,}\nGCCS: {gccs_nans_g:,}"],
+            ["Maximum Delta\n($GCCS - PREM$)", f"{np.nanmax(valid_diffs):.4f}" if len(valid_diffs) > 0 else "N/A"],
+            ["Minimum Delta\n($GCCS - PREM$)", f"{np.nanmin(valid_diffs):.4f}" if len(valid_diffs) > 0 else "N/A"],
             ["Mean Delta Wind Bias", f"{np.nanmean(valid_diffs):.4f}" if len(valid_diffs) > 0 else "N/A"],
-            ["Maximum Absolute Difference ($|\\Delta|$)", f"{np.max(abs_diffs):.4f}" if len(abs_diffs) > 0 else "N/A"],
-            ["Minimum Absolute Difference ($|\\Delta|$)", f"{np.min(abs_diffs):.4f}" if len(abs_diffs) > 0 else "N/A"],
-            ["Mean Absolute Speed Error Dispersion", f"{np.mean(abs_diffs):.4f}" if len(abs_diffs) > 0 else "N/A"]
+            ["Maximum Absolute\nDifference ($|\\Delta|$)", f"{np.max(abs_diffs):.4f}" if len(abs_diffs) > 0 else "N/A"],
+            ["Minimum Absolute\nDifference ($|\\Delta|$)", f"{np.min(abs_diffs):.4f}" if len(abs_diffs) > 0 else "N/A"],
+            ["Mean Absolute Speed\nError Dispersion", f"{np.mean(abs_diffs):.4f}" if len(abs_diffs) > 0 else "N/A"]
         ]
 
-        vector_table = ax_table.table(cellText=table_content, loc='center', cellLoc='center', colWidths=[0.60, 0.40])
+        # FEATURE UPDATE: Force table to dynamically stretch and fill the exact bounds of its 2x2 GridSpec slot
+        vector_table = ax_table.table(
+            cellText=table_content,
+            loc='center',
+            cellLoc='center',
+            colWidths=[0.55, 0.45],
+            bbox=[0.0, 0.0, 1.0, 0.95]
+        )
         vector_table.auto_set_font_size(False)
+        vector_table.set_fontsize(12)
 
-        # INCREASED TABLE FONT AND SCALE HERE
-        vector_table.set_fontsize(13)
-        vector_table.scale(1.0, 2.2)
-
-        plt.tight_layout(rect=[0, 0.04, 1, 0.96])
+        plt.tight_layout(rect=[0, 0.05, 1, 0.95])
 
         b_color = 'lightgray' if r_sq_is_na else 'palegreen' if r_sq >= 0.95 else 'moccasin' if r_sq >= 0.85 else 'lightcoral'
         banner_text = f"Vector Correlation Check: {'N/A' if r_sq_is_na else f'{r_sq:.4f}'}"
-        fig.text(0.5, 0.025, banner_text, ha='center', va='center', fontsize=22, weight='bold',
+        fig.text(0.5, 0.03, banner_text, ha='center', va='center', fontsize=22, weight='bold',
                  bbox=dict(facecolor=b_color, edgecolor='black', boxstyle='round,pad=0.5', alpha=0.9))
 
         plt.savefig(tmp_dir / f"{v1}_comparison.png", dpi=100)
