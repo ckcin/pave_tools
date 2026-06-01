@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-ARCHIVE-PAVE: Workspace Cleanup Utility
-=======================================
-VERSION: 1.1.5 (Glance Reports Cleanup)
+PAVE-ARCHIVER: Workspace Cleanup Utility
+========================================
+VERSION: 1.2.0 (Standardized Operational Architecture)
 """
 
 import os
@@ -24,7 +24,6 @@ def clean_glance_reports(path, log):
     Checks for an existing glance_reports.tar.gz. If found, verifies it
     contains the same number of files as the source directory before deleting the directory.
     """
-    # Determine if the user pointed at the workspace root or the glance_reports folder directly
     if path.name == "glance_reports":
         glance_dir = path
         tar_path = path.parent / "glance_reports.tar.gz"
@@ -66,7 +65,6 @@ def run_archive(folder_path, log):
         log.warn(f"Path does not exist: {path}")
         return
 
-    # Explicit Guard: Do not process forbidden folders directly
     if path.name in FORBIDDEN_FOLDERS:
         log.info(f"Access Denied: Folder '{path.name}' is immune to archival.")
         return
@@ -79,7 +77,6 @@ def run_archive(folder_path, log):
         for target in sub_targets:
             perform_compression(target, log)
     else:
-        # Otherwise, just process the single directory provided
         perform_compression(path, log)
 
 def perform_compression(path, log):
@@ -136,7 +133,7 @@ def perform_compression(path, log):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        prog="archive_pave.py",
+        prog="pave_archiver.py",
         description="Compress PAVE data folders. Ignores stats and ip_data."
     )
     parser.add_argument("path", help="Path to a PAVE workspace root or a specific folder")
@@ -152,11 +149,9 @@ def main():
 
     path = Path(args.path).resolve()
 
-    # Run the Glance Cleanup if the flag was provided
     if args.clean_glance:
         clean_glance_reports(path, log)
 
-    # Proceed with the normal archival process
     run_archive(path, log)
 
 if __name__ == "__main__":
