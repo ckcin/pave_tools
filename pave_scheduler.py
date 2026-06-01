@@ -2,7 +2,7 @@
 """
 PAVE: Continuous Background Scheduler
 =====================================
-VERSION: 2.31.0 (Relaxed Matching Flag Integration)
+VERSION: 2.33.0 (3-Hour Cryosphere Products Time Matching)
 
 SCHEDULING & LOAD BALANCING ARCHITECTURE:
 -----------------------------------------
@@ -41,6 +41,10 @@ SCHEDULING & LOAD BALANCING ARCHITECTURE:
    - G19 (12Z Data) executes during the 17:00Z slot alongside the G19 LSA block.
    - G18 (14Z Data) executes during the 21:00Z slot alongside the G18 LSA block.
 
+10. 3-Hour Cryosphere Matching:
+   - AICE and AITA are dynamically adjusted to target the closest 3-hourly
+     file timeline (00, 06, 09, 12, 18, 21) relative to the active slot window.
+
 OPERATIONAL BACKGROUND INVOCATIONS (nohup examples):
 ----------------------------------------------------
 1. Standard Background Operation with Auto-Dashboard Harvesting:
@@ -77,7 +81,7 @@ except ImportError:
     def setup_interrupt_handler(log=None): pass
 
 # --- SCHEDULE & ROTATION CONFIGURATION ---
-CYCLE_DAYS = 4              # Configurable rotation loop duration (e.g., 3, 4, 5 days)
+CYCLE_DAYS = 3
 ALLOWED_SLOTS = [1, 5, 9, 13, 17, 21]
 
 SLOT_TO_SAT = {
@@ -173,7 +177,6 @@ def run_pave(dsn, channels, hour_str, target_date, workspace_dir, pave_script, s
         channel_str = f"_{ch_tag}"
         folder_tag = f"_{ch_tag}"
 
-    # Track directory path using prefix, date, and tag matching pave.py specifications
     target_workspace_folder = os.path.join(workspace_dir, f"{dsn}_{timestamp}{folder_tag}")
 
     execution_time_str = get_now_utc().strftime("%Y%m%d_%H%M%S")
@@ -215,12 +218,9 @@ def execute_slot(workspace_dir, pave_script, log, dashboard_path=None, relax_mat
 
     log.info(f"--- PAVE AUTOMATION | Executing for: {target_date.strftime('%Y-%m-%d')} (DOY {target_date.strftime('%j')}) | Slot {hour_str}:00Z (G{target_sat}) ---")
 
-    # Array list to collect folder names that are created by pave.py
     active_workspaces = []
 
-    # ==========================================
-    # --- PERSISTENT MONITOR INJECTION (ACM) ---
-    # ==========================================
+    # Persistent Monitor Instance (ACM)
     try:
         folder = run_pave("ACM", None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, relax_match=relax_match)
         active_workspaces.append(folder)
@@ -236,6 +236,13 @@ def execute_slot(workspace_dir, pave_script, log, dashboard_path=None, relax_mat
                 for surf_dsn in ["LSA", "BRF"]:
                     folder = run_pave(surf_dsn, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, relax_match=relax_match)
                     active_workspaces.append(folder)
+            elif entry in ["AICE", "AITA"]:
+                # FEATURE UPDATE: Computes closest valid 3-hour timeline step (0,3,6,9,12,15,18,21)
+                closest_3hr = round(slot_hour / 3) * 3
+                ice_hour_str = f"{closest_3hr:02d}"
+                log.info(f"Syncing cryosphere product '{entry}' timeline to nearest 3-hour match: {ice_hour_str}0")
+                folder = run_pave(entry, None, ice_hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, relax_match=relax_match)
+                active_workspaces.append(folder)
             elif entry == "RadiationGroup":
                 for rad_dsn in ["RSR", "DSR", "PAR", "SWR"]:
                     folder = run_pave(rad_dsn, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, relax_match=relax_match)
@@ -271,9 +278,7 @@ def execute_slot(workspace_dir, pave_script, log, dashboard_path=None, relax_mat
         except Exception as e:
             log.error(f"Task {entry} failed to execute: {e}")
 
-    # =========================================================================
-    # --- HARDCODED DAILY QUIRKS (Coupled to the closest subsequent LSA run) ---
-    # =========================================================================
+    # Daily Quirks
     if "SurfaceAlbedoGroup" in tasks:
         if slot_hour == 17:
             log.info("Triggering Daily Quirks (NBAR / BRDF) for G19 at 12Z (Closest post-generation LSA slot)...")
@@ -288,28 +293,36 @@ def execute_slot(workspace_dir, pave_script, log, dashboard_path=None, relax_mat
                 active_workspaces.append(folder)
     else:
         if slot_hour in [17, 21]:
-            log.info(f"Skipping Daily Quirks (NBAR / BRDF) for slot {hour_str}Z: SurfaceAlbedoGroup is not scheduled today in the {CYCLE_DAYS}-day DOY cycle.")
+            log.info(f"Skipping Daily Quirks (NBAR / BRDF) for slot {hour_str}Z: SurfaceAlbedoGroup is not scheduled today.")
 
-    # =========================================================================
+    valid_paths = [f for f in active_workspaces if os.path.isdir(f)]
+
     # --- AUTOMATED DASHBOARD HARVESTING TRIGGER ---
-    # =========================================================================
-    if dashboard_path and active_workspaces:
+    if dashboard_path and valid_paths:
         log.info("Evaluating generated folders for dashboard report aggregation...")
         dashboard_script = os.path.join(SCRIPT_DIR, "pave_dashboard.py")
+        dash_cmd = [sys.executable, dashboard_script] + valid_paths + ["--output", dashboard_path]
 
-        # Filter out folder entries that do not physically exist (e.g., if a task completely failed)
-        valid_paths = [f for f in active_workspaces if os.path.isdir(f)]
+        log.info(f"LAUNCHING AUTO-HARVEST SUITE: {' '.join(dash_cmd)}")
+        try:
+            subprocess.run(dash_cmd, cwd=workspace_dir)
+        except Exception as e:
+            log.error(f"Post-slot visual dashboard harvesting failed to execute: {e}")
 
-        if valid_paths:
-            # Construct command: python3 pave_dashboard.py [dir1] [dir2] ... -o [dashboard_path]
-            dash_cmd = [sys.executable, dashboard_script] + valid_paths + ["--output", dashboard_path]
-            log.info(f"LAUNCHING AUTO-HARVEST SUITE: {' '.join(dash_cmd)}")
+    # --- AUTOMATED WORKSPACE CLEANUP & ARCHIVAL TRIGGER ---
+    if valid_paths:
+        log.info("Evaluating processed folders for post-run compression cleanup...")
+        archiver_script = os.path.join(SCRIPT_DIR, "pave_archiver.py")
+
+        for workspace_folder in valid_paths:
+            arch_cmd = [sys.executable, archiver_script, workspace_folder]
+            log.info(f"LAUNCHING AUTO-ARCHIVER PASSTHROUGH: {' '.join(arch_cmd)}")
             try:
-                subprocess.run(dash_cmd, cwd=workspace_dir)
+                subprocess.run(arch_cmd, cwd=workspace_dir)
             except Exception as e:
-                log.error(f"Post-slot visual dashboard harvesting failed to execute: {e}")
-        else:
-            log.warn("No active output workspace directories were physically created during this slot cycle.")
+                log.error(f"Post-slot automated workspace archival cleanup failed for {os.path.basename(workspace_folder)}: {e}")
+    else:
+        log.warn("No active output workspace directories were physically created during this slot cycle. Archiver skipped.")
 
 def wait_for_next_slot(log):
     now = get_now_utc()
