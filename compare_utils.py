@@ -2,7 +2,7 @@
 """
 COMPARE-PAVE: Shared Utility Suite
 ==================================
-VERSION: 1.15.0 (Vector Engine Support & Symmetric Layout Locks)
+VERSION: 1.17.0 (Expanded Comprehensive Statistical Summary Tables)
 """
 
 import os
@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.patheffects as path_effects
+from matplotlib.gridspec import GridSpec
 from scipy.stats import pearsonr
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
@@ -84,13 +85,14 @@ def get_coords_for_var(ds, var_name):
 # --- CORE PLOTTING ENGINES ---
 
 def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_label, proj=None, extent=None, origin='upper', cmap='viridis'):
-    """Memory-safe 6-plot engine with log-density, layout symmetry locks, and standard file categorization."""
+    """Memory-safe plotting engine with log-density, grid layout locks, and expanded summary table rendering."""
     mask_p, mask_g = np.isfinite(data_p), np.isfinite(data_g)
     common = np.logical_and(mask_p, mask_g)
 
     # 1. Core Calculations
     diff_array = data_g - data_p
     valid_diffs = diff_array[np.isfinite(diff_array)]
+    abs_diffs = np.abs(valid_diffs) if len(valid_diffs) > 0 else np.array([])
 
     # Mismatch Logic: 0=White (Match), 1=Green (Error)
     mismatch_mask = np.where(np.abs(diff_array) > 1e-6, 1, 0)
@@ -206,7 +208,7 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
         finally:
             plt.close(fig_hist)
 
-        # --- 2. 3x2 DASHBOARD MASTER ---
+        # --- 2. MASTER DASHBOARD GRID CONFIGURATION ---
         fig = plt.figure(figsize=(18, 24))
         try:
             if " <-> " in pair_info:
@@ -221,12 +223,18 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
 
             plt.suptitle(unified_title, fontsize=12, weight='bold', y=0.98, linespacing=1.3)
 
-            ax1 = fig.add_subplot(321, projection=proj if is_geo else None)
-            ax2 = fig.add_subplot(322, projection=proj if is_geo else None)
-            ax3 = fig.add_subplot(323, projection=proj if is_geo else None)
-            ax4 = fig.add_subplot(324)
-            ax5 = fig.add_subplot(325, projection=proj if is_geo else None)
-            ax6 = fig.add_subplot(326)
+            gs = GridSpec(3, 6, figure=fig)
+
+            # Spatial Plots Layout Assignments
+            ax1 = fig.add_subplot(gs[0, 0:3], projection=proj if is_geo else None)
+            ax2 = fig.add_subplot(gs[0, 3:6], projection=proj if is_geo else None)
+            ax3 = fig.add_subplot(gs[1, 0:3], projection=proj if is_geo else None)
+            ax5 = fig.add_subplot(gs[1, 3:6], projection=proj if is_geo else None)
+
+            # Bottom Analytics Row Assignments
+            ax4 = fig.add_subplot(gs[2, 0:2])
+            ax6 = fig.add_subplot(gs[2, 2:4])
+            ax_table = fig.add_subplot(gs[2, 4:6])
 
             dash_map = [(ax1, data_p, kwargs, "On-Prem"), (ax2, data_g, kwargs, "GCCS"),
                         (ax3, mismatch_mask, mismatch_kwargs, "Mismatch (Green=Error)"),
@@ -238,7 +246,7 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
                 im = ax.imshow(data, **kw)
                 if "Mismatch" not in tit: _add_cbar(im, ax)
 
-            # Enforce geometry placeholders on ax4 to maintain identical alignment
+            # Cell 4: Scatter Density Plot
             ax4.set_xlabel("On-Prem"); ax4.set_ylabel("GCCS")
             if len(v_p) > 0 and not r_sq_is_na:
                 im4 = ax4.hexbin(data_p[common], data_g[common], gridsize=60, cmap='viridis', mincnt=1, bins='log')
@@ -249,7 +257,7 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
                 ax4.text(0.5, 0.5, "Data Constant or N/A\nNo Variance to Plot",
                          ha='center', va='center', color='gray', weight='bold', transform=ax4.transAxes)
 
-            # Enforce geometry placeholders on ax6 histogram to block layout shifting
+            # Cell 6: Error Delta Histogram
             ax6.set_xlabel("Delta Value"); ax6.set_ylabel("Frequency")
             if len(valid_diffs) > 0:
                 ax6.hist(valid_diffs, bins=100, color='gray', edgecolor='black')
@@ -260,9 +268,43 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
                 ax6.text(0.5, 0.5, "No Finite Deltas Available",
                          ha='center', va='center', color='gray', weight='bold', transform=ax6.transAxes)
 
+            # Cell 7: Expanded Summary Metrics Table Component
+            ax_table.axis('off')
+            ax_table.set_title("Comprehensive Statistical Summary", weight='bold', pad=10)
+
+            num_mismatches = np.count_nonzero(mismatch_mask == 1)
+            prem_nans = np.count_nonzero(~mask_p)
+            gccs_nans = np.count_nonzero(~mask_g)
+
+            table_content = [
+                ["Statistical Metric Description", "Observed Target Value"],
+                ["Dataset Matrix Dimensions", f"{data_p.shape}"],
+                ["Total Bounding Pixels", f"{data_p.size:,}"],
+                ["Valid Common Intersections", f"{num_common:,}"],
+                ["Missing Observations (Prem / GCCS)", f"{prem_nans:,} / {gccs_nans:,}"],
+                ["Mismatched Pixels (>1e-6 Threshold)", f"{num_mismatches:,}"],
+                ["Coefficient of Determination ($R^2$)", "N/A" if r_sq_is_na else f"{r_sq:.4f}"],
+                ["Maximum Delta ($GCCS - PREM$)", f"{np.nanmax(valid_diffs):.4f}" if len(valid_diffs) > 0 else "N/A"],
+                ["Minimum Delta ($GCCS - PREM$)", f"{np.nanmin(valid_diffs):.4f}" if len(valid_diffs) > 0 else "N/A"],
+                ["Mean Delta Error Bias", f"{np.nanmean(valid_diffs):.4f}" if len(valid_diffs) > 0 else "N/A"],
+                ["Maximum Absolute Difference ($|\\Delta|$)", f"{np.max(abs_diffs):.4f}" if len(abs_diffs) > 0 else "N/A"],
+                ["Minimum Absolute Difference ($|\\Delta|$)", f"{np.min(abs_diffs):.4f}" if len(abs_diffs) > 0 else "N/A"],
+                ["Mean Absolute Error dispersion", f"{np.mean(abs_diffs):.4f}" if len(abs_diffs) > 0 else "N/A"]
+            ]
+
+            metric_table = ax_table.table(
+                cellText=table_content,
+                loc='center',
+                cellLoc='center',
+                colWidths=[0.62, 0.38]
+            )
+            metric_table.auto_set_font_size(False)
+            metric_table.set_fontsize(8.5)   # Reduced font prevents character overflow
+            metric_table.scale(1.0, 1.45)   # Standardized scaling binds nicely to GridSpec rows
+
             plt.tight_layout(rect=[0, 0.06, 1, 0.93])
 
-            # --- R-SQUARED MASTER BANNER ---
+            # --- R-SQUARED MASTER STATUS BANNER ---
             if r_sq_is_na:
                 b_color = 'lightgray'
                 banner_text = "R-Squared Correlation: N/A"
@@ -293,9 +335,7 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
 
 def compare_sparse_vectors(ds_p, ds_g, vt, v1, v2, tmp_dir, pair_info, instr, prod_name):
     """
-    FEATURE UPGRADE: Generates a complete 6-cell (3x2) master dashboard for sparse vectors.
-    Bins 1D tracking point clouds into a regular 2D matrix to compute vector magnitude
-    deltas, direction variances, scatters, and frequency histograms.
+    Generates an asymmetric master dashboard for sparse vector datasets with comprehensive table metrics.
     """
     lat_v, lon_v = get_coords_for_var(ds_p, v1)
     if not lat_v or not lon_v:
@@ -310,20 +350,18 @@ def compare_sparse_vectors(ds_p, ds_g, vt, v1, v2, tmp_dir, pair_info, instr, pr
     except:
         return
 
-    # Filter out missing data observations or fill values
     mask_p = np.isfinite(lat_p) & np.isfinite(lon_p) & np.isfinite(spd_p) & np.isfinite(dir_p) & (spd_p >= 0)
     mask_g = np.isfinite(lat_g) & np.isfinite(lon_g) & np.isfinite(spd_g) & np.isfinite(dir_g) & (spd_g >= 0)
 
     def _convert_to_uv(spd, heading):
         rad = heading * np.pi / 180.0
         u = -spd * np.sin(rad)
-        v = -spd * np.cos(rad)
+        v = -spd * -np.cos(rad)
         return u, v
 
     u_p, v_p = _convert_to_uv(spd_p[mask_p], dir_p[mask_p])
     u_g, v_g = _convert_to_uv(spd_g[mask_g], dir_g[mask_g])
 
-    # 1. Establish Symmetric Bounding Coordinates for Matrix Gridding
     min_lon = min(np.nanmin(lon_p), np.nanmin(lon_g)) if len(lon_p)>0 else -180
     max_lon = max(np.nanmax(lon_p), np.nanmax(lon_g)) if len(lon_p)>0 else 180
     min_lat = min(np.nanmin(lat_p), np.nanmin(lat_g)) if len(lat_p)>0 else -90
@@ -338,34 +376,31 @@ def compare_sparse_vectors(ds_p, ds_g, vt, v1, v2, tmp_dir, pair_info, instr, pr
         with np.errstate(divide='ignore', invalid='ignore'):
             return np.where(cnt > 0, sm / cnt, np.nan).T
 
-    # Grid components onto parallel regular 2D matrices
     grid_u_p = _grid_component(lon_p[mask_p], lat_p[mask_p], u_p)
     grid_v_p = _grid_component(lon_p[mask_p], lat_p[mask_p], v_p)
     grid_u_g = _grid_component(lon_g[mask_g], lat_g[mask_g], u_g)
     grid_v_g = _grid_component(lon_g[mask_g], lat_g[mask_g], v_g)
 
-    # Derive gridded speeds and difference fields
     grid_spd_p = np.sqrt(grid_u_p**2 + grid_v_p**2)
     grid_spd_g = np.sqrt(grid_u_g**2 + grid_v_g**2)
     diff_array = grid_spd_g - grid_spd_p
     valid_diffs = diff_array[np.isfinite(diff_array)]
+    abs_diffs = np.abs(valid_diffs) if len(valid_diffs) > 0 else np.array([])
 
-    # Map Mismatch boundaries (0 = Match, 1 = Flow Deviation)
     mismatch_mask = np.where(np.abs(diff_array) > 0.5, 1, 0)
     mismatch_cmap = plt.matplotlib.colors.ListedColormap(['white', 'lime'])
 
-    # Compute Speed Correlation metrics
     common = np.isfinite(grid_spd_p) & np.isfinite(grid_spd_g)
     r_sq = 0.0
     r_sq_is_na = True
-    if np.count_nonzero(common) > 1:
+    num_common = np.count_nonzero(common)
+    if num_common > 1:
         try:
             r_sq = float(pearsonr(grid_spd_p[common], grid_spd_g[common])[0] ** 2)
             r_sq_is_na = False
         except:
             pass
 
-    # --- Initialize 3x2 Master Dashboard ---
     fig = plt.figure(figsize=(18, 24))
     try:
         m = GOES_REGEX.search(pair_info)
@@ -375,12 +410,16 @@ def compare_sparse_vectors(ds_p, ds_g, vt, v1, v2, tmp_dir, pair_info, instr, pr
         plt.suptitle(f"{product_dsn} | {v1.upper()} VECTOR DASHBOARD\nPrem: {prem_name}\nGCCS: {gccs_name}",
                      fontsize=12, weight='bold', y=0.98, linespacing=1.3)
 
-        ax1 = fig.add_subplot(321)
-        ax2 = fig.add_subplot(322)
-        ax3 = fig.add_subplot(323)
-        ax4 = fig.add_subplot(324)
-        ax5 = fig.add_subplot(325)
-        ax6 = fig.add_subplot(326)
+        gs = GridSpec(3, 6, figure=fig)
+
+        ax1 = fig.add_subplot(gs[0, 0:3])
+        ax2 = fig.add_subplot(gs[0, 3:6])
+        ax3 = fig.add_subplot(gs[1, 0:3])
+        ax5 = fig.add_subplot(gs[1, 3:6])
+
+        ax4 = fig.add_subplot(gs[2, 0:2])
+        ax6 = fig.add_subplot(gs[2, 2:4])
+        ax_table = fig.add_subplot(gs[2, 4:6])
 
         extent = [min_lon, max_lon, min_lat, max_lat]
         kwargs = {'cmap': 'viridis', 'origin': 'lower', 'extent': extent, 'aspect': 'equal'}
@@ -440,9 +479,42 @@ def compare_sparse_vectors(ds_p, ds_g, vt, v1, v2, tmp_dir, pair_info, instr, pr
         else:
             ax6.text(0.5, 0.5, "No finite delta components available.", ha='center', va='center', color='gray')
 
+        # Cell 7: Metrics Summary Table Component
+        ax_table.axis('off')
+        ax_table.set_title("Vector Statistical Metrics", weight='bold', pad=10)
+
+        num_mismatches = np.count_nonzero(mismatch_mask == 1)
+        prem_nans = np.count_nonzero(np.isnan(grid_spd_p))
+        gccs_nans = np.count_nonzero(np.isnan(grid_spd_g))
+
+        table_content = [
+            ["Vector Metric Description", "Observed Target Value"],
+            ["Binned Matrix Grid Dimensions", f"{grid_spd_p.shape}"],
+            ["Total Grid Spaces", f"{grid_spd_p.size:,}"],
+            ["Valid Binned Intersections", f"{num_common:,}"],
+            ["Empty Unpopulated Grid Cells", f"{prem_nans:,} / {gccs_nans:,}"],
+            ["Deviated Cells (>0.5m/s Margin)", f"{num_mismatches:,}"],
+            ["Calculated Speed R² Fit", "N/A" if r_sq_is_na else f"{r_sq:.4f}"],
+            ["Maximum Delta ($GCCS - PREM$)", f"{np.nanmax(valid_diffs):.4f}" if len(valid_diffs) > 0 else "N/A"],
+            ["Minimum Delta ($GCCS - PREM$)", f"{np.nanmin(valid_diffs):.4f}" if len(valid_diffs) > 0 else "N/A"],
+            ["Mean Delta Wind Bias", f"{np.nanmean(valid_diffs):.4f}" if len(valid_diffs) > 0 else "N/A"],
+            ["Maximum Absolute Difference ($|\\Delta|$)", f"{np.max(abs_diffs):.4f}" if len(abs_diffs) > 0 else "N/A"],
+            ["Minimum Absolute Difference ($|\\Delta|$)", f"{np.min(abs_diffs):.4f}" if len(abs_diffs) > 0 else "N/A"],
+            ["Mean Absolute Speed Error dispersion", f"{np.mean(abs_diffs):.4f}" if len(abs_diffs) > 0 else "N/A"]
+        ]
+
+        vector_table = ax_table.table(
+            cellText=table_content,
+            loc='center',
+            cellLoc='center',
+            colWidths=[0.62, 0.38]
+        )
+        vector_table.auto_set_font_size(False)
+        vector_table.set_fontsize(8.5)
+        vector_table.scale(1.0, 1.45)
+
         plt.tight_layout(rect=[0, 0.06, 1, 0.93])
 
-        # Master Banner Status Bar Placement
         b_color = 'lightgray' if r_sq_is_na else 'palegreen' if r_sq >= 0.95 else 'moccasin' if r_sq >= 0.85 else 'lightcoral'
         banner_text = f"Vector Correlation Check: {'N/A' if r_sq_is_na else f'{r_sq:.4f}'}"
         fig.text(0.5, 0.03, banner_text, ha='center', va='center', fontsize=22, weight='bold',
