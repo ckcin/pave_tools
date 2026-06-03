@@ -2,56 +2,44 @@
 """
 PAVE: Continuous Background Scheduler
 =====================================
-VERSION: 2.33.0 (3-Hour Cryosphere Products Time Matching)
+VERSION: 2.34.0 (Same-Day Execution with 2-Hour Prep Delay)
 
 SCHEDULING & LOAD BALANCING ARCHITECTURE:
 -----------------------------------------
-1. Alternating Satellite Slots:
-   - G19 executes at: 01:00Z, 09:00Z, 17:00Z
-   - G18 executes at: 05:00Z, 13:00Z, 21:00Z
+1. Alternating Satellite Slots (Data Target Hours):
+   - G19 evaluates data for: 01:00Z, 09:00Z, 17:00Z
+   - G18 evaluates data for: 05:00Z, 13:00Z, 21:00Z
 
-2. Persistent Monitor (ACM):
+2. Execution Delay (+2 Hours):
+   - To accommodate upstream data preparation, the scheduler sleeps and
+     executes exactly 2 hours AFTER the target data slot (e.g., the 01Z
+     data slot physically executes at 03Z).
+
+3. Persistent Monitor (ACM):
    - Clear Sky Mask (ACM) executes at the start of EVERY time slot to guarantee
      baseline masking verification remains continuously active.
 
-3. True Load Balancing (The Configurable DOY Cycle):
+4. True Load Balancing (The Configurable DOY Cycle):
    - Core product combinations are divided by a rolling Day-of-Year scalar.
    - Algorithm: `(product_index + daily_slot_index) % CYCLE_DAYS == (DOY % CYCLE_DAYS)`
 
-4. Dependent Triggers (Rad, CMIP, & DMW):
+5. Dependent Triggers (Rad, CMIP, & DMW):
    - 'RadCMIP' handles radiance and cloud pairs.
    - Cascades to run 'DMW' (Channels 2, 7, 8, 9, 10) and 'DMWV' (Channel 8).
 
-5. Radiation Product Coupling:
-   - RSR, DSR, PAR, and SWR are combined into a single logical "RadiationGroup".
+6. Group Groupings:
+   - RadiationGroup: RSR, DSR, PAR, SWR
+   - SoundingGroup: LVMP, LVTP, DSI, TPW, LSP
+   - CloudGroup: ACH, ACT, CTP, ECBH, EOCH, COD, CPS, CCL
+   - SurfaceAlbedoGroup: LSA, BRF
 
-6. Thermodynamic Sounding Coupling:
-   - LVMP, LVTP, DSI, TPW, and LSP are combined into a single "SoundingGroup".
-
-7. Unified Cloud Product Coupling:
-   - All cloud physical parameters (macro, micro, enterprise heights, and convective structure)
-     are bound tightly under a single rotating execution sequence.
-   - Group items: ACH, ACT, CTP, ECBH, EOCH, COD, CPS, CCL
-
-8. Surface Albedo & Reflectance Coupling:
-   - LSA (Land Surface Albedo) and BRF (Bidirectional Reflectance Factor) are bound
-     into a shared "SurfaceAlbedoGroup" to force simultaneous batch slot execution.
-
-9. Daily Quirks Coupled to Closest Subsequent LSA Runs:
+7. Daily Quirks Coupled to Closest Subsequent LSA Runs:
    - G19 (12Z Data) executes during the 17:00Z slot alongside the G19 LSA block.
    - G18 (14Z Data) executes during the 21:00Z slot alongside the G18 LSA block.
 
-10. 3-Hour Cryosphere Matching:
+8. 3-Hour Cryosphere Matching:
    - AICE and AITA are dynamically adjusted to target the closest 3-hourly
      file timeline (00, 06, 09, 12, 18, 21) relative to the active slot window.
-
-OPERATIONAL BACKGROUND INVOCATIONS (nohup examples):
-----------------------------------------------------
-1. Standard Background Operation with Auto-Dashboard Harvesting:
-   nohup python3 pave_scheduler.py --workspace /path/to/work --dashboard /path/to/archive > scheduler.log 2>&1 &
-
-2. Relaxed Matching Background Operation:
-   nohup python3 pave_scheduler.py --workspace /path/to/work --relax-match > scheduler.log 2>&1 &
 """
 
 import argparse
@@ -82,7 +70,8 @@ except ImportError:
 
 # --- SCHEDULE & ROTATION CONFIGURATION ---
 CYCLE_DAYS = 3
-ALLOWED_SLOTS = [1, 5, 9, 13, 17, 21]
+ALLOWED_SLOTS = [1, 5, 9, 13, 17, 21]  # The nominal DATA hours
+EXEC_DELAY_HOURS = 2                   # Hours to wait before running the slot
 
 SLOT_TO_SAT = {
     1: "19",
@@ -102,22 +91,18 @@ RAW_PRODUCTS = [
     "MCMIP",
     "ADP",    "AOD",
     "FDC",    "FSC",    "LST",
-    "SurfaceAlbedoGroup",       # Combined items: LSA, BRF
     "RRQPE",  "SST",    "AICE",   "AITA",
     "ESC",    "ESU",    "ETE",
+    "SurfaceAlbedoGroup",       # Combined items: LSA, BRF
     "RadiationGroup",           # Group items: RSR, DSR, PAR, SWR
     "SoundingGroup",            # Group items: LVMP, LVTP, DSI, TPW, LSP
-    "CloudGroup"                # Group items: ACH, ACT, CTP, ECBH, EOCH, COD, CPS, CCL
+    "CloudGroup",               # Group items: ACH, ACT, CTP, ECBH, EOCH, COD, CPS, CCL
 ]
 
 def get_now_utc():
     return datetime.datetime.now(datetime.timezone.utc)
 
 def get_slot_tasks(target_date, slot_hour):
-    """
-    Distributes products so EVERY product group runs at EVERY time slot exactly once
-    during the configurable rolling day-of-year loop.
-    """
     julian_day = int(target_date.strftime('%j'))
     cycle_day = julian_day % CYCLE_DAYS
 
@@ -133,7 +118,6 @@ def get_slot_tasks(target_date, slot_hour):
     return scheduled
 
 def wait_until_pave_finishes(log):
-    """Ensures no other pave.py instance is running before launching."""
     cmd = "ps aux | grep '[p]ave.py' | grep -v 'pave_scheduler.py'"
     first_wait = True
     while True:
@@ -150,7 +134,6 @@ def wait_until_pave_finishes(log):
             break
 
 def run_pave(dsn, channels, hour_str, target_date, workspace_dir, pave_script, sat, log, relax_match=False):
-    """Executes the pave.py call and returns the targeted execution folder path."""
     timestamp = f"{target_date.year}{target_date.strftime('%j')}{hour_str}0"
 
     log_dir = os.path.join(workspace_dir, "logs")
@@ -193,30 +176,39 @@ def run_pave(dsn, channels, hour_str, target_date, workspace_dir, pave_script, s
     return target_workspace_folder
 
 def execute_slot(workspace_dir, pave_script, log, dashboard_path=None, relax_match=False, time_slot=None):
-    """Executes jobs for the specified slot, targeting yesterday's data."""
-    target_date = get_now_utc() - datetime.timedelta(days=1)
-    target_day_idx = target_date.weekday()
-
-    if target_day_idx in [4, 5]:
-        log.info("Target day (Yesterday) was a Friday/Saturday. Standby.")
-        return
+    now = get_now_utc()
 
     if time_slot is not None:
         slot_hour = time_slot
+        target_date = now
     else:
-        current_hour = get_now_utc().hour
-        slot_hour = ALLOWED_SLOTS[-1]
-        for h in reversed(ALLOWED_SLOTS):
-            if current_hour >= h:
-                slot_hour = h
-                break
+        # FEATURE UPDATE: Maps current time to the most recently passed +2 Hour Execution Window
+        candidate_triggers = []
+        for d in [now - datetime.timedelta(days=1), now]:
+            for h in ALLOWED_SLOTS:
+                exec_h = h + EXEC_DELAY_HOURS
+                trigger_time = d.replace(hour=exec_h, minute=0, second=0, microsecond=0)
+                candidate_triggers.append((d, h, trigger_time))
+
+        valid_triggers = [item for item in candidate_triggers if item[2] <= now]
+        latest_date, latest_data_hour, latest_trigger_time = valid_triggers[-1]
+
+        target_date = latest_date
+        slot_hour = latest_data_hour
+
+    target_day_idx = target_date.weekday()
+
+    # Weekends (5=Saturday, 6=Sunday) are skipped
+    if target_day_idx in [5, 6]:
+        log.info("Target day is a Weekend (Saturday/Sunday). Standby.")
+        return
 
     hour_str = f"{slot_hour:02d}"
     target_sat = SLOT_TO_SAT[slot_hour]
 
     tasks = get_slot_tasks(target_date, slot_hour)
 
-    log.info(f"--- PAVE AUTOMATION | Executing for: {target_date.strftime('%Y-%m-%d')} (DOY {target_date.strftime('%j')}) | Slot {hour_str}:00Z (G{target_sat}) ---")
+    log.info(f"--- PAVE AUTOMATION | Executing for: {target_date.strftime('%Y-%m-%d')} (DOY {target_date.strftime('%j')}) | Data Slot {hour_str}:00Z (G{target_sat}) ---")
 
     active_workspaces = []
 
@@ -237,7 +229,6 @@ def execute_slot(workspace_dir, pave_script, log, dashboard_path=None, relax_mat
                     folder = run_pave(surf_dsn, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, relax_match=relax_match)
                     active_workspaces.append(folder)
             elif entry in ["AICE", "AITA"]:
-                # FEATURE UPDATE: Computes closest valid 3-hour timeline step (0,3,6,9,12,15,18,21)
                 closest_3hr = round(slot_hour / 3) * 3
                 ice_hour_str = f"{closest_3hr:02d}"
                 log.info(f"Syncing cryosphere product '{entry}' timeline to nearest 3-hour match: {ice_hour_str}0")
@@ -325,22 +316,19 @@ def execute_slot(workspace_dir, pave_script, log, dashboard_path=None, relax_mat
         log.warn("No active output workspace directories were physically created during this slot cycle. Archiver skipped.")
 
 def wait_for_next_slot(log):
+    """Calculates the sleep offset to the next true +2 execution hour."""
     now = get_now_utc()
-    current_hour = now.hour
+    candidate_triggers = []
 
-    next_hour = None
-    for h in ALLOWED_SLOTS:
-        if h > current_hour:
-            next_hour = h
-            break
+    for d in [now, now + datetime.timedelta(days=1)]:
+        for h in ALLOWED_SLOTS:
+            exec_h = h + EXEC_DELAY_HOURS
+            candidate_triggers.append(d.replace(hour=exec_h, minute=0, second=0, microsecond=0))
 
-    if next_hour is None:
-        next_time = (now + datetime.timedelta(days=1)).replace(hour=ALLOWED_SLOTS[0], minute=0, second=0, microsecond=0)
-    else:
-        next_time = now.replace(hour=next_hour, minute=0, second=0, microsecond=0)
+    next_trigger = next(t for t in candidate_triggers if t > now)
 
-    sleep_seconds = (next_time - now).total_seconds()
-    log.info(f"Sleeping for {sleep_seconds/3600:.2f} hours until {next_time.strftime('%H:%M:%S')} UTC...")
+    sleep_seconds = (next_trigger - now).total_seconds()
+    log.info(f"Sleeping for {sleep_seconds/3600:.2f} hours until the next execution window at {next_trigger.strftime('%H:%M:%S')} UTC...")
     time.sleep(sleep_seconds)
 
 if __name__ == "__main__":
@@ -394,6 +382,7 @@ if __name__ == "__main__":
     log.info(f"  PAVE Script:   {abs_pave_script}")
     log.info(f"  Workspace Dir: {abs_workspace}")
     log.info(f"  Rotation Loop: {CYCLE_DAYS} Days (DOY-Anchored)")
+    log.info(f"  Execution:     Same-Day Target (+{EXEC_DELAY_HOURS}hr Delay)")
     if args.relax_match:
         log.info("  Matching Mode: RELAXED (Start-Time '_s' Anchor Only)")
     if args.dashboard:
