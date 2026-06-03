@@ -2,7 +2,7 @@
 """
 PAVE-ARCHIVER: Workspace Cleanup Utility
 ========================================
-VERSION: 1.2.0 (Standardized Operational Architecture)
+VERSION: 1.5.0 (Optional Validation Cleanup Flag)
 """
 
 import os
@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 from pave_utils import Logger, setup_interrupt_handler
 
-# Folders we are allowed to compress and delete
+# Folders we are allowed to compress and delete natively
 TARGET_FOLDERS = ["gccs", "prem", "glance", "collocation", "coll"]
 
 # Folders explicitly immune to archival/deletion
@@ -58,7 +58,7 @@ def clean_glance_reports(path, log):
     except Exception as e:
         log.warn(f"Validation process failed for {tar_path.name}: {e}")
 
-def run_archive(folder_path, log):
+def run_archive(folder_path, log, clean_validation=False):
     path = Path(folder_path).resolve()
 
     if not path.exists():
@@ -69,8 +69,13 @@ def run_archive(folder_path, log):
         log.info(f"Access Denied: Folder '{path.name}' is immune to archival.")
         return
 
+    # Dynamically build the authorized targets list
+    active_targets = TARGET_FOLDERS.copy()
+    if clean_validation:
+        active_targets.append("validation")
+
     # Check if the path is a PAVE root (contains multiple targets)
-    sub_targets = [d for d in path.iterdir() if d.is_dir() and d.name in TARGET_FOLDERS]
+    sub_targets = [d for d in path.iterdir() if d.is_dir() and d.name in active_targets]
 
     if sub_targets:
         log.info(f"Detected PAVE Workspace at {path.name}. Processing {len(sub_targets)} potential targets.")
@@ -138,6 +143,8 @@ def parse_args():
     )
     parser.add_argument("path", help="Path to a PAVE workspace root or a specific folder")
     parser.add_argument("--clean-glance", action="store_true", help="Verify and remove glance_reports folder if a matching tar.gz exists")
+    parser.add_argument("--clean-validation", action="store_true", help="Include the 'validation' folder in the archival compression sweep")
+
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("-q", "--quiet", action="store_true")
     return parser.parse_args()
@@ -152,7 +159,7 @@ def main():
     if args.clean_glance:
         clean_glance_reports(path, log)
 
-    run_archive(path, log)
+    run_archive(path, log, clean_validation=args.clean_validation)
 
 if __name__ == "__main__":
     main()
