@@ -2,7 +2,7 @@
 """
 COMPARE-PAVE: Shared Utility Suite
 ==================================
-VERSION: 1.29.0 (Wind Barbs, 1D Tracks, & Cartopy Matrix Binning)
+VERSION: 1.35.0 (Bitset Dimension Collapse & Colormap Quantization)
 """
 
 import os
@@ -15,7 +15,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.patheffects as path_effects
 from matplotlib.gridspec import GridSpec
-from scipy.stats import pearsonr
+from scipy.stats import pearsonr, binned_statistic_2d
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 # 1. Suppress specific Cartopy facecolor warnings
@@ -42,19 +42,16 @@ GOES_REGEX = re.compile(r"OR_(?P<dsn>.*?)_(?P<sat>G1[89]).*?s(?P<start>\d{14})")
 # --- MATCHING & IDENTITY KEYS ---
 
 def get_start_end_key(filename):
-    """Extracts start/end timestamps for pairing files."""
     match = re.search(r"(_s\d{14,}.*?)(?:\.nc|$)", filename)
     return match.group(1) if match else filename
 
 def get_identity_start_key(filename):
-    """Extracts product identity and start time for soft matching."""
     match = re.search(r"^(.*?_s\d{14})", filename)
     return match.group(1) if match else filename
 
 # --- GEOSPATIAL & VISUAL UTILS ---
 
 def get_suvi_cmap(prod_name):
-    """Maps SUVI channels to specific solar physics colormaps."""
     name = prod_name.lower()
     if HAS_SUNPY:
         if 'fe093' in name: return 'sdoaia94'
@@ -72,7 +69,6 @@ def get_suvi_cmap(prod_name):
     return 'hot'
 
 def get_coords_for_var(ds, var_name):
-    """Identifies lat/lon coordinate variables for non-projected data."""
     prefix = var_name.split('_')[0] + '_' if '_' in var_name else ''
     if f"{prefix}lat" in ds.variables and f"{prefix}lon" in ds.variables:
         return f"{prefix}lat", f"{prefix}lon"
@@ -82,23 +78,38 @@ def get_coords_for_var(ds, var_name):
     lon_v = next((v for v in ds.variables if 'lon' in v.lower()), None)
     return lat_v, lon_v
 
-def grid_sparse_component(lon, lat, val, lon_edges, lat_edges):
-    """Helper method to bin sparse 1D clouds into 2D matrices."""
-    cnt, _, _ = np.histogram2d(lon, lat, bins=[lon_edges, lat_edges])
-    sm, _, _ = np.histogram2d(lon, lat, bins=[lon_edges, lat_edges], weights=val)
-    with np.errstate(divide='ignore', invalid='ignore'):
-        return np.where(cnt > 0, sm / cnt, np.nan).T
+def grid_sparse_component(lon, lat, val, lon_edges, lat_edges, is_bitset=False):
+    if is_bitset:
+        grid, _, _, _ = binned_statistic_2d(lon, lat, val, statistic='max', bins=[lon_edges, lat_edges])
+        return grid.T
+    else:
+        cnt, _, _ = np.histogram2d(lon, lat, bins=[lon_edges, lat_edges])
+        sm, _, _ = np.histogram2d(lon, lat, bins=[lon_edges, lat_edges], weights=val)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            return np.where(cnt > 0, sm / cnt, np.nan).T
 
 # --- CORE PLOTTING ENGINES ---
 
-def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_label, proj=None, extent=None, origin='upper', cmap='viridis'):
-    """Memory-safe plotting engine with horizontal grid layouts and bounding box filled tables."""
+def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_label, proj=None, extent=None, origin='upper', cmap='viridis', is_bitset=False):
+    """Memory-safe plotting engine with smart bitset collapse and colormap quantization."""
 
     data_p = np.squeeze(data_p)
     data_g = np.squeeze(data_g)
 
-    if data_p.ndim > 2: data_p = data_p[0, ...]
-    if data_g.ndim > 2: data_g = data_g[0, ...]
+    # FEATURE FIX: Smart Multi-Dimensional Collapse for Bitsets
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        while data_p.ndim > 2:
+            if data_p.shape[0] < data_p.shape[-1]:
+                data_p = np.nanmax(data_p, axis=0) if is_bitset else data_p[0, ...]
+            else:
+                data_p = np.nanmax(data_p, axis=-1) if is_bitset else data_p[..., 0]
+
+        while data_g.ndim > 2:
+            if data_g.shape[0] < data_g.shape[-1]:
+                data_g = np.nanmax(data_g, axis=0) if is_bitset else data_g[0, ...]
+            else:
+                data_g = np.nanmax(data_g, axis=-1) if is_bitset else data_g[..., 0]
 
     mask_p, mask_g = np.isfinite(data_p), np.isfinite(data_g)
     common = np.logical_and(mask_p, mask_g)
@@ -136,11 +147,33 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
     data_ratio = h / w if w > 0 else 1
     is_geo = HAS_CARTOPY and proj is not None
 
-    kwargs = {'cmap': cmap, 'aspect': 'equal', 'origin': origin}
+    kwargs = {'aspect': 'equal', 'origin': origin}
+
+    # FEATURE FIX: Quantize the continuous colormap into discrete blocks to prevent smearing
+    if is_bitset:
+        try:
+            kwargs['cmap'] = plt.get_cmap(cmap, 16)
+        except AttributeError:
+            kwargs['cmap'] = plt.cm.get_cmap(cmap, 16)
+        kwargs['interpolation'] = 'nearest'
+    else:
+        kwargs['cmap'] = cmap
+
+    # FEATURE FIX: Handle completely blank/NaN arrays caused by FillValue masking
     v_p, v_g = data_p[np.isfinite(data_p)], data_g[np.isfinite(data_g)]
     if len(v_p) > 0 and len(v_g) > 0:
-        kwargs['vmin'] = min(np.nanpercentile(v_p, 1), np.nanpercentile(v_g, 1))
-        kwargs['vmax'] = max(np.nanpercentile(v_p, 99), np.nanpercentile(v_g, 99))
+        if is_bitset or len(np.unique(v_p)) <= 25:
+            kwargs['vmin'] = min(np.nanmin(v_p), np.nanmin(v_g))
+            kwargs['vmax'] = max(np.nanmax(v_p), np.nanmax(v_g))
+        else:
+            kwargs['vmin'] = min(np.nanpercentile(v_p, 1), np.nanpercentile(v_g, 1))
+            kwargs['vmax'] = max(np.nanpercentile(v_p, 99), np.nanpercentile(v_g, 99))
+
+        if kwargs['vmin'] == kwargs['vmax']:
+            kwargs['vmin'] -= 0.1
+            kwargs['vmax'] += 0.1
+    else:
+        kwargs['vmin'], kwargs['vmax'] = 0, 1
 
     if len(valid_diffs) > 0:
         d_min, d_max = np.nanmin(valid_diffs), np.nanmax(valid_diffs)
@@ -149,6 +182,10 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
 
     diff_kwargs = {'cmap': 'viridis', 'aspect': 'equal', 'origin': origin, 'vmin': d_min, 'vmax': d_max}
     mismatch_kwargs = {'cmap': mismatch_cmap, 'origin': origin, 'vmin': 0, 'vmax': 1, 'aspect': 'equal'}
+
+    if is_bitset:
+        diff_kwargs['interpolation'] = 'nearest'
+        mismatch_kwargs['interpolation'] = 'nearest'
 
     if extent: kwargs['extent'] = diff_kwargs['extent'] = mismatch_kwargs['extent'] = extent
     if is_geo: kwargs['transform'] = diff_kwargs['transform'] = mismatch_kwargs['transform'] = proj
@@ -231,20 +268,16 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
 
             plt.suptitle(unified_title, fontsize=14, weight='bold', y=0.97, linespacing=1.3)
 
-            # Establish the balanced 2x8 workspace matrix block
             gs = GridSpec(2, 8, figure=fig)
 
-            # Row 1 (Top Layer) -> Prem, GCCS, Scatter
             ax1 = fig.add_subplot(gs[0, 0:2], projection=proj if is_geo else None)
             ax2 = fig.add_subplot(gs[0, 2:4], projection=proj if is_geo else None)
             ax4 = fig.add_subplot(gs[0, 4:6])
 
-            # Row 2 (Bottom Layer) -> Mismatch, Difference, Histogram
             ax3 = fig.add_subplot(gs[1, 0:2], projection=proj if is_geo else None)
             ax5 = fig.add_subplot(gs[1, 2:4], projection=proj if is_geo else None)
             ax6 = fig.add_subplot(gs[1, 4:6])
 
-            # Spanned Metrics Table Core (Far Right Boundary Columns)
             ax_table = fig.add_subplot(gs[0:2, 6:8])
 
             dash_map = [(ax1, data_p, kwargs, "On-Prem"), (ax2, data_g, kwargs, "GCCS"),
@@ -352,10 +385,7 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
 
 
 def execute_1d_scatter_dashboard(data_p, data_g, var, tmp_dir, pair_info):
-    """
-    Specialized rendering engine for raw 1D arrays (like DMW temperatures/heights).
-    Bypasses spatial maps entirely to provide pure statistical scatter and histogram analysis.
-    """
+    """Specialized rendering engine for raw 1D arrays."""
     mask_p, mask_g = np.isfinite(data_p), np.isfinite(data_g)
     common = np.logical_and(mask_p, mask_g)
     only_one_mask = np.logical_xor(mask_p, mask_g)
@@ -397,7 +427,7 @@ def execute_1d_scatter_dashboard(data_p, data_g, var, tmp_dir, pair_info):
         ax_hist = fig.add_subplot(gs[0, 1])
         ax_table = fig.add_subplot(gs[0, 2])
 
-        # 1. Scatter Plot
+        # Scatter Plot
         ax_scat.set_box_aspect(1)
         ax_scat.set_xlabel("On-Prem Values", fontsize=11); ax_scat.set_ylabel("GCCS Values", fontsize=11)
         if num_common > 0:
@@ -411,7 +441,7 @@ def execute_1d_scatter_dashboard(data_p, data_g, var, tmp_dir, pair_info):
             ax_scat.set_title("Correlation ($R^2$: N/A)", weight='bold', fontsize=12)
             ax_scat.text(0.5, 0.5, "Data Constant or N/A", ha='center', va='center', color='gray')
 
-        # 2. Histogram
+        # Histogram
         ax_hist.set_box_aspect(1)
         ax_hist.set_title("Distribution of Delta (GCCS - Prem)", weight='bold', fontsize=12)
         ax_hist.set_xlabel("Delta Value", fontsize=11); ax_hist.set_ylabel("Frequency", fontsize=11)
@@ -421,7 +451,7 @@ def execute_1d_scatter_dashboard(data_p, data_g, var, tmp_dir, pair_info):
         else:
             ax_hist.text(0.5, 0.5, "No finite deltas available.", ha='center', va='center', color='gray')
 
-        # 3. Analytics Table
+        # Analytics Table
         ax_table.axis('off')
         ax_table.set_title("1D Track Statistics", weight='bold', pad=10, fontsize=14)
 
@@ -641,20 +671,16 @@ def compare_sparse_vectors(ds_p, ds_g, vt, v1, v2, tmp_dir, pair_info, instr, pr
         plt.suptitle(f"{product_dsn} | {v1.upper()} VECTOR DASHBOARD\nPrem: {prem_name}\nGCCS: {gccs_name}",
                      fontsize=14, weight='bold', y=0.97, linespacing=1.3)
 
-        # Establish the balanced 2x8 workspace matrix block
         gs = GridSpec(2, 8, figure=fig)
 
-        # Row 1 (Top Layer) -> Prem, GCCS, Scatter
         ax1 = fig.add_subplot(gs[0, 0:2], projection=proj)
         ax2 = fig.add_subplot(gs[0, 2:4], projection=proj)
         ax4 = fig.add_subplot(gs[0, 4:6])
 
-        # Row 2 (Bottom Layer) -> Mismatch, Difference, Histogram
         ax3 = fig.add_subplot(gs[1, 0:2], projection=proj)
         ax5 = fig.add_subplot(gs[1, 2:4], projection=proj)
         ax6 = fig.add_subplot(gs[1, 4:6])
 
-        # Spanned Metrics Table Core (Far Right Boundary Columns)
         ax_table = fig.add_subplot(gs[0:2, 6:8])
 
         # Cell 1: On-Prem Wind Field Flow Map (Barbs)
