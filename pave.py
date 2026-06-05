@@ -2,7 +2,7 @@
 """
 PAVE: Product Analysis & Verification Engine
 ============================================
-VERSION: 1.4.1 (Relaxed Matching Argument Support)
+VERSION: 1.6.0 (Fast-Compare Routing & Implicit Flags)
 """
 
 import argparse
@@ -37,8 +37,9 @@ def parse_args():
     parser.add_argument("--skip-stats", action="store_true", help="Skip STAGE 5 - run summary tool on glance results")
     parser.add_argument("--skip-judge", action="store_true", help="Skip STAGE 6 - run judgement stage")
 
-    # 4. Engine Selection
+    # 4. Engine Selection & Features
     parser.add_argument("--use-compare", action="store_true", help="Use lightweight compare_pave.py instead of Glance")
+    parser.add_argument("--fast-compare", action="store_true", help="Fast mode: skips standalone plots and downsamples renders (implicitly enables --use-compare)")
 
     # 5. Operational Flags
     parser.add_argument("--preserve-ip", action="store_true", help="Move IP tars to ip_data/ instead of deleting")
@@ -81,6 +82,11 @@ def initialize_workspace(args, log):
 
 def main():
     args = parse_args()
+    
+    # Implicitly force use_compare to True if fast_compare is requested
+    if args.fast_compare:
+        args.use_compare = True
+        
     lvl = "DEBUG" if args.debug else "VERBOSE" if args.verbose else "QUIET" if args.quiet else "INFO"
     log = Logger(lvl)
     setup_interrupt_handler(log)
@@ -108,12 +114,12 @@ def main():
 
     # --- STAGE 3: SCIENCE REPORTING ---
     if args.use_compare:
-        log.info("--- STAGE 3/5: LIGHTWEIGHT COMPARISON ENGINE ---")
+        log.info(f"--- STAGE 3/5: COMPARISON ENGINE (Fast Mode: {args.fast_compare}) ---")
         import compare_pave
         comp_args = argparse.Namespace(
             prem_fld=ws['prem'], gccs_fld=ws['gccs'], dest_fld=ws['validation'],
             stats_fld=ws['stats'], threads=args.threads, verbose=args.verbose, debug=args.debug,
-            relax_match=args.relax_match  # Forwarded down to downstream worker pools
+            relax_match=args.relax_match, fast_compare=args.fast_compare
         )
         compare_pave.PaveComparator(comp_args, log).execute()
         args.skip_stats = True
