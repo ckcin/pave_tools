@@ -7,119 +7,90 @@
 ## Environment Setup
 Ensure you have your AWS credentials properly configured under the `geocloud` profile. Check that your Python environment meets all requirements by running:
 
-```bash
-python3 check_env.py
-```
+`python3 check_env.py`
 
 **Core Dependencies:** `numpy`, `pandas`, `xarray`, `scipy`, `matplotlib`, `cartopy` (for geospatial plotting), `sunpy` (for SDO solar palettes), `netCDF4`, `boto3`.
 
 ---
 
-## 1. Master Orchestrator: `pave.py` (v1.3.13)
-The primary entry point that manages workspace initialization and sequential execution of all pipeline stages. 
+## 1. Master Orchestrator: `pave.py` (v1.6.1)
+The primary entry point that manages workspace initialization and sequential execution of all pipeline stages.
 
 ### CLI Usage
-```bash
-./pave.py [products] --times [YYYYDDDHH] [options]
-```
+`./pave.py [products] --times [YYYYDDDHH] [options]`
 
-### Arguments
+### Key Arguments
 | Flag | Description |
 | :--- | :--- |
 | `products` | Positional: Product shortnames (e.g., `RadF`, `DMW`, `ABI-L2-LSA`). |
 | `--times` | **Required.** 10-digit timestamps (YYYYDDDHH). |
-| `--scenes` | Choices: `f`, `c`, `m1`, `m2`. |
-| `--channels` | Channel list (e.g., `01`, `13`). |
+| `--scenes` | Scene filter (Choices: `f`, `c`, `m1`, `m2`). |
+| `--channels` | Channel list filter (e.g., `01`, `13`). |
+| `--sat` | Limit execution to a specific GOES satellite (`18` or `19`). |
 | `--base-dir` | Root directory for the workspace (Default: `.`). |
-| `--use-compare`| **(Recommended)** Bypasses legacy Glance and routes all variables through the dynamic `compare_pave.py` engine. |
+| `--use-compare`| Bypasses legacy Glance and routes variables through the dynamic comparison engines. |
+| `--fast-compare`| **(Recommended)** High-performance mode. Skips heavy standalone plots, visualizes via downsampled striding, and implicitly enables `--use-compare`. |
+| `--relax-match` | Relaxes file pairing constraints to match strictly on start time (`_s`) when naming conventions diverge. |
 | `--skip-ip` | Safely bypasses the download of massive Intermediate Product (IP) tarballs. |
-| `--skip-*` | Flags to skip any specific stage (`retrieve`, `meta`, `science`, `collocate`, `stats`, `judge`). |
-| `-j`, `--threads` | Concurrent S3 sync threads (Default: `8`). |
 
 ---
 
-## 2. Maintenance Utility: `archive_pave.py` (v1.1.1)
-A standalone utility used to compress large data folders and reclaim disk space. It features "Workspace Intelligence" to automatically identify PAVE subdirectories.
+## 2. Background Automation: `pave_scheduler.py` (v2.36.2)
+A continuous daemon designed to run PAVE workflows asynchronously. It tracks DOY (Day-of-Year) cycles to balance loads across 3-day rotations.
+- **+2 Hour Execution Delay:** Automatically sleeps and targets data from 2 hours prior to ensure upstream generation has completed.
+- **Intelligent Satellite Alternation:** Auto-routes slots (01Z, 09Z, 17Z for G19; 05Z, 13Z, 21Z for G18).
+- **Automated Lifecycle:** Native triggers for dashboard aggregation and workspace archival upon completion.
 
 ### CLI Usage
-```bash
-./archive_pave.py [path] [options]
-```
+`./pave_scheduler.py --workspace /path/to/work --fast-compare`
 
 ---
 
-## 3. Data Retrieval: `retrieve_pave.py` (v1.4.0)
-Handles S3 discovery and mirroring. Maps GCCS cloud structures to On-Prem folder hierarchies and extracts Intermediate Products (IP) from tarballs. Now supports fast-fail `--skip-ip` bypassing.
+## 3. High-Performance Compare Engine: `compare_pave.py` (v1.12.0)
+The heart of the modern pipeline. It dynamically inspects NetCDF dimensions and metadata to route variables to one of four specialized rendering sub-engines:
+
+* **`compare_standard.py` (2D Spatial):** Projects arrays onto Geostationary maps. Features advanced **Categorical Flag Defenses** (collapses multi-dimensional bitsets, explicitly masks `_FillValue` outliers, and prevents discrete colormap smearing via `nearest` interpolation).
+* **`compare_sparse.py` (1D Tracks & Vectors):** Bins isolated coordinate point-clouds into 2D matrices. Automatically pairs wind speeds and directions into mapped **Meteorological Wind Barbs**.
+* **`compare_profiles.py` (3D Volumetric):** Intercepts sounding matrices (LVTP/LVMP). Intelligently rotates axes, slices data at targeted pressure intervals, and stacks them into a navigable 3D dashboard anchored by Cartopy geographic floor boundaries.
+* **`compare_timeseries.py` (1D Temporal):** Aligns and visualizes temporal variance.
+
+---
+
+## 4. Workspace Cleanup Utility: `pave_archiver.py` (v1.6.0)
+A standalone utility used to compress large data folders and reclaim disk space. Features safe "Verification Gates" to ensure archives perfectly match source contents before deletion.
 
 ### CLI Usage
-```bash
-./retrieve_pave.py [products] --times [YYYYDDDHH] --dest [path] [options]
-```
+`./pave_archiver.py [path] [options]`
+
+| Flag | Description |
+| :--- | :--- |
+| `--clean-validation` | Includes the visually dense `validation/` output directory in the archival sweep. |
+| `--clean-glance` | Validates and purges legacy HTML glance report folders. |
 
 ---
 
-## 4. Metadata Auditor: `meta_pave.py` (v1.3.7)
+## 5. Data Retrieval: `retrieve_pave.py` (v1.4.0)
+Handles S3 discovery and mirroring. Maps GCCS cloud structures to On-Prem folder hierarchies and extracts Intermediate Products (IP) from tarballs.
+
+---
+
+## 6. Metadata Auditor: `meta_pave.py` (v1.3.7)
 Performs a recursive audit of NetCDF dimensions and attributes. Fully supports `OR_I_` naming conventions for Intermediate Products.
 
-### CLI Usage
-```bash
-./meta_pave.py [prem_fld] [gccs_fld] [output] [options]
-```
+---
+
+## 7. The Jury: `judge_pave.py` (v1.2.0)
+Renders the final PASS/CHECK/FAIL verdict based on scientific statistics and metadata differences. Outlier tracing prints the exact filename causing a failure.
 
 ---
 
-## 5. Lightweight Science Engine: `compare_pave.py` (v1.6.3)
-Replaces legacy tools by dynamically applying specialized comparison strategies (2D Images, 1D Time-Series, Sparse Spatial Gridding).
-- **Geospatial Projections:** Uses Cartopy to natively project ABI data onto `Geostationary` maps with coastlines.
-- **Solar Palettes:** Automatically maps SUVI imagery using standard NASA SDO `sunpy` colormaps.
-- **Vector Flow:** Dynamically converts winds into geographical colored quiver plots.
-- **Standalone Outputs:** Generates combined 2x2 dashboards as well as high-res standalone PNGs for PREM, GCCS, Differences, and Histograms.
-
-### CLI Usage
-```bash
-./compare_pave.py [prem_fld] [gccs_fld] [dest_fld] [options]
-```
-
----
-
-## 6. Legacy Science Engine: `science_pave.py` (v1.5.5)
-Wraps `glance report` to generate older comparisons. Features Cumulative Status Decoding to report how many file pairs in a batch contained differences. *(Skipped if `--use-compare` is active).*
-
----
-
-## 7. Legacy Collocation Engine: `collocate_pave.py` (v1.0.7)
-Used for sparse data (DMW/GLM) in the legacy pipeline. Creates common grids for files before analysis. *(Skipped if `--use-compare` is active).*
-
----
-
-## 8. Stats Harvester: `stats_pave.py` (v2.9.4)
-Scrapes legacy Glance HTML reports to build a centralized `glance_stats_summary.csv`.
-
----
-
-## 9. The Jury: `judge_pave.py` (v1.2.0)
-Renders the final PASS/CHECK/FAIL verdict based on scientific statistics and metadata differences. 
-- **Outlier Tracing:** Directly prints the exact filename (e.g., `OR_ABI-L2-DMWF_G18_s...`) of the specific timestep that caused a product to be flagged as CHECK or FAIL.
-
-### CLI Usage
-```bash
-./judge_pave.py [stats_fld] [options]
-```
-
----
-
-## 10. Environment Checker: `check_env.py`
-Utility script to verify that the PAVE pipeline's environment has all required dependencies installed for geospatial and solar visualization.
-
-### CLI Usage
-```bash
-./check_env.py
-```
+## 8. Legacy Engines (Glance / Collocation / Stats Harvester)
+For backward compatibility, the suite still supports `science_pave.py`, `collocate_pave.py`, and `stats_pave.py`. These wrap the legacy `glance report` utility and are skipped automatically when `--use-compare` or `--fast-compare` is invoked.
 
 ---
 
 ## Common Operational Flags
 All modules support the standardized logging triad:
 - `-v`, `--verbose`: Detailed operational logging.
-- `-d`, `--debug`: Maximum verbosity (includes shell command strings).
-- `-q`, `--quiet`: Only shows Warnings and Errors.
+- `-d`, `--debug`: Maximum verbosity (includes shell command strings and tracebacks).
+- `-q`, `--quiet`: Restricts output to Warnings and Errors only.
