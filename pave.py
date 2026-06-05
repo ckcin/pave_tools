@@ -82,11 +82,11 @@ def initialize_workspace(args, log):
 
 def main():
     args = parse_args()
-    
+
     # Implicitly force use_compare to True if fast_compare is requested
     if args.fast_compare:
         args.use_compare = True
-        
+
     lvl = "DEBUG" if args.debug else "VERBOSE" if args.verbose else "QUIET" if args.quiet else "INFO"
     log = Logger(lvl)
     setup_interrupt_handler(log)

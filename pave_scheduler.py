@@ -70,8 +70,8 @@ except ImportError:
 
 # --- SCHEDULE & ROTATION CONFIGURATION ---
 CYCLE_DAYS = 3
-ALLOWED_SLOTS = [1, 5, 9, 13, 17, 21] 
-EXEC_DELAY_HOURS = 2                  
+ALLOWED_SLOTS = [1, 5, 9, 13, 17, 21]
+EXEC_DELAY_HOURS = 2
 
 SLOT_TO_SAT = {
     1: "19",
@@ -149,7 +149,7 @@ def run_pave(dsn, channels, hour_str, target_date, workspace_dir, pave_script, s
 
     if relax_match:
         cmd.append("--relax-match")
-        
+
     # Dynamically inject the correct compare engine flag
     if fast_compare:
         cmd.append("--fast-compare")
@@ -317,7 +317,7 @@ def execute_slot(workspace_dir, pave_script, log, dashboard_path=None, relax_mat
 def wait_for_next_slot(log):
     now = get_now_utc()
     candidate_triggers = []
-    
+
     for d in [now, now + datetime.timedelta(days=1)]:
         for h in ALLOWED_SLOTS:
             exec_h = h + EXEC_DELAY_HOURS
