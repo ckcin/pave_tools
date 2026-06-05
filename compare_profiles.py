@@ -25,7 +25,7 @@ def compare_profiles(ds_p, ds_g, tmp_dir, pair_info, instr, prod_name, log, m_fl
     """Processes 3D geospatial profile variables, generating vertically stacked 3D spatial visualizations."""
     results = []
     variables = []
-    
+
     spatial_keywords = {'y', 'x', 'lat', 'lon', 'lines', 'pixels'}
 
     # 1. Discover 3D Variables mapped to spatial horizontal grids
@@ -61,22 +61,22 @@ def compare_profiles(ds_p, ds_g, tmp_dir, pair_info, instr, prod_name, log, m_fl
             # --- SMART Z-AXIS DETECTION ---
             var_dims = [str(d).lower() for d in ds_p[var].dims]
             z_axis = -1
-            
+
             # Find the dimension that is NOT a spatial coordinate (e.g., 'pressure', 'level')
             for i, dim_name in enumerate(var_dims):
                 if dim_name not in spatial_keywords:
                     z_axis = i
                     break
-                    
+
             # Fallback: The vertical profile is almost always the smallest dimension
             if z_axis == -1:
                 z_axis = int(np.argmin(data_p.shape))
-            
+
             # Reorient array to standard (Z, Y, X)
             if z_axis != 0:
                 data_p = np.moveaxis(data_p, z_axis, 0)
                 data_g = np.moveaxis(data_g, z_axis, 0)
-                
+
             num_levels, h, w = data_p.shape
 
             # Volumetric Math Execution
@@ -131,7 +131,7 @@ def compare_profiles(ds_p, ds_g, tmp_dir, pair_info, instr, prod_name, log, m_fl
                     lon_0 = gip.attrs.get('longitude_of_projection_origin', -75.0)
                     sweep = gip.attrs.get('sweep_angle_axis', 'x')
                     active_proj = ccrs.Geostationary(central_longitude=lon_0, satellite_height=h_sat, sweep_axis=sweep)
-                    
+
                     x_vals = ds_p[x_key].values * h_sat
                     y_vals = ds_p[y_key].values * h_sat
                     # STRICT TRUNCATION: Forces meshgrid to exactly match the plot array slice
@@ -186,7 +186,7 @@ def compare_profiles(ds_p, ds_g, tmp_dir, pair_info, instr, prod_name, log, m_fl
                             slice_2d = plot_data[i]
                             if not np.all(np.isnan(slice_2d)):
                                 ax.contourf(X, Y, slice_2d, zdir='z', offset=z_val, cmap=cmap, vmin=c_min, vmax=c_max, alpha=0.7, levels=15)
-                
+
                 if HAS_CARTOPY and active_proj is not None:
                     pc = ccrs.PlateCarree()
                     try:
@@ -198,16 +198,16 @@ def compare_profiles(ds_p, ds_g, tmp_dir, pair_info, instr, prod_name, log, m_fl
                                     lon, lat = line.xy
                                     pts = active_proj.transform_points(pc, np.array(lon), np.array(lat))
                                     vx, vy = pts[:, 0], pts[:, 1]
-                                    
-                                    # Geometry Culling: Skip lines that contain NaNs (off Earth-disk) 
-                                    if np.all(np.isnan(vx)) or np.all(np.isnan(vy)): 
+
+                                    # Geometry Culling: Skip lines that contain NaNs (off Earth-disk)
+                                    if np.all(np.isnan(vx)) or np.all(np.isnan(vy)):
                                         continue
-                                    
+
                                     # Geometry Culling: Skip lines entirely outside the CONUS/MESO bounding box
                                     if np.nanmax(vx) < x_min or np.nanmin(vx) > x_max or \
                                        np.nanmax(vy) < y_min or np.nanmin(vy) > y_max:
                                         continue
-                                        
+
                                     ax.plot(vx, vy, zs=0, zdir='z', color='black', linewidth=0.8, alpha=0.5)
                     except Exception as e:
                         log.debug(f"Failed to manually render geographic 3D borders: {e}")
@@ -216,7 +216,7 @@ def compare_profiles(ds_p, ds_g, tmp_dir, pair_info, instr, prod_name, log, m_fl
                 ax.set_xlim(x_min, x_max)
                 ax.set_ylim(y_min, y_max)
                 ax.set_zlim(0, num_levels)
-                
+
                 ax.set_xticks([]); ax.set_yticks([])
                 ax.set_zlabel('Pressure Level Index')
                 ax.view_init(elev=20, azim=-45)
@@ -248,7 +248,7 @@ def compare_profiles(ds_p, ds_g, tmp_dir, pair_info, instr, prod_name, log, m_fl
             # Summary Table
             ax_table.axis('off')
             ax_table.set_title("Volumetric Statistical Summary", weight='bold', pad=10, fontsize=14)
-            
+
             table_content = [
                 ["Metric Description", "Observed Value"],
                 ["3D Volume Dimensions", f"{data_p.shape}"],
@@ -261,13 +261,13 @@ def compare_profiles(ds_p, ds_g, tmp_dir, pair_info, instr, prod_name, log, m_fl
                 ["Min Delta (G-P)", f"{d_min:.4f}" if len(valid_diffs) > 0 else "N/A"],
                 ["Mean Abs Error", f"{np.mean(np.abs(valid_diffs)):.4f}" if len(valid_diffs) > 0 else "N/A"]
             ]
-            
+
             metric_table = ax_table.table(cellText=table_content, loc='center', cellLoc='center', colWidths=[0.55, 0.45], bbox=[0.0, 0.0, 1.0, 0.95])
             metric_table.auto_set_font_size(False); metric_table.set_fontsize(12)
 
             plt.tight_layout(rect=[0, 0.05, 1, 0.95])
             fig.text(0.5, 0.03, f"3D R-Squared Correlation: {'N/A' if r_sq_is_na else f'{r_sq:.4f}'}", ha='center', va='center', fontsize=22, weight='bold', bbox=dict(facecolor='palegreen' if r_sq >= 0.98 else 'lightcoral', boxstyle='round,pad=0.5'))
-            
+
             plt.savefig(tmp_dir / f"{var}_comparison.png", dpi=100)
             plt.close(fig)
 

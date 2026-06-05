@@ -17,7 +17,7 @@ from pave_utils import Logger, setup_interrupt_handler, resolve_meta
 from compare_standard import compare_standard
 from compare_sparse import compare_sparse
 from compare_timeseries import compare_timeseries
-from compare_profiles import compare_profiles  
+from compare_profiles import compare_profiles
 import compare_utils as utils
 
 def process_file_pair(p_file, g_file, dest_root, prem_root, log, soft_match=False, fast_mode=False):
@@ -74,10 +74,10 @@ def process_file_pair(p_file, g_file, dest_root, prem_root, log, soft_match=Fals
     except Exception as e:
         log.warn(f"CRITICAL FILE FAILURE: {p_file.name}")
         log.warn(f"  Error Type: {type(e).__name__} | Message: {str(e)}")
-        
+
         if log.level <= 10:
             log.debug(traceback.format_exc())
-            
+
         if tmp_dir.exists(): shutil.rmtree(tmp_dir)
         return None
     finally:
@@ -91,7 +91,7 @@ class PaveComparator:
         self.dest_root = Path(args.dest_fld).resolve()
         self.stats_root = Path(getattr(args, 'stats_fld', args.dest_fld)).resolve()
         self.threads, self.log = getattr(args, 'threads', 4), log
-        
+
         # FEATURE FIX: Safely extract 'fast' fallback to False if called by a wrapper script (like pave.py) that lacks the flag
         self.fast_mode = getattr(args, 'fast', False)
 
