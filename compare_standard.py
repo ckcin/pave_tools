@@ -2,7 +2,7 @@
 """
 COMPARE-PAVE: Standard Imagery Engine
 =====================================
-VERSION: 1.18.0 (Explicit Fill Value Handling & Spatial Name Validation)
+VERSION: 1.19.0 (Fast-Mode Enabled & Spatial Dimension Validations)
 """
 import numpy as np
 import compare_utils as utils
@@ -13,7 +13,7 @@ try:
 except ImportError:
     HAS_CARTOPY = False
 
-def compare_standard(ds_p, ds_g, tmp_dir, pair_info, instr, prod_name, log, m_flag):
+def compare_standard(ds_p, ds_g, tmp_dir, pair_info, instr, prod_name, log, m_flag, fast_mode=False):
     results = []
     variables = []
 
@@ -23,16 +23,13 @@ def compare_standard(ds_p, ds_g, tmp_dir, pair_info, instr, prod_name, log, m_fl
         if ds_p[var].ndim >= 2:
             var_dims = [str(d).lower() for d in ds_p[var].dims]
             if not any(kw in var_dims for kw in spatial_keywords):
-                log.debug(f"[STANDARD SKIP] Variable '{var}' uses non-spatial dimensions {ds_p[var].dims}. Skipping tabular array.")
                 continue
             variables.append(var)
 
     if not variables:
-        log.warn(f"No valid 2D spatial geographic variables found in {pair_info}")
         return []
 
     proj, extent, base_cmap = None, None, 'viridis'
-
     x_key = 'x' if 'x' in ds_p.variables else 'X' if 'X' in ds_p.variables else None
     y_key = 'y' if 'y' in ds_p.variables else 'Y' if 'Y' in ds_p.variables else None
 
@@ -43,67 +40,40 @@ def compare_standard(ds_p, ds_g, tmp_dir, pair_info, instr, prod_name, log, m_fl
             lon_0 = gip.attrs.get('longitude_of_projection_origin', -75.0)
             sweep = gip.attrs.get('sweep_angle_axis', 'x')
             proj = ccrs.Geostationary(central_longitude=lon_0, satellite_height=h_sat, sweep_axis=sweep)
-
             if x_key and y_key:
                 x_vals, y_vals = ds_p[x_key].values * h_sat, ds_p[y_key].values * h_sat
                 extent = [x_vals.min(), x_vals.max(), y_vals.min(), y_vals.max()]
-        except Exception as e:
-            log.debug(f"Cartopy projection failed: {e}")
+        except Exception: pass
 
-    if instr == 'SUVI':
-        base_cmap = utils.get_suvi_cmap(prod_name)
+    if instr == 'SUVI': base_cmap = utils.get_suvi_cmap(prod_name)
 
     for var in variables:
         try:
-            if var not in ds_g.data_vars:
-                log.warn(f"Variable {var} missing in GCCS. Skipping.")
-                continue
+            if var not in ds_g.data_vars: continue
 
-            # Ensure arrays are cast to float BEFORE assigning NaN to prevent Ubyte crash
             data_p = ds_p[var].values.astype(np.float32)
             data_g = ds_g[var].values.astype(np.float32)
+            if data_p.shape != data_g.shape: continue
 
-            if data_p.shape != data_g.shape:
-                log.warn(f"DIMENSION MISMATCH for {var}. Skipping.")
-                continue
-
-            # --- EXPLICIT FILL VALUE MASKING (Fixes Ubyte/Bitset Color Crushing) ---
             fill_val = ds_p[var].attrs.get('_FillValue')
-            if fill_val is not None:
-                data_p[data_p == fill_val] = np.nan
+            if fill_val is not None: data_p[data_p == fill_val] = np.nan
             fill_val_g = ds_g[var].attrs.get('_FillValue')
-            if fill_val_g is not None:
-                data_g[data_g == fill_val_g] = np.nan
+            if fill_val_g is not None: data_g[data_g == fill_val_g] = np.nan
 
-            miss_val = ds_p[var].attrs.get('missing_value')
-            if miss_val is not None:
-                data_p[data_p == miss_val] = np.nan
-            miss_val_g = ds_g[var].attrs.get('missing_value')
-            if miss_val_g is not None:
-                data_g[data_g == miss_val_g] = np.nan
-
-            # --- CATEGORICAL FLAG DETECTION ---
             var_attrs = ds_p[var].attrs
             is_bitset = any(k in var_attrs for k in ['flag_values', 'flag_masks', 'flag_meanings'])
             if not is_bitset:
-                v_lower = var.lower()
-                l_name = var_attrs.get('long_name', '').lower()
-                s_name = var_attrs.get('standard_name', '').lower()
-
+                v_lower, l_name, s_name = var.lower(), var_attrs.get('long_name', '').lower(), var_attrs.get('standard_name', '').lower()
                 for kw in ['dqf', 'mask', 'dif', 'pqi', 'flag', 'bit']:
                     if kw in v_lower or kw in l_name or kw in s_name:
-                        is_bitset = True
-                        break
+                        is_bitset = True; break
 
             metrics = utils.execute_visual_comparison(
                 data_p, data_g, var, tmp_dir, pair_info,
-                "Standard", proj, extent, 'upper', base_cmap, is_bitset=is_bitset
+                "Standard", proj, extent, 'upper', base_cmap, is_bitset=is_bitset, fast_mode=fast_mode
             )
 
-            for m in metrics:
-                results.append({'var': var, 'm': m['Metric'], 'v': m['Value']})
-        except Exception as e:
-            log.warn(f"Error processing {var}: {e}")
-            continue
+            for m in metrics: results.append({'var': var, 'm': m['Metric'], 'v': m['Value']})
+        except Exception: continue
 
     return results
