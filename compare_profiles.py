@@ -2,7 +2,7 @@
 """
 COMPARE-PAVE: 3D Profile Slicing Engine
 =======================================
-VERSION: 1.3.0 (Dynamic Map Culling & Viewport Bounding)
+VERSION: 1.5.0 (Physical Z-Coordinate Mapping & Shortened Axis Labels)
 """
 
 import numpy as np
@@ -60,6 +60,7 @@ def compare_profiles(ds_p, ds_g, tmp_dir, pair_info, instr, prod_name, log, m_fl
 
             # --- SMART Z-AXIS DETECTION ---
             var_dims = [str(d).lower() for d in ds_p[var].dims]
+            exact_dims = ds_p[var].dims
             z_axis = -1
 
             # Find the dimension that is NOT a spatial coordinate (e.g., 'pressure', 'level')
@@ -72,7 +73,32 @@ def compare_profiles(ds_p, ds_g, tmp_dir, pair_info, instr, prod_name, log, m_fl
             if z_axis == -1:
                 z_axis = int(np.argmin(data_p.shape))
 
-            # Reorient array to standard (Z, Y, X)
+            # --- FETCH Z-AXIS PHYSICAL COORDINATES ---
+            z_dim_name = exact_dims[z_axis]
+            if z_dim_name in ds_p.variables:
+                z_coords_full = ds_p[z_dim_name].values.astype(np.float32)
+
+                # TWEAK: Shorten the Z-axis label to prevent overlap
+                base_name = z_dim_name.replace('_', ' ').title()
+                if 'pressure' in base_name.lower() or 'pres' in base_name.lower():
+                    z_label_str = "Pressure"
+                elif 'level' in base_name.lower():
+                    z_label_str = "Level"
+                else:
+                    z_label_str = base_name
+
+                z_units = ds_p[z_dim_name].attrs.get('units', '')
+                if z_units:
+                    z_label_str += f" ({z_units})"
+            else:
+                z_coords_full = np.arange(data_p.shape[z_axis], dtype=np.float32)
+                z_label_str = 'Level Index'
+
+            # Surface maps generally start at the highest pressure, so we track the bounding extrema
+            bottom_z = np.nanmax(z_coords_full)
+            top_z = np.nanmin(z_coords_full)
+
+            # Reorient array to standard (Z, Y, X) layout
             if z_axis != 0:
                 data_p = np.moveaxis(data_p, z_axis, 0)
                 data_g = np.moveaxis(data_g, z_axis, 0)
@@ -117,7 +143,9 @@ def compare_profiles(ds_p, ds_g, tmp_dir, pair_info, instr, prod_name, log, m_fl
             plot_d = diff_array[::z_step, ::xy_step, ::xy_step]
 
             h_sub, w_sub = plot_p.shape[1], plot_p.shape[2]
-            z_levels = list(range(0, num_levels, z_step))
+
+            # Fetch physical coordinate values matching the Z-slices
+            z_levels = z_coords_full[::z_step]
 
             # --- SPATIAL COORDINATE RESOLUTION (For Cartopy Borders) ---
             active_proj = None
@@ -190,7 +218,6 @@ def compare_profiles(ds_p, ds_g, tmp_dir, pair_info, instr, prod_name, log, m_fl
                 if HAS_CARTOPY and active_proj is not None:
                     pc = ccrs.PlateCarree()
                     try:
-                        # Included cfeature.STATES to vastly improve CONUS/MESO reference mapping
                         for feat in [cfeature.COASTLINE, cfeature.BORDERS, cfeature.STATES]:
                             for geom in feat.geometries():
                                 lines = [geom] if geom.geom_type == 'LineString' else geom.geoms if geom.geom_type == 'MultiLineString' else []
@@ -208,17 +235,20 @@ def compare_profiles(ds_p, ds_g, tmp_dir, pair_info, instr, prod_name, log, m_fl
                                        np.nanmax(vy) < y_min or np.nanmin(vy) > y_max:
                                         continue
 
-                                    ax.plot(vx, vy, zs=0, zdir='z', color='black', linewidth=0.8, alpha=0.5)
+                                    # Anchor geographic map to the highest pressure plane (surface level)
+                                    ax.plot(vx, vy, zs=bottom_z, zdir='z', color='black', linewidth=0.8, alpha=0.5)
                     except Exception as e:
                         log.debug(f"Failed to manually render geographic 3D borders: {e}")
 
                 # Viewport Locking: Explicitly prevent Matplotlib from zooming out to fit cropped map lines
                 ax.set_xlim(x_min, x_max)
                 ax.set_ylim(y_min, y_max)
-                ax.set_zlim(0, num_levels)
+
+                # Automatically invert the Z-Axis range so the surface (highest pressure) is on the bottom
+                ax.set_zlim(bottom_z, top_z)
 
                 ax.set_xticks([]); ax.set_yticks([])
-                ax.set_zlabel('Pressure Level Index')
+                ax.set_zlabel(z_label_str, labelpad=15)
                 ax.view_init(elev=20, azim=-45)
 
             _draw_3d_slices(ax1, plot_p, 'viridis', vmin, vmax)
