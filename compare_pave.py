@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 COMPARE-PAVE Orchestrator
-VERSION: 1.11.0 (Wrapper Script Compatibility Patch)
+VERSION: 1.13.0 (Fast-Compare Namespace Synchronization)
 """
 import os
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
@@ -92,8 +92,8 @@ class PaveComparator:
         self.stats_root = Path(getattr(args, 'stats_fld', args.dest_fld)).resolve()
         self.threads, self.log = getattr(args, 'threads', 4), log
 
-        # FEATURE FIX: Safely extract 'fast' fallback to False if called by a wrapper script (like pave.py) that lacks the flag
-        self.fast_mode = getattr(args, 'fast', False)
+        # PROPER NAMESPACE MAPPING: '--fast-compare' CLI flag translates to 'fast_compare' property
+        self.fast_mode = getattr(args, 'fast_compare', False)
 
     def execute(self):
         setup_interrupt_handler()
@@ -136,7 +136,10 @@ if __name__ == "__main__":
     parser.add_argument("--dest_fld", required=True, help="Output folder for plots/stats")
     parser.add_argument("--stats_fld", help="Optional separate folder for summary CSV")
     parser.add_argument("--threads", type=int, default=4, help="Parallel worker threads")
-    parser.add_argument("--fast", action="store_true", help="Fast mode: skips standalone plots and downsamples renders")
+
+    # STANDALONE CLI FLAG SYNC:
+    parser.add_argument("--fast-compare", action="store_true", help="Fast mode: skips standalone plots and downsamples renders")
+
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
 
     args = parser.parse_args()
