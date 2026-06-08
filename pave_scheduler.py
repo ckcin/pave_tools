@@ -2,7 +2,7 @@
 """
 PAVE: Continuous Background Scheduler
 =====================================
-VERSION: 2.36.2 (Fast-Compare Propagation & Architecture Documentation Restored)
+VERSION: 2.37.0 (Preceding 3-Hour Cryosphere Floor Mapping)
 
 SCHEDULING & LOAD BALANCING ARCHITECTURE:
 -----------------------------------------
@@ -38,8 +38,9 @@ SCHEDULING & LOAD BALANCING ARCHITECTURE:
    - G18 (14Z Data) executes during the 21:00Z slot alongside the G18 LSA block.
 
 8. 3-Hour Cryosphere Matching:
-   - AICE and AITA are dynamically adjusted to target the closest 3-hourly
-     file timeline (00, 06, 09, 12, 18, 21) relative to the active slot window.
+   - AICE and AITA are dynamically adjusted to target the most recently completed
+     3-hourly file timeline (00, 03, 09, 12, 15, 21) via floor-division
+     to prevent fetching future, ungenerated data.
 """
 
 import argparse
@@ -231,9 +232,10 @@ def execute_slot(workspace_dir, pave_script, log, dashboard_path=None, relax_mat
                     folder = run_pave(surf_dsn, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, relax_match=relax_match, fast_compare=fast_compare)
                     active_workspaces.append(folder)
             elif entry in ["AICE", "AITA"]:
-                closest_3hr = round(slot_hour / 3) * 3
-                ice_hour_str = f"{closest_3hr:02d}"
-                log.info(f"Syncing cryosphere product '{entry}' timeline to nearest 3-hour match: {ice_hour_str}0")
+                # FEATURE FIX: Use floor division to guarantee we grab the most recent preceding 3-hour slot (avoiding future time requests)
+                floor_3hr = (slot_hour // 3) * 3
+                ice_hour_str = f"{floor_3hr:02d}"
+                log.info(f"Syncing cryosphere product '{entry}' timeline to preceding 3-hour match: {ice_hour_str}0")
                 folder = run_pave(entry, None, ice_hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, relax_match=relax_match, fast_compare=fast_compare)
                 active_workspaces.append(folder)
             elif entry == "RadiationGroup":
