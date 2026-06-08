@@ -2,7 +2,7 @@
 """
 PAVE-RECORDER: Long-Term Artifact Generator
 ===========================================
-VERSION: 1.0.0 (Diurnal PDF Compiler)
+VERSION: 1.1.1 (Absolute Chronological Sorting & Modern UTC Datetime)
 """
 
 import os
@@ -15,7 +15,7 @@ from pathlib import Path
 from collections import defaultdict
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
-from datetime import datetime
+from datetime import datetime, timezone
 
 try:
     from pave_utils import Logger, setup_interrupt_handler
@@ -48,7 +48,9 @@ def build_pdf_artifact(prod, sat, var_dict, out_dir, log):
         fig.text(0.5, 0.65, "PAVE Long-Term Verification Record", ha='center', va='center', fontsize=26, weight='bold')
         fig.text(0.5, 0.55, f"Product: {prod}", ha='center', va='center', fontsize=20)
         fig.text(0.5, 0.50, f"Satellite: GOES-{sat}", ha='center', va='center', fontsize=18)
-        fig.text(0.5, 0.35, f"Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC", ha='center', va='center', fontsize=12, color='gray')
+
+        # FIXED: Use timezone-aware datetime.now() to avoid Python 3.12+ DeprecationWarnings
+        fig.text(0.5, 0.35, f"Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC", ha='center', va='center', fontsize=12, color='gray')
 
         # Calculate total images included
         total_images = sum(len(hh_dict) for hh_dict in var_dict.values())
@@ -62,10 +64,16 @@ def build_pdf_artifact(prod, sat, var_dict, out_dir, log):
             log.verbose(f"  -> Processing variable: {var}")
             hh_dict = var_dict[var]
 
-            # Sort chronologically by hour (00 -> 23)
-            for hh in sorted(hh_dict.keys()):
-                yyyyddd, img_path = hh_dict[hh]
+            # Repackage the dictionary into a list of tuples so we can sort by absolute chronological time
+            # instead of just the generic hour.
+            chronological_items = []
+            for hh, (yyyyddd, img_path) in hh_dict.items():
+                chronological_items.append((yyyyddd, hh, img_path))
 
+            # Sort explicitly by YYYYddd first, then hh
+            chronological_items.sort(key=lambda x: (x[0], x[1]))
+
+            for yyyyddd, hh, img_path in chronological_items:
                 try:
                     # Read the image to get native aspect ratio
                     img = plt.imread(img_path)
