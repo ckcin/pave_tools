@@ -1,165 +1,252 @@
 #!/usr/bin/env python3
 """
-PAVE-ARCHIVER: Workspace Cleanup Utility
-========================================
-VERSION: 1.5.0 (Optional Validation Cleanup Flag)
+PAVE-ARCHIVER: Unified Workspace Lifecycle Manager
+==================================================
+VERSION: 2.6.0 (Recent 3-Execution Artifact Limiting per Variable)
 """
 
 import os
+os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+os.environ['MPLBACKEND'] = 'Agg'
+
+import argparse
 import tarfile
 import shutil
-import argparse
-import sys
+import re
 from pathlib import Path
-from pave_utils import Logger, setup_interrupt_handler
+from collections import defaultdict
+from datetime import datetime, timezone
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
 
-# Folders we are allowed to compress and delete natively
-TARGET_FOLDERS = ["gccs", "prem", "glance", "collocation", "coll"]
+try:
+    from pave_utils import Logger, setup_interrupt_handler
+except ImportError:
+    class DummyLogger:
+        def __init__(self, *args, **kwargs): pass
+        def debug(self, m): print(f"[DEBUG] {m}")
+        def info(self, m): print(f"[INFO] {m}")
+        def verbose(self, m): print(f"[VERBOSE] {m}")
+        def warn(self, m): print(f"[WARN] {m}")
+        def error(self, m): print(f"[ERROR] {m}")
+    Logger = DummyLogger
+    def setup_interrupt_handler(log=None): pass
 
-# Folders explicitly immune to archival/deletion
-FORBIDDEN_FOLDERS = ["ip_data", "stats"]
+# Upgraded to 14 digits to capture YYYYdddhhmmss and prevent OS-level overwriting
+FILE_PATTERN = re.compile(
+    r"(?:OR_)?(?:ABI-L2-|I_)?(?P<prod>[A-Za-z0-9\-]+).*?_G(?P<sat>\d{2})_(?P<var>.+?)_(?P<time>\d{14})_comparison\.png$"
+)
 
-def clean_glance_reports(path, log):
-    """
-    Checks for an existing glance_reports.tar.gz. If found, verifies it
-    contains the same number of files as the source directory before deleting the directory.
-    """
-    if path.name == "glance_reports":
-        glance_dir = path
-        tar_path = path.parent / "glance_reports.tar.gz"
-    else:
-        glance_dir = path / "glance_reports"
-        tar_path = path / "glance_reports.tar.gz"
+# ==========================================
+# PHASE 1: ARTIFACT HARVESTING & ARCHIVING
+# ==========================================
 
-    if not glance_dir.exists():
-        log.verbose(f"No {glance_dir.name} folder found to clean.")
+def harvest_dashboard(workspace, dash_dir, log):
+    """Extracts comparison artifacts, renaming and grouping them by DOY to preserve metadata."""
+    validation_dir = workspace / "validation"
+    if not validation_dir.exists():
         return
 
-    if not tar_path.exists():
-        log.info(f"No {tar_path.name} found. Skipping {glance_dir.name} cleanup.")
+    png_files = list(validation_dir.rglob("*_comparison.png"))
+
+    if png_files:
+        log.info(f"Harvesting and DOY-grouping {len(png_files)} comparison artifacts into Dashboard: {dash_dir.name}...")
+        for f in png_files:
+            parent_stem = f.parent.name
+            var_name = f.name.replace('_comparison.png', '')
+
+            m = re.search(r"OR_(?P<dsn>.+?)_G(?P<sat>\d{2}).*?_s(?P<time>\d{14})", parent_stem)
+
+            if m:
+                dsn = m.group('dsn')
+                sat = m.group('sat')
+                time_str = m.group('time')
+                yyyyddd = time_str[:7]
+
+                new_name = f"OR_{dsn}_G{sat}_{var_name}_{time_str}_comparison.png"
+                target_dir = dash_dir / yyyyddd
+            else:
+                new_name = f"{parent_stem}_{f.name}"
+                target_dir = dash_dir / "Unknown_DOY"
+
+            target_dir.mkdir(parents=True, exist_ok=True)
+            dest = target_dir / new_name
+
+            shutil.copy2(f, dest)
+
+def archive_folder(folder_path, log):
+    """Safely compresses a directory to tar.gz and removes the original if successful."""
+    if not folder_path.exists() or not folder_path.is_dir():
         return
 
-    log.info(f"Validating existing archive {tar_path.name}...")
-    source_files = [f for f in glance_dir.rglob("*") if f.is_file()]
+    if not any(folder_path.iterdir()):
+        shutil.rmtree(folder_path)
+        return
+
+    tar_path = folder_path.parent / f"{folder_path.name}.tar.gz"
+    log.info(f"Compressing {folder_path.name}/ into {tar_path.name}...")
 
     try:
-        with tarfile.open(tar_path, "r:gz") as tar_check:
-            archive_members = [m for m in tar_check.getmembers() if m.isfile()]
+        with tarfile.open(tar_path, "w:gz") as tar:
+            tar.add(folder_path, arcname=folder_path.name)
 
-        if len(archive_members) == len(source_files):
-            log.verbose(f"Verification Successful for {glance_dir.name}.")
-            shutil.rmtree(glance_dir)
-            log.info(f"Purged source folder: {glance_dir.name}")
+        if tar_path.exists() and tar_path.stat().st_size > 0:
+            shutil.rmtree(folder_path)
+            log.verbose(f"  -> Validation passed. Removed original {folder_path.name}/")
         else:
-            log.warn(f"!!! VERIFICATION FAILED for {glance_dir.name} !!!")
-            log.warn(f"Source: {len(source_files)} vs Archive: {len(archive_members)}")
-            log.warn("Source folder was preserved for safety.")
-
+            log.error(f"  -> CRITICAL: Verification failed for {tar_path.name}. Preserving original directory.")
     except Exception as e:
-        log.warn(f"Validation process failed for {tar_path.name}: {e}")
+        log.error(f"Failed to archive {folder_path.name}: {e}")
 
-def run_archive(folder_path, log, clean_validation=False):
-    path = Path(folder_path).resolve()
-
-    if not path.exists():
-        log.warn(f"Path does not exist: {path}")
+def process_workspace(workspace, args, log):
+    """Executes the lifecycle sweep on a single PAVE workspace."""
+    workspace = Path(workspace).resolve()
+    if not workspace.exists() or not workspace.is_dir():
+        log.warn(f"Workspace not found: {workspace}")
         return
 
-    if path.name in FORBIDDEN_FOLDERS:
-        log.info(f"Access Denied: Folder '{path.name}' is immune to archival.")
-        return
+    log.info(f"--- Lifecycle Sweep: {workspace.name} ---")
 
-    # Dynamically build the authorized targets list
-    active_targets = TARGET_FOLDERS.copy()
-    if clean_validation:
-        active_targets.append("validation")
+    if args.clean_validation:
+        dash_dir = Path(args.dashboard).resolve() if args.dashboard else workspace / "dashboard"
+        harvest_dashboard(workspace, dash_dir, log)
 
-    # Check if the path is a PAVE root (contains multiple targets)
-    sub_targets = [d for d in path.iterdir() if d.is_dir() and d.name in active_targets]
+    core_folders = ["prem", "gccs", "stats", "collocation", "logs"]
+    if args.clean_validation: core_folders.append("validation")
+    if args.clean_glance: core_folders.append("glance")
 
-    if sub_targets:
-        log.info(f"Detected PAVE Workspace at {path.name}. Processing {len(sub_targets)} potential targets.")
-        for target in sub_targets:
-            perform_compression(target, log)
-    else:
-        perform_compression(path, log)
+    for f_name in core_folders:
+        folder_path = workspace / f_name
+        if folder_path.exists():
+            archive_folder(folder_path, log)
 
-def perform_compression(path, log):
-    # 1. IP RELOCATION (Safety Net for non-preserved manual tars)
-    if path.name == "prem":
-        ip_tars = list(path.glob("*.tar"))
-        if ip_tars:
-            log.info(f"Relocating {len(ip_tars)} IP Tarballs to Workspace Root...")
-            for tar in ip_tars:
-                dest = path.parent / tar.name
+
+# ==========================================
+# PHASE 2: LONG-TERM RECORD GENERATION
+# ==========================================
+
+def build_pdf_artifact(prod, sat, var_dict, out_dir, log):
+    """Compiles the filtered chronological images into a single multi-page PDF."""
+    pdf_filename = f"PAVE_Record_{prod}_G{sat}.pdf"
+    pdf_path = out_dir / pdf_filename
+
+    log.info(f"Assembling Recent Execution Artifact: {pdf_filename}...")
+
+    with PdfPages(pdf_path) as pdf:
+        # Generate Cover Page
+        fig = plt.figure(figsize=(11, 8.5))
+        fig.text(0.5, 0.65, "PAVE Long-Term Verification Record", ha='center', va='center', fontsize=26, weight='bold')
+        fig.text(0.5, 0.55, f"Product: {prod}", ha='center', va='center', fontsize=20)
+        fig.text(0.5, 0.50, f"Satellite: GOES-{sat}", ha='center', va='center', fontsize=18)
+        fig.text(0.5, 0.35, f"Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC", ha='center', va='center', fontsize=12, color='gray')
+
+        total_images = sum(len(item_list) for item_list in var_dict.values())
+        fig.text(0.5, 0.30, f"Includes {len(var_dict)} Variables | {total_images} Total Snapshots (Max 3 Recent Runs per Var)", ha='center', va='center', fontsize=12, color='gray')
+
+        pdf.savefig(fig)
+        plt.close(fig)
+
+        # Append Top 3 Images per Variable
+        for var in sorted(var_dict.keys()):
+            log.verbose(f"  -> Processing variable: {var}")
+            chronological_items = var_dict[var]
+
+            for full_time_int, img_path in chronological_items:
                 try:
-                    shutil.move(str(tar), str(dest))
-                    log.verbose(f"  Moved: {tar.name}")
+                    img = plt.imread(img_path)
+                    h, w = img.shape[:2]
+
+                    fig = plt.figure(figsize=(w/100, h/100), dpi=100)
+                    ax = fig.add_axes([0, 0, 1, 1])
+                    ax.axis('off')
+
+                    ax.imshow(img)
+                    ax.text(0.01, 0.01, f"Artifact: {img_path.name}", transform=ax.transAxes, color='black',
+                            fontsize=10, weight='bold', bbox=dict(facecolor='white', alpha=0.7, edgecolor='none'))
+
+                    pdf.savefig(fig)
+                    plt.close(fig)
                 except Exception as e:
-                    log.warn(f"  Failed to move {tar.name}: {e}")
+                    log.warn(f"Failed to append image {img_path.name}: {e}")
+                    plt.close('all')
 
-    # 2. Inventory the remaining source files
-    source_files = [f for f in path.rglob("*") if f.is_file()]
-
-    if not source_files:
-        log.info(f"Cleanup: Removing empty folder structure {path.name}")
-        try:
-            shutil.rmtree(path)
-            log.verbose(f"Purged empty directory: {path}")
-        except Exception as e:
-            log.warn(f"Failed to remove empty directory {path.name}: {e}")
+def run_recorder(dashboard_dir, record_dir, log):
+    """Walks the dashboard directory, limits to the 3 absolute most recent images per var, and dispatches to PDF generator."""
+    if not dashboard_dir.exists():
+        log.error(f"Dashboard path does not exist for recording: {dashboard_dir}")
         return
 
-    # 3. Create Archive for the rest of the directory
-    tar_name = f"{path.name}.tar.gz"
-    tar_path = path.parent / tar_name
+    record_dir.mkdir(parents=True, exist_ok=True)
+    png_files = sorted(list(dashboard_dir.rglob("*_comparison.png")))
 
-    log.info(f"Archiving {path.name} ({len(source_files)} files) -> {tar_name}")
+    log.info(f"Discovered {len(png_files)} dashboard files. Filtering history for the 3 most recent runs overall...")
 
-    try:
-        with tarfile.open(tar_path, "w:gz") as tar_out:
-            tar_out.add(path, arcname=path.name)
+    # Structure: records[prod][sat][var] = [(full_time_int, filepath), ...]
+    records = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    matched_count = 0
 
-        # 4. Verification Gate
-        with tarfile.open(tar_path, "r:gz") as tar_check:
-            archive_members = [m for m in tar_check.getmembers() if m.isfile()]
+    for f in png_files:
+        match = FILE_PATTERN.search(f.name)
+        if not match: continue
 
-        if len(archive_members) == len(source_files):
-            log.verbose(f"Verification Successful for {path.name}.")
-            shutil.rmtree(path)
-            log.info(f"Purged source folder: {path.name}")
-        else:
-            log.warn(f"!!! VERIFICATION FAILED for {path.name} !!!")
-            log.warn(f"Source: {len(source_files)} vs Archive: {len(archive_members)}")
-            log.warn("Source folder was preserved for safety.")
+        prod, sat, var, time_str = match.group('prod'), match.group('sat'), match.group('var'), match.group('time')
+        full_time_int = int(time_str)
 
-    except Exception as e:
-        log.warn(f"Archive process failed for {path.name}: {e}")
+        records[prod][sat][var].append((full_time_int, f))
+        matched_count += 1
 
-def parse_args():
-    parser = argparse.ArgumentParser(
-        prog="pave_archiver.py",
-        description="Compress PAVE data folders. Ignores stats and ip_data."
-    )
-    parser.add_argument("path", help="Path to a PAVE workspace root or a specific folder")
-    parser.add_argument("--clean-glance", action="store_true", help="Verify and remove glance_reports folder if a matching tar.gz exists")
-    parser.add_argument("--clean-validation", action="store_true", help="Include the 'validation' folder in the archival compression sweep")
+    if matched_count == 0:
+        log.warn("No files matched the required PAVE comparison naming format.")
+        return
 
-    parser.add_argument("-v", "--verbose", action="store_true")
-    parser.add_argument("-q", "--quiet", action="store_true")
-    return parser.parse_args()
+    # Trim logic: Keep only the 3 most recent runs overall per variable
+    for prod, sats in records.items():
+        for sat, var_dict in sats.items():
+            for var in var_dict:
+                # 1. Sort descending to isolate the 3 highest/newest timestamps overall
+                recent_three = sorted(var_dict[var], key=lambda x: x[0], reverse=True)[:3]
+
+                # 2. Sort those 3 back into ascending chronological order for proper PDF reading sequence
+                var_dict[var] = sorted(recent_three, key=lambda x: x[0])
+
+    log.info(f"Successfully filtered images down to the 3 most recent executions overall per variable.")
+
+    for prod, sats in records.items():
+        for sat, var_dict in sats.items():
+            build_pdf_artifact(prod, sat, var_dict, record_dir, log)
 
 def main():
-    args = parse_args()
-    log = Logger("VERBOSE" if args.verbose else "QUIET" if args.quiet else "INFO")
+    parser = argparse.ArgumentParser(description="PAVE-ARCHIVER: Unified Workspace Lifecycle Manager")
+    parser.add_argument("workspaces", nargs="+", help="Paths to PAVE workspace directories to archive")
+
+    # Archiver Flags
+    parser.add_argument("--clean-validation", action="store_true", help="Harvest dashboard items, then archive and remove the validation/ folder")
+    parser.add_argument("--clean-glance", action="store_true", help="Archive and remove the legacy glance/ folder")
+
+    # Dashboard & Record Destinations
+    parser.add_argument("--dashboard", type=str, help="Optional: Shared path to aggregate all dashboard comparison images globally")
+    parser.add_argument("--record", type=str, help="Optional: Trigger PDF generation and output artifacts to this path")
+
+    # Logging
+    parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
+    parser.add_argument("-q", "--quiet", action="store_true", help="Restrict logging to warnings/errors")
+
+    args = parser.parse_args()
+
+    log_level = "VERBOSE" if args.verbose else "QUIET" if args.quiet else "INFO"
+    log = Logger(log_level)
     setup_interrupt_handler(log)
 
-    path = Path(args.path).resolve()
+    # 1. Execute Workspace Archival & Harvester
+    for ws in args.workspaces:
+        process_workspace(ws, args, log)
 
-    if args.clean_glance:
-        clean_glance_reports(path, log)
-
-    run_archive(path, log, clean_validation=args.clean_validation)
+    # 2. Execute PDF Generation (If triggered)
+    if args.record:
+        if args.dashboard:
+            run_recorder(Path(args.dashboard).resolve(), Path(args.record).resolve(), log)
+        else:
+            log.warn("Cannot generate central diurnal records without a shared --dashboard source path.")
 
 if __name__ == "__main__":
     main()
