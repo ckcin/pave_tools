@@ -2,7 +2,7 @@
 """
 COMPARE-PAVE: 3D Profile Slicing Engine
 =======================================
-VERSION: 1.5.0 (Physical Z-Coordinate Mapping & Shortened Axis Labels)
+VERSION: 1.5.1 (Hexbin Extent Fix)
 """
 
 import numpy as np
@@ -259,7 +259,7 @@ def compare_profiles(ds_p, ds_g, tmp_dir, pair_info, instr, prod_name, log, m_fl
             ax4.set_box_aspect(1)
             ax4.set_xlabel("On-Prem Volumetric Value", fontsize=11); ax4.set_ylabel("GCCS Volumetric Value", fontsize=11)
             if len(samp_p) > 0 and not r_sq_is_na:
-                im4 = ax4.hexbin(samp_p, samp_g, gridsize=60, cmap='viridis', mincnt=1, bins='log')
+                im4 = ax4.hexbin(samp_p, samp_g, gridsize=60, cmap='viridis', mincnt=1, bins='log', extent=[vmin, vmax, vmin, vmax])
                 ax4.set_title(f"3D Volume Correlation ($R^2$: {r_sq:.4f})", weight='bold', fontsize=12)
                 plt.colorbar(im4, ax=ax4, label='log10(count)')
                 ax4.plot([vmin, vmax], [vmin, vmax], color='red', linestyle='--', linewidth=1.5, alpha=0.6, zorder=5)

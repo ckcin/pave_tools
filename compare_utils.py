@@ -2,7 +2,7 @@
 """
 COMPARE-PAVE: Shared Utility Suite
 ==================================
-VERSION: 1.37.0 (Restored Structure + High-Performance Fast Mode Integration)
+VERSION: 1.37.1 (Hexbin Extent Bounds Fixed)
 """
 
 import os
@@ -247,10 +247,10 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
                 ax_scat = fig_scat.add_subplot(111)
                 ax_scat.set_box_aspect(1)
                 if len(samp_p) > 0 and not r_sq_is_na:
-                    im_scat = ax_scat.hexbin(samp_p, samp_g, gridsize=60, cmap='viridis', mincnt=1, bins='log')
+                    limits = [kwargs['vmin'], kwargs['vmax']]
+                    im_scat = ax_scat.hexbin(samp_p, samp_g, gridsize=60, cmap='viridis', mincnt=1, bins='log', extent=[limits[0], limits[1], limits[0], limits[1]])
                     _add_cbar(im_scat, ax_scat, label='log10(count)')
                     ax_scat.set_title(f"{var} Correlation ($R^2$: {r_sq:.4f})", weight='bold', fontsize=12)
-                    limits = [kwargs['vmin'], kwargs['vmax']]
                     ax_scat.plot(limits, limits, color='red', linestyle='--', linewidth=1.5, alpha=0.6, zorder=5)
                     ax_scat.set_xlim(limits); ax_scat.set_ylim(limits)
                 else:
@@ -310,10 +310,10 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
         ax4.set_box_aspect(1)
         ax4.set_xlabel("On-Prem", fontsize=11); ax4.set_ylabel("GCCS", fontsize=11)
         if len(samp_p) > 0 and not r_sq_is_na:
-            im4 = ax4.hexbin(samp_p, samp_g, gridsize=60, cmap='viridis', mincnt=1, bins='log')
+            axis_bounds = [kwargs['vmin'], kwargs['vmax']]
+            im4 = ax4.hexbin(samp_p, samp_g, gridsize=60, cmap='viridis', mincnt=1, bins='log', extent=[axis_bounds[0], axis_bounds[1], axis_bounds[0], axis_bounds[1]])
             ax4.set_title(f"Correlation ($R^2$: {r_sq:.4f})", weight='bold', fontsize=12)
             _add_cbar(im4, ax4, label='log10(count)')
-            axis_bounds = [kwargs['vmin'], kwargs['vmax']]
             ax4.plot(axis_bounds, axis_bounds, color='red', linestyle='--', linewidth=1.5, alpha=0.6, zorder=5)
             ax4.set_xlim(axis_bounds); ax4.set_ylim(axis_bounds)
         else:
@@ -445,10 +445,12 @@ def execute_1d_scatter_dashboard(data_p, data_g, var, tmp_dir, pair_info, fast_m
         ax_scat.set_box_aspect(1)
         ax_scat.set_xlabel("On-Prem Values", fontsize=11); ax_scat.set_ylabel("GCCS Values", fontsize=11)
         if len(samp_p) > 0:
-            im_scat = ax_scat.hexbin(samp_p, samp_g, gridsize=40, cmap='viridis', mincnt=1, bins='log')
+            vmin_scat = min(np.nanmin(samp_p), np.nanmin(samp_g))
+            vmax_scat = max(np.nanmax(samp_p), np.nanmax(samp_g))
+            im_scat = ax_scat.hexbin(samp_p, samp_g, gridsize=40, cmap='viridis', mincnt=1, bins='log', extent=[vmin_scat, vmax_scat, vmin_scat, vmax_scat])
             ax_scat.set_title(f"Correlation ($R^2$: {'N/A' if r_sq_is_na else f'{r_sq:.4f}'})", weight='bold', fontsize=12)
             plt.colorbar(im_scat, ax=ax_scat, label='log10(count)', fraction=0.046, pad=0.04)
-            axis_bounds = [min(ax_scat.get_xlim()[0], ax_scat.get_ylim()[0]), max(ax_scat.get_xlim()[1], ax_scat.get_ylim()[1])]
+            axis_bounds = [vmin_scat, vmax_scat]
             ax_scat.plot(axis_bounds, axis_bounds, color='red', linestyle='--', linewidth=1.5, alpha=0.6, zorder=5)
             ax_scat.set_xlim(axis_bounds); ax_scat.set_ylim(axis_bounds)
         else:
@@ -658,10 +660,12 @@ def compare_sparse_vectors(ds_p, ds_g, vt, v1, v2, tmp_dir, pair_info, instr, pr
             ax_scat = fig_scat.add_subplot(111)
             ax_scat.set_box_aspect(1)
             if len(samp_p) > 0 and not r_sq_is_na:
-                im_scat = ax_scat.hexbin(samp_p, samp_g, gridsize=40, cmap='viridis', mincnt=1, bins='log')
+                vmin_scat = min(np.nanmin(samp_p), np.nanmin(samp_g))
+                vmax_scat = max(np.nanmax(samp_p), np.nanmax(samp_g))
+                im_scat = ax_scat.hexbin(samp_p, samp_g, gridsize=40, cmap='viridis', mincnt=1, bins='log', extent=[vmin_scat, vmax_scat, vmin_scat, vmax_scat])
                 _add_local_cbar(im_scat, ax_scat, label='log10(count)')
                 ax_scat.set_title(f"{v1} Correlation ($R^2$: {'N/A' if r_sq_is_na else f'{r_sq:.4f}'})", weight='bold', fontsize=12)
-                limits = [min(ax_scat.get_xlim()[0], ax_scat.get_ylim()[0]), max(ax_scat.get_xlim()[1], ax_scat.get_ylim()[1])]
+                limits = [vmin_scat, vmax_scat]
                 ax_scat.plot(limits, limits, color='red', linestyle='--', linewidth=1.5, alpha=0.6, zorder=5)
                 ax_scat.set_xlim(limits); ax_scat.set_ylim(limits)
             else:
@@ -743,10 +747,12 @@ def compare_sparse_vectors(ds_p, ds_g, vt, v1, v2, tmp_dir, pair_info, instr, pr
         ax4.set_box_aspect(1)
         ax4.set_xlabel("On-Prem Speed (m/s)", fontsize=11); ax4.set_ylabel("GCCS Speed (m/s)", fontsize=11)
         if len(samp_p) > 0 and not r_sq_is_na:
-            im4 = ax4.hexbin(samp_p, samp_g, gridsize=40, cmap='viridis', mincnt=1, bins='log')
+            vmin_scat = min(np.nanmin(samp_p), np.nanmin(samp_g))
+            vmax_scat = max(np.nanmax(samp_p), np.nanmax(samp_g))
+            im4 = ax4.hexbin(samp_p, samp_g, gridsize=40, cmap='viridis', mincnt=1, bins='log', extent=[vmin_scat, vmax_scat, vmin_scat, vmax_scat])
             ax4.set_title(f"Speed Correlation ($R^2$: {'N/A' if r_sq_is_na else f'{r_sq:.4f}'})", weight='bold', fontsize=12)
             _add_local_cbar(im4, ax4, label='log10(count)')
-            axis_bounds = [min(ax4.get_xlim()[0], ax4.get_ylim()[0]), max(ax4.get_xlim()[1], ax4.get_ylim()[1])]
+            axis_bounds = [vmin_scat, vmax_scat]
             ax4.plot(axis_bounds, axis_bounds, color='red', linestyle='--', linewidth=1.5, alpha=0.6, zorder=5)
             ax4.set_xlim(axis_bounds); ax4.set_ylim(axis_bounds)
         else:
