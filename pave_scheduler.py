@@ -2,7 +2,7 @@
 """
 PAVE: Continuous Background Scheduler
 =====================================
-VERSION: 2.38.0 (Unified Lifecycle Manager Integration)
+VERSION: 2.41.0 (Unified Lifecycle Manager & Dynamic Stats Integration)
 
 SCHEDULING & LOAD BALANCING ARCHITECTURE:
 -----------------------------------------
@@ -41,6 +41,11 @@ SCHEDULING & LOAD BALANCING ARCHITECTURE:
    - AICE and AITA are dynamically adjusted to target the most recently completed
      3-hourly file timeline (00, 03, 09, 12, 15, 21) via floor-division
      to prevent fetching future, ungenerated data.
+
+9. Automated Lifecycle & Executive Summary Records:
+   - Valid workspaces are automatically passed to pave_archiver.py.
+   - The archiver autonomously discovers 'stats_summary.csv' within each workspace
+     to dynamically generate a color-coded executive summary matrix in the final PDF record.
 """
 
 import argparse
