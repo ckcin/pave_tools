@@ -32,7 +32,7 @@ class PaveJudge:
         self.stats_dir = Path(args.stats_fld).resolve()
         self.log = log
 
-        self.stats_file = self.stats_dir / "glance_stats_summary.csv"
+        self.stats_file = self.stats_dir / "stats_summary.csv"
         self.meta_file = self.stats_dir / "metadata_audit.csv"
         self.verdict_file = self.stats_dir / "pave_final_verdict.csv"
 

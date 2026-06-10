@@ -393,8 +393,11 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
     finally:
         plt.close(fig)
 
-    return [{'Metric': 'r-squared correlation', 'Value': np.nan if r_sq_is_na else r_sq}]
-
+    return [
+       {'Metric': 'r-squared correlation', 'Value': np.nan if r_sq_is_na else r_sq},
+       {'Metric': 'mean abs error', 'Value': np.mean(abs_diffs) if len(abs_diffs) > 0 else np.nan},
+       {'Metric': 'value range max', 'Value': np.nanmax(data_p) if np.any(mask_p) else np.nan} # Or however you define range
+    ]
 
 def execute_1d_scatter_dashboard(data_p, data_g, var, tmp_dir, pair_info, fast_mode=False):
     """Specialized rendering engine for raw 1D arrays."""
@@ -507,7 +510,11 @@ def execute_1d_scatter_dashboard(data_p, data_g, var, tmp_dir, pair_info, fast_m
     finally:
         plt.close(fig)
 
-    return [{'Metric': 'r-squared correlation', 'Value': np.nan if r_sq_is_na else r_sq}]
+    return [
+        {'Metric': 'r-squared correlation', 'Value': np.nan if r_sq_is_na else r_sq},
+        {'Metric': 'mean abs error', 'Value': np.mean(abs_diffs) if len(abs_diffs) > 0 else np.nan},
+        {'Metric': 'value range max', 'Value': np.nanmax(data_p) if np.any(mask_p) else np.nan} # Or however you define range
+    ]
 
 
 def compare_sparse_vectors(ds_p, ds_g, vt, v1, v2, tmp_dir, pair_info, instr, prod_name, fast_mode=False):
@@ -840,7 +847,7 @@ def write_aggregated_summary(dest_root, stats_root, log):
     if not all_raw: return
     df = pd.DataFrame(all_raw).sort_values('Start')
     df['Value'] = pd.to_numeric(df['Value'], errors='coerce')
-    summary_file = stats_root / "glance_stats_summary.csv"
+    summary_file = stats_root / "stats_summary.csv"
     with open(summary_file, 'w') as f:
         f.write("Product,Variable,Sat,Metric,Count,Min,Max,Mean,Median,NaN,T1,V1,T2,V2...\n")
         for (p, v, m, s), g in df.groupby(['Product', 'Variable', 'Metric', 'Sat'], sort=False):

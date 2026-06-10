@@ -19,7 +19,7 @@ class StatsHarvester:
         self.glance_dir = Path(args.glance_fld).resolve()
         dest = Path(args.dest_fld).resolve()
         # Output file logic: stays in stats/ or specified filename
-        self.output_file = dest / "glance_stats_summary.csv" if dest.is_dir() else dest
+        self.output_file = dest / "stats_summary.csv" if dest.is_dir() else dest
         self.log = log
         self.quiet = getattr(args, 'quiet', False)
 
