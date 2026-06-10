@@ -2,7 +2,7 @@
 """
 PAVE-ARCHIVER: Unified Workspace Lifecycle Manager
 ==================================================
-VERSION: 2.6.0 (Recent 3-Execution Artifact Limiting per Variable)
+VERSION: 2.8.0 (Auto-Discovery of Execution Stats)
 """
 
 import os
@@ -18,6 +18,8 @@ from collections import defaultdict
 from datetime import datetime, timezone
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
+import pandas as pd
+import numpy as np
 
 try:
     from pave_utils import Logger, setup_interrupt_handler
@@ -125,7 +127,30 @@ def process_workspace(workspace, args, log):
 # PHASE 2: LONG-TERM RECORD GENERATION
 # ==========================================
 
-def build_pdf_artifact(prod, sat, var_dict, out_dir, log):
+def get_variable_stats(stats_df, prod, sat, var):
+    """Extracts and averages the target metrics for a specific variable."""
+    if stats_df is None or stats_df.empty:
+        return np.nan, np.nan, np.nan
+
+    # Filter to current scope
+    subset = stats_df[(stats_df['Product'] == prod) & (stats_df['Sat'] == sat) & (stats_df['Variable'] == var)]
+    if subset.empty:
+        return np.nan, np.nan, np.nan
+
+    # Calculate means based on the Metric column
+    r2_vals = subset[subset['Metric'].str.contains('r-squared', case=False, na=False)]['Mean']
+    err_vals = subset[subset['Metric'].str.contains('mean abs error', case=False, na=False)]['Mean']
+
+    # Example logic for finding the max range recorded
+    range_vals = subset[subset['Metric'].str.contains('range', case=False, na=False)]['Max']
+
+    avg_r2 = r2_vals.mean() if not r2_vals.empty else np.nan
+    avg_err = err_vals.mean() if not err_vals.empty else np.nan
+    max_range = range_vals.max() if not range_vals.empty else np.nan
+
+    return avg_r2, avg_err, max_range
+
+def build_pdf_artifact(prod, sat, var_dict, out_dir, stats_df, log):
     """Compiles the filtered chronological images into a single multi-page PDF."""
     pdf_filename = f"PAVE_Record_{prod}_G{sat}.pdf"
     pdf_path = out_dir / pdf_filename
@@ -135,13 +160,55 @@ def build_pdf_artifact(prod, sat, var_dict, out_dir, log):
     with PdfPages(pdf_path) as pdf:
         # Generate Cover Page
         fig = plt.figure(figsize=(11, 8.5))
-        fig.text(0.5, 0.65, "PAVE Long-Term Verification Record", ha='center', va='center', fontsize=26, weight='bold')
-        fig.text(0.5, 0.55, f"Product: {prod}", ha='center', va='center', fontsize=20)
-        fig.text(0.5, 0.50, f"Satellite: GOES-{sat}", ha='center', va='center', fontsize=18)
-        fig.text(0.5, 0.35, f"Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC", ha='center', va='center', fontsize=12, color='gray')
+        fig.text(0.5, 0.90, "PAVE Long-Term Verification Record", ha='center', va='center', fontsize=26, weight='bold')
+        fig.text(0.5, 0.83, f"Product: {prod}", ha='center', va='center', fontsize=20)
+        fig.text(0.5, 0.78, f"Satellite: GOES-{sat}", ha='center', va='center', fontsize=18)
+        fig.text(0.5, 0.73, f"Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC", ha='center', va='center', fontsize=12, color='gray')
 
         total_images = sum(len(item_list) for item_list in var_dict.values())
-        fig.text(0.5, 0.30, f"Includes {len(var_dict)} Variables | {total_images} Total Snapshots (Max 3 Recent Runs per Var)", ha='center', va='center', fontsize=12, color='gray')
+        fig.text(0.5, 0.68, f"Includes {len(var_dict)} Variables | {total_images} Total Snapshots", ha='center', va='center', fontsize=12, color='gray')
+
+        # --- EXECUTIVE SUMMARY TABLE ---
+        ax_table = fig.add_axes([0.1, 0.05, 0.8, 0.55])
+        ax_table.axis('off')
+
+        table_data = [["Variable Name", "Avg R-Squared", "Avg Err Dispersion", "Value Range Limit"]]
+        cell_colors = [["#40466e"] * 4] # Dark header row
+
+        for var in sorted(var_dict.keys()):
+            avg_r2, avg_err, val_range = get_variable_stats(stats_df, prod, sat, var)
+
+            r2_str = f"{avg_r2:.4f}" if pd.notna(avg_r2) else "N/A"
+            err_str = f"{avg_err:.4f}" if pd.notna(avg_err) else "N/A"
+            range_str = f"{val_range:.4f}" if pd.notna(val_range) else "N/A"
+
+            row = [var, r2_str, err_str, range_str]
+
+            # Smart Color Coding logic based on R-Squared
+            if pd.isna(avg_r2):
+                color = "lightgray"
+            elif avg_r2 >= 0.95:
+                color = "palegreen"    # Pass
+            elif avg_r2 >= 0.85:
+                color = "moccasin"     # Close / Caution
+            else:
+                color = "lightcoral"   # Bad / Fail
+
+            table_data.append(row)
+            cell_colors.append([color] * 4)
+
+        if len(table_data) > 1:
+            table = ax_table.table(cellText=table_data, cellColours=cell_colors, loc='center', cellLoc='center', colWidths=[0.4, 0.2, 0.2, 0.2])
+            table.auto_set_font_size(False)
+            table.set_fontsize(10)
+            table.scale(1, 1.5)
+
+            # Make the header text white for contrast
+            for j in range(4):
+                table[(0, j)].get_text().set_color('white')
+                table[(0, j)].get_text().set_weight('bold')
+        else:
+            fig.text(0.5, 0.35, "No statistical data available for table generation.", ha='center', va='center', fontsize=12, color='gray')
 
         pdf.savefig(fig)
         plt.close(fig)
@@ -170,11 +237,16 @@ def build_pdf_artifact(prod, sat, var_dict, out_dir, log):
                     log.warn(f"Failed to append image {img_path.name}: {e}")
                     plt.close('all')
 
-def run_recorder(dashboard_dir, record_dir, log):
+def run_recorder(dashboard_dir, record_dir, stats_df, log):
     """Walks the dashboard directory, limits to the 3 absolute most recent images per var, and dispatches to PDF generator."""
     if not dashboard_dir.exists():
         log.error(f"Dashboard path does not exist for recording: {dashboard_dir}")
         return
+
+    if stats_df is None or stats_df.empty:
+        log.warn("No statistical baseline data was extracted. Tables will render as N/A.")
+    else:
+        log.info(f"Loaded statistical baseline containing {len(stats_df)} records.")
 
     record_dir.mkdir(parents=True, exist_ok=True)
     png_files = sorted(list(dashboard_dir.rglob("*_comparison.png")))
@@ -213,7 +285,7 @@ def run_recorder(dashboard_dir, record_dir, log):
 
     for prod, sats in records.items():
         for sat, var_dict in sats.items():
-            build_pdf_artifact(prod, sat, var_dict, record_dir, log)
+            build_pdf_artifact(prod, sat, var_dict, record_dir, stats_df, log)
 
 def main():
     parser = argparse.ArgumentParser(description="PAVE-ARCHIVER: Unified Workspace Lifecycle Manager")
@@ -237,14 +309,36 @@ def main():
     log = Logger(log_level)
     setup_interrupt_handler(log)
 
+    master_stats_list = []
+
     # 1. Execute Workspace Archival & Harvester
     for ws in args.workspaces:
-        process_workspace(ws, args, log)
+        ws_path = Path(ws).resolve()
+
+        # --- PRE-HARVEST STATS EXTRACTION ---
+        # Hunt down the stats_summary.csv BEFORE the stats/ folder gets zipped/removed
+        if args.record:
+            stats_target = ws_path / "stats" / "stats_summary.csv"
+            if not stats_target.exists():
+                stats_target = ws_path / "stats_summary.csv"
+
+            if stats_target.exists():
+                try:
+                    df = pd.read_csv(stats_target)
+                    if 'Sat' in df.columns:
+                        df['Sat'] = df['Sat'].astype(str).str.zfill(2)
+                    master_stats_list.append(df)
+                    log.debug(f"Successfully extracted memory stats from {ws_path.name}")
+                except Exception as e:
+                    log.warn(f"Failed to read stats in {ws_path.name}: {e}")
+
+        process_workspace(ws_path, args, log)
 
     # 2. Execute PDF Generation (If triggered)
     if args.record:
         if args.dashboard:
-            run_recorder(Path(args.dashboard).resolve(), Path(args.record).resolve(), log)
+            combined_stats_df = pd.concat(master_stats_list, ignore_index=True) if master_stats_list else None
+            run_recorder(Path(args.dashboard).resolve(), Path(args.record).resolve(), combined_stats_df, log)
         else:
             log.warn("Cannot generate central diurnal records without a shared --dashboard source path.")
 
