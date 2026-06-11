@@ -2,7 +2,7 @@
 """
 PAVE UTILS: Shared Infrastructure Module
 ========================================
-VERSION: 1.5.2 (added product family grouping)
+VERSION: 1.5.3 (added product family grouping with dynamic channel splitting)
 """
 
 import os
@@ -74,7 +74,9 @@ PRODUCT_FAMILIES = {
     "Aerosol_AOD": ["AOD"],
     "Cryo_AICE": ["AICE"],
     "Cryo_AITA": ["AITA"],
-    "CMIP": ["CMIP", "MCMIP"],
+    "CMIP": ["CMIP"],
+    "MCMIP": ["MCMIP"],
+    "RAD": ["RAD"],
     "SST": ["SST"],
     "RRQPE": ["RRQPE"],
     "FDC": ["FDC"],
@@ -88,18 +90,29 @@ PRODUCT_FAMILIES = {
 def get_family_for_product(product_dsn):
     """
     Pattern-matches a specific product scene (e.g., 'ACHC' or 'LVMPM1')
-    to its parent Product Family.
+    to its parent Product Family. Automatically splits RAD and CMIP by channel.
     """
     prod_upper = product_dsn.upper()
+    assigned_family = prod_upper
 
+    # 1. Match against the dictionary
     for family, members in PRODUCT_FAMILIES.items():
         # Sort by length descending to prevent short-prefix false positives
         for m in sorted(members, key=len, reverse=True):
             if prod_upper.startswith(m.upper()):
-                return family
+                assigned_family = family
+                break
+        if assigned_family != prod_upper:
+            break
 
-    # Fallback: If not in a family, just return the raw product name
-    return prod_upper
+    # 2. Dynamic Channel Splitting for RAD and CMIP
+    if assigned_family in ["CMIP", "RAD"]:
+        # Search the product string for the channel indicator (e.g., 'C01', 'C13')
+        ch_match = re.search(r'(C\d{2})', prod_upper)
+        if ch_match:
+            assigned_family = f"{assigned_family}_{ch_match.group(1)}"
+
+    return assigned_family
 
 def get_products_in_family(family_name):
     """Returns the base prefixes for the scheduler."""
