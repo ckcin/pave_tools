@@ -51,16 +51,11 @@ class PaveJudge:
             return {}
 
         try:
-            with open(self.stats_file, 'r') as f:
-                first_line = f.readline()
-                col_count = len(first_line.split(',')) + 50
-
+            # Read once with automatic column detection
             df = pd.read_csv(
                 self.stats_file,
-                names=range(col_count),
                 skipinitialspace=True,
-                low_memory=False,
-                skiprows=1
+                low_memory=False
             )
         except Exception as e:
             self.log.error(f"Failed to parse {self.stats_file.name}: {e}")

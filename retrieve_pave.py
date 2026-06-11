@@ -112,7 +112,7 @@ def get_gccs_products(args, gccs_path, log):
                 executor.submit(run_s3_sync, s3_uri,
                                dest, f"*_s{ts}*.nc", log, label=f"Sync GCCS: {folder_name}")
 
-    total_gccs = len(list(gccs_path.rglob("*.nc")))
+    total_gccs = sum(1 for _ in gccs_path.rglob("*.nc"))
     if total_gccs == 0:
         log.error("CRITICAL FAILURE: No GCCS files retrieved. Hitting data gate - halting process.")
         sys.exit(1)
@@ -180,7 +180,8 @@ def extract_ips(args, prem_path, gccs_path, log):
         return
 
     gccs_ip_refs = list(gccs_path.rglob("*I_ABI*.nc"))
-    if not gccs_ip_refs: return
+    if not gccs_ip_refs: 
+        return
     log.info(f"Targeted IP Recovery ({len(gccs_ip_refs)} files)")
 
     preserve_ip = getattr(args, 'preserve_ip', False)
@@ -221,7 +222,9 @@ def check_symmetry(args, gccs_path, prem_path, log):
     log.info(f"{'PRODUCT':<35} | {'STANDARD (G|P)':<14} | {'IP (G|P)':<12}")
     log.info("-" * 75)
 
-    prem_index = {get_start_key(p.name).upper() for p in prem_path.rglob("*.nc") if any(ts in p.name for ts in args.times)}
+    # Create timestamp set once for efficient matching
+    ts_set = set(args.times)
+    prem_index = {get_start_key(p.name).upper() for p in prem_path.rglob("*.nc") if any(ts in p.name for ts in ts_set)}
     audit_map = {}
     if not gccs_path.exists():
         log.error("GCCS path does not exist. Retrieval failed.")

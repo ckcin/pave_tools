@@ -16,10 +16,6 @@ import re
 from pathlib import Path
 from collections import defaultdict
 from datetime import datetime, timezone
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_pdf import PdfPages
-import pandas as pd
-import numpy as np
 
 try:
     from pave_utils import Logger, setup_interrupt_handler, get_family_for_product
@@ -154,6 +150,8 @@ def process_workspace(workspace, args, log):
 
 def get_variable_stats(stats_df, prod, sat=None, var=None):
     """Extracts and averages the target metrics for a specific variable."""
+    import numpy as np
+
     if stats_df is None or stats_df.empty:
         return np.nan, np.nan, np.nan
 
@@ -178,6 +176,8 @@ def get_variable_stats(stats_df, prod, sat=None, var=None):
 
 def _draw_summary_page(pdf, title, subtitle, family, var_tuple_list, stats_df, sat_filter=None):
     """Helper function to draw a standardized summary table page utilizing (prod, var) tuples."""
+    import matplotlib.pyplot as plt
+
     fig = plt.figure(figsize=(11, 8.5))
     fig.text(0.5, 0.90, title, ha='center', va='center', fontsize=26, weight='bold')
     fig.text(0.5, 0.83, f"Product Family: {family}", ha='center', va='center', fontsize=20)
@@ -248,6 +248,8 @@ def build_pdf_artifact(family, sats_dict, out_dir, stats_df, log):
 
     log.info(f"Assembling Product Family Artifact: {pdf_filename}...")
 
+    from matplotlib.backends.backend_pdf import PdfPages
+
     with PdfPages(pdf_path) as pdf:
         # 1. Gather master list of variable tuples for the combined cover page
         all_var_tuples = set()
@@ -301,6 +303,8 @@ def build_pdf_artifact(family, sats_dict, out_dir, stats_df, log):
 
 def run_recorder(dashboard_dir, record_dir, stats_df, log):
     """Walks the dashboard directory, groups by Product Family, limits to 3 recent images per var, and dispatches to PDF generator."""
+    import pandas as pd
+
     if not dashboard_dir.exists():
         log.error(f"Dashboard path does not exist for recording: {dashboard_dir}")
         return

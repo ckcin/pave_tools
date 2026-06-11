@@ -127,7 +127,7 @@ class MetadataAuditor:
         """Full inventory audit: Dimensions, Globals, and Variables."""
         file_issues = []
         try:
-            with xr.open_dataset(p_file) as ds_p, xr.open_dataset(g_file) as ds_g:
+            with xr.open_dataset(p_file, cache=False) as ds_p, xr.open_dataset(g_file, cache=False) as ds_g:
                 # 1. Audit Dimensions (Silent sizes check)
                 p_dims = {k: v for k, v in ds_p.sizes.items()}
                 g_dims = {k: v for k, v in ds_g.sizes.items()}

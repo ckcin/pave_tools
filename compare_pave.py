@@ -101,8 +101,12 @@ class PaveComparator:
         p_files = list(self.prem_root.rglob("*.nc"))
         g_files = list(self.gccs_root.rglob("*.nc"))
 
-        g_strict_map = {f.stem: f for f in g_files}
-        g_identity_map = {utils.get_identity_start_key(f.name): f for f in g_files}
+        # Build both maps in single pass over g_files
+        g_strict_map = {}
+        g_identity_map = {}
+        for f in g_files:
+            g_strict_map[f.stem] = f
+            g_identity_map[utils.get_identity_start_key(f.name)] = f
 
         tasks, matched_p = [], set()
 

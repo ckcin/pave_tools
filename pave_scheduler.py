@@ -147,7 +147,7 @@ def wait_until_pave_finishes(log):
     first_wait = True
     while True:
         try:
-            output = subprocess.check_output(cmd, shell=True).decode()
+            output = subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT).decode()
             if output.strip():
                 if first_wait:
                     log.warn("Active pave.py process detected. Waiting in queue...")
@@ -155,8 +155,11 @@ def wait_until_pave_finishes(log):
                 time.sleep(60)
             else:
                 break
-        except subprocess.CalledProcessError:
-            break
+        except subprocess.CalledProcessError as exc:
+            if exc.returncode == 1:
+                break
+            log.error(f"Error checking active pave.py processes: {exc.output.decode().strip()}")
+            time.sleep(60)
 
 def run_pave(dsn, channels, hour_str, target_date, workspace_dir, pave_script, sat, log, relax_match=False, fast_compare=False):
     timestamp = f"{target_date.year}{target_date.strftime('%j')}{hour_str}0"
@@ -177,8 +180,6 @@ def run_pave(dsn, channels, hour_str, target_date, workspace_dir, pave_script, s
 
     if fast_compare:
         cmd.append("--fast-compare")
-    else:
-        cmd.append("--use-compare")
 
     channel_str = ""
     folder_tag = ""

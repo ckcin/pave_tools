@@ -185,6 +185,14 @@ def print_symmetry_table(prem_fld, gccs_fld, log, relax_match=False):
 
     p_files = list(p_root.rglob("*.nc"))
     g_files = list(g_root.rglob("*.nc"))
+    
+    # Pre-build gccs lookup: rel_dir -> {filename: path}
+    g_lookup = {}
+    for gf in g_files:
+        rel_dir = gf.parent.relative_to(g_root)
+        if rel_dir not in g_lookup:
+            g_lookup[rel_dir] = {}
+        g_lookup[rel_dir][gf.name] = gf
 
     stats = {}
 
@@ -197,17 +205,18 @@ def print_symmetry_table(prem_fld, gccs_fld, log, relax_match=False):
         stats[prod]["prem"] += 1
 
         rel_dir = pf.relative_to(p_root).parent
-        t_dir = g_root / rel_dir
 
-        if t_dir.exists():
+        if rel_dir in g_lookup:
             # FEATURE UPDATE: Evaluate spatial parity using relaxed start time mapping keys
             if relax_match and "_e" in pf.name:
                 m_key = pf.name.split('_e')[0]
-                matches = list(t_dir.glob(f"{m_key}_e*.nc"))
+                matches = [f for fname, f in g_lookup[rel_dir].items() if fname.startswith(m_key) and fname.endswith('_e*.nc')]
             else:
                 m_key = pf.name.split('_c')[0] if "_c" in pf.name else pf.name
-                matches = list(t_dir.glob(f"{m_key}_c*.nc")) if "_c" in pf.name else \
-                          [t_dir / pf.name] if (t_dir / pf.name).exists() else []
+                if "_c" in pf.name:
+                    matches = [f for fname, f in g_lookup[rel_dir].items() if fname.startswith(m_key) and fname.endswith('_c*.nc')]
+                else:
+                    matches = [g_lookup[rel_dir][pf.name]] if pf.name in g_lookup[rel_dir] else []
 
             if matches:
                 stats[prod]["pairs"] += 1

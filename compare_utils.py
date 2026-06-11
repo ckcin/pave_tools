@@ -839,7 +839,7 @@ def compare_sparse_vectors(ds_p, ds_g, vt, v1, v2, tmp_dir, pair_info, instr, pr
 def write_aggregated_summary(dest_root, stats_root, log):
     """Compiles individual stats.csv files into master summary"""
     all_raw = []
-    for l_csv in dest_root.rglob("stats.csv"):
+    for l_csv in dest_root.rglob("stats.csv"):  # Lazy evaluation avoids loading all at once
         try:
             with open(l_csv, 'r') as f:
                 for row in csv.DictReader(f): all_raw.append(row)
