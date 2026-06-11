@@ -2,7 +2,7 @@
 """
 PAVE: Continuous Background Scheduler
 =====================================
-VERSION: 2.41.0 (Unified Lifecycle Manager & Dynamic Stats Integration)
+VERSION: 2.42.0 (Dynamic Product Families Integration)
 
 SCHEDULING & LOAD BALANCING ARCHITECTURE:
 -----------------------------------------
@@ -27,22 +27,16 @@ SCHEDULING & LOAD BALANCING ARCHITECTURE:
    - 'RadCMIP' handles radiance and cloud pairs.
    - Cascades to run 'DMW' (Channels 2, 7, 8, 9, 10) and 'DMWV' (Channel 8).
 
-6. Group Groupings:
-   - RadiationGroup: RSR, DSR, PAR, SWR
-   - SoundingGroup: LVMP, LVTP, DSI, TPW, LSP
-   - CloudGroup: ACH, ACT, CTP, ECBH, EOCH, COD, CPS, CCL
-   - SurfaceAlbedoGroup: LSA, BRF
-
-7. Daily Quirks Coupled to Closest Subsequent LSA Runs:
+6. Daily Quirks Coupled to Closest Subsequent LSA Runs:
    - G19 (12Z Data) executes during the 17:00Z slot alongside the G19 LSA block.
    - G18 (14Z Data) executes during the 21:00Z slot alongside the G18 LSA block.
 
-8. 3-Hour Cryosphere Matching:
+7. 3-Hour Cryosphere Matching:
    - AICE and AITA are dynamically adjusted to target the most recently completed
      3-hourly file timeline (00, 03, 09, 12, 15, 21) via floor-division
      to prevent fetching future, ungenerated data.
 
-9. Automated Lifecycle & Executive Summary Records:
+8. Automated Lifecycle & Executive Summary Records:
    - Valid workspaces are automatically passed to pave_archiver.py.
    - The archiver autonomously discovers 'stats_summary.csv' within each workspace
      to dynamically generate a color-coded executive summary matrix in the final PDF record.
@@ -61,7 +55,7 @@ if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
 try:
-    from pave_utils import Logger, setup_interrupt_handler
+    from pave_utils import Logger, setup_interrupt_handler, get_products_in_family, PRODUCT_FAMILIES
 except ImportError:
     class DummyLogger:
         def __init__(self, *args, **kwargs): pass
@@ -73,6 +67,8 @@ except ImportError:
     Logger = DummyLogger
     print(f"WARNING: 'pave_utils.py' not found in {SCRIPT_DIR}. Falling back to terminal log emulation.")
     def setup_interrupt_handler(log=None): pass
+    def get_products_in_family(fam): return []
+    PRODUCT_FAMILIES = {}
 
 # --- SCHEDULE & ROTATION CONFIGURATION ---
 CYCLE_DAYS = 3
@@ -94,15 +90,23 @@ RAW_PRODUCTS = [
     "RadCMIP|05", "RadCMIP|06", "RadCMIP|07", "RadCMIP|08",
     "RadCMIP|09", "RadCMIP|10", "RadCMIP|11", "RadCMIP|12",
     "RadCMIP|13", "RadCMIP|14", "RadCMIP|15", "RadCMIP|16",
-    "MCMIP",
-    "ADP",    "AOD",
-    "FDC",    "FSC",    "LST",
-    "RRQPE",  "SST",    "AICE",   "AITA",
-    "ESC",    "ESU",    "ETE",
-    "SurfaceAlbedoGroup",       # Combined items: LSA, BRF
-    "RadiationGroup",           # Group items: RSR, DSR, PAR, SWR
-    "SoundingGroup",            # Group items: LVMP, LVTP, DSI, TPW, LSP
-    "CloudGroup",               # Group items: ACH, ACT, CTP, ECBH, EOCH, COD, CPS, CCL
+
+    # Delegate standard products and groups directly to the centralized dict
+    "Sounding",
+    "CloudHeight",
+    "COMP",
+    "Cloud_ACT",
+    "Cloud_ECBH",
+    "Cloud_EOCH",
+    "Cloud_CCL",
+    "Radiation",
+    "SurfaceAlbedo",
+    "Aerosol_ADP",
+    "Aerosol_AOD",
+    "Cryo_AICE",
+    "Cryo_AITA",
+
+    "SST", "RRQPE", "FDC", "FSC", "LST", "ESC", "ESU", "ETE"
 ]
 
 def get_now_utc():
@@ -231,28 +235,22 @@ def execute_slot(workspace_dir, pave_script, log, dashboard_path=None, record_pa
 
     for entry in tasks:
         try:
-            if entry == "SurfaceAlbedoGroup":
-                for surf_dsn in ["LSA", "BRF"]:
-                    folder = run_pave(surf_dsn, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, relax_match=relax_match, fast_compare=fast_compare)
+            # --- DYNAMIC FAMILY MAPPING ---
+            if entry in PRODUCT_FAMILIES:
+                family_members = get_products_in_family(entry)
+                for member_dsn in family_members:
+                    # Specific Cryosphere Timeline Alignment rule
+                    if member_dsn in ["AICE", "AITA"]:
+                        floor_3hr = (slot_hour // 3) * 3
+                        ice_hour_str = f"{floor_3hr:02d}"
+                        log.info(f"Syncing cryosphere product '{member_dsn}' timeline to preceding 3-hour match: {ice_hour_str}0")
+                        folder = run_pave(member_dsn, None, ice_hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, relax_match=relax_match, fast_compare=fast_compare)
+                    else:
+                        folder = run_pave(member_dsn, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, relax_match=relax_match, fast_compare=fast_compare)
+
                     active_workspaces.append(folder)
-            elif entry in ["AICE", "AITA"]:
-                floor_3hr = (slot_hour // 3) * 3
-                ice_hour_str = f"{floor_3hr:02d}"
-                log.info(f"Syncing cryosphere product '{entry}' timeline to preceding 3-hour match: {ice_hour_str}0")
-                folder = run_pave(entry, None, ice_hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, relax_match=relax_match, fast_compare=fast_compare)
-                active_workspaces.append(folder)
-            elif entry == "RadiationGroup":
-                for rad_dsn in ["RSR", "DSR", "PAR", "SWR"]:
-                    folder = run_pave(rad_dsn, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, relax_match=relax_match, fast_compare=fast_compare)
-                    active_workspaces.append(folder)
-            elif entry == "SoundingGroup":
-                for snd_dsn in ["LVMP", "LVTP", "DSI", "TPW", "LSP"]:
-                    folder = run_pave(snd_dsn, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, relax_match=relax_match, fast_compare=fast_compare)
-                    active_workspaces.append(folder)
-            elif entry == "CloudGroup":
-                for cld_dsn in ["ACH", "ACT", "CTP", "ECBH", "EOCH", "COD", "CPS", "CCL"]:
-                    folder = run_pave(cld_dsn, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, relax_match=relax_match, fast_compare=fast_compare)
-                    active_workspaces.append(folder)
+
+            # --- HARDCODED CASCADING TRIGGERS (Rad/CMIP -> DMW) ---
             elif "|" in entry:
                 dsn, channel = entry.split("|")
                 if dsn == "RadCMIP":
@@ -270,14 +268,16 @@ def execute_slot(workspace_dir, pave_script, log, dashboard_path=None, record_pa
                 else:
                     folder = run_pave(dsn, [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, relax_match=relax_match, fast_compare=fast_compare)
                     active_workspaces.append(folder)
+
+            # --- STANDALONE PRODUCTS ---
             else:
                 folder = run_pave(entry, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, relax_match=relax_match, fast_compare=fast_compare)
                 active_workspaces.append(folder)
         except Exception as e:
             log.error(f"Task {entry} failed to execute: {e}")
 
-    # Daily Quirks
-    if "SurfaceAlbedoGroup" in tasks:
+    # --- DAILY QUIRKS (NBAR/BRDF Post-LSA Synchronization) ---
+    if "SurfaceAlbedo" in tasks:
         if slot_hour == 17:
             log.info("Triggering Daily Quirks (NBAR / BRDF) for G19 at 12Z (Closest post-generation LSA slot)...")
             for special_dsn in ["NBAR", "BRDF"]:
@@ -333,7 +333,6 @@ if __name__ == "__main__":
     parser.add_argument("--pave-script", type=str, default=os.path.join(SCRIPT_DIR, "pave.py"), help="The explicit path to pave.py.")
     parser.add_argument("--time-slot", type=int, choices=[1, 5, 9, 13, 17, 21], help="Run a specific time slot immediately and exit.")
 
-    # Updated Output Arguments for the Unified Archiver
     parser.add_argument("--dashboard", type=str, help="Path to the shared dashboard extraction folder.")
     parser.add_argument("--record", type=str, help="Path to the long-term artifact PDF output folder.")
 
