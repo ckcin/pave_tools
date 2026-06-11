@@ -15,7 +15,7 @@ import shutil
 import re
 from pathlib import Path
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 try:
     from pave_utils import Logger, setup_interrupt_handler, get_family_for_product
@@ -37,11 +37,48 @@ FILE_PATTERN = re.compile(
 )
 
 # ==========================================
+# UTILITY: RUN-DATE FILTERING
+# ==========================================
+
+PARENT_TIME_PATTERN = re.compile(r"OR_(?P<dsn>.+?)_G(?P<sat>\d{2}).*?_s(?P<time>\d{14})")
+
+
+def extract_run_datetime(path):
+    """Parse a comparison artifact timestamp from the file name or its parent folder."""
+    match = FILE_PATTERN.search(path.name)
+    if match:
+        try:
+            return datetime.strptime(match.group('time'), "%Y%m%d%H%M%S")
+        except ValueError:
+            pass
+
+    match = PARENT_TIME_PATTERN.search(path.parent.name)
+    if match:
+        try:
+            return datetime.strptime(match.group('time'), "%Y%m%d%H%M%S")
+        except ValueError:
+            pass
+
+    return None
+
+
+def get_recent_run_dates(paths, max_dates=3):
+    """Returns the latest N distinct run dates present in the provided comparison files."""
+    run_dates = set()
+    for f in paths:
+        dt = extract_run_datetime(f)
+        if dt:
+            run_dates.add(dt.date())
+    if not run_dates:
+        return set()
+    return set(sorted(run_dates, reverse=True)[:max_dates])
+
+# ==========================================
 # PHASE 1: ARTIFACT HARVESTING & ARCHIVING
 # ==========================================
 
 def harvest_dashboard(workspace, dash_dir, log):
-    """Extracts comparison artifacts, filtering for only the latest scene per variable, then DOY-groups them."""
+    """Extracts comparison artifacts from the most recent 3 run dates, filtering for only the latest scene per variable, then DOY-groups them."""
     validation_dir = workspace / "validation"
     if not validation_dir.exists():
         return
@@ -51,12 +88,23 @@ def harvest_dashboard(workspace, dash_dir, log):
     if not png_files:
         return
 
-    log.info(f"Harvesting artifacts into Dashboard: {dash_dir.name}...")
+    recent_dates = get_recent_run_dates(png_files, max_dates=3)
+    if not recent_dates:
+        log.info(f"No recent run dates could be determined from {validation_dir.name}/")
+        return
+
+    filtered_files = [f for f in png_files if extract_run_datetime(f) and extract_run_datetime(f).date() in recent_dates]
+
+    if not filtered_files:
+        log.info(f"No validation artifacts found for the latest {len(recent_dates)} run dates in {validation_dir.name}/")
+        return
+
+    log.info(f"Harvesting {len(filtered_files)}/{len(png_files)} artifacts from the latest {len(recent_dates)} run dates into Dashboard: {dash_dir.name}...")
 
     latest_files = {}
     unmatched_files = []
 
-    for f in png_files:
+    for f in filtered_files:
         parent_stem = f.parent.name
         var_name = f.name.replace('_comparison.png', '')
 
@@ -302,7 +350,7 @@ def build_pdf_artifact(family, sats_dict, out_dir, stats_df, log):
                         plt.close('all')
 
 def run_recorder(dashboard_dir, record_dir, stats_df, log):
-    """Walks the dashboard directory, groups by Product Family, limits to 3 recent images per var, and dispatches to PDF generator."""
+    """Walks the dashboard directory, filters to last 3 days, groups by Product Family, limits to 3 recent images per var, and dispatches to PDF generator."""
     import pandas as pd
 
     if not dashboard_dir.exists():
@@ -317,13 +365,16 @@ def run_recorder(dashboard_dir, record_dir, stats_df, log):
     record_dir.mkdir(parents=True, exist_ok=True)
     png_files = sorted(list(dashboard_dir.rglob("*_comparison.png")))
 
-    log.info(f"Discovered {len(png_files)} dashboard files. Filtering history for the 3 most recent runs overall...")
+    recent_dates = get_recent_run_dates(png_files, max_dates=3)
+    filtered_files = [f for f in png_files if extract_run_datetime(f) and extract_run_datetime(f).date() in recent_dates]
+
+    log.info(f"Discovered {len(filtered_files)}/{len(png_files)} files from latest {len(recent_dates)} run dates. Filtering history for the 3 most recent runs overall...")
 
     # Structure: records[family][sat][(prod, var)] = [(full_time_int, filepath), ...]
     records = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
     matched_count = 0
 
-    for f in png_files:
+    for f in filtered_files:
         match = FILE_PATTERN.search(f.name)
         if not match: continue
 
