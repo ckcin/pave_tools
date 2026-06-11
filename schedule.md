@@ -22,21 +22,25 @@ The scheduler mathematically divides the master product list into three payload 
 
 ### **Group A**
 * **Imagery & Winds:** Rad/CMIP (Ch 01, 04, 07, 10, 13, 16) + DMW (Ch 07, 10)
-* **Scalars:** AOD, LST, ESU
-* **Cryosphere:** AICE *(Automatically snaps to nearest 3-hour mark)*
-* **Radiation Group:** RSR, DSR, PAR, SWR
+* **Cloud Families:** COMP (COD, CPS), Cloud_EOCH
+* **Surface Albedo Family:** LSA, BRF *(+ Daily NBAR/BRDF Quirks)*
+* **Scalars:** RRQPE, LST, ETE
+* **Cryosphere:** Cryo_AICE *(Automatically snaps to nearest 3-hour mark)*
 
 ### **Group B**
 * **Imagery & Winds:** Rad/CMIP (Ch 02, 05, 08, 11, 14) + DMW (Ch 02, 08) + DMWV (Ch 08)
-* **Scalars:** MCMIP, FDC, RRQPE, ETE
-* **Cryosphere:** AITA *(Automatically snaps to nearest 3-hour mark)*
-* **Sounding Group:** LVMP, LVTP, DSI, TPW, LSP
+* **Sounding Family:** LVMP, LVTP, DSI, TPW, LSP
+* **Cloud Families:** Cloud_ACT, Cloud_CCL
+* **Aerosol Family:** Aerosol_ADP
+* **Scalars:** FDC, ESC
+* **Cryosphere:** Cryo_AITA *(Automatically snaps to nearest 3-hour mark)*
 
 ### **Group C**
 * **Imagery & Winds:** Rad/CMIP (Ch 03, 06, 09, 12, 15) + DMW (Ch 09)
-* **Scalars:** ADP, FSC, SST, ESC
-* **Cloud Group:** ACH, ACT, CTP, ECBH, EOCH, COD, CPS, CCL
-* **Surface Albedo Group:** LSA, BRF *(+ Daily NBAR/BRDF Quirks)*
+* **Cloud Families:** CloudHeight (ACH, CTP), Cloud_ECBH
+* **Radiation Family:** RSR, DSR, PAR, SWR
+* **Aerosol Family:** Aerosol_AOD
+* **Scalars:** SST, FSC, ESU
 
 ---
 
