@@ -2,7 +2,7 @@
 """
 PAVE-ARCHIVER: Unified Workspace Lifecycle Manager
 ==================================================
-VERSION: 3.0.0 (Product Family Pattern Grouping)
+VERSION: 3.1.0 (Historical Stats Crawl & Regex Alignment)
 """
 
 import os
@@ -13,9 +13,10 @@ import argparse
 import tarfile
 import shutil
 import re
+import time as time_mod
 from pathlib import Path
 from collections import defaultdict
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 
 try:
     from pave_utils import Logger, setup_interrupt_handler, get_family_for_product
@@ -31,9 +32,8 @@ except ImportError:
     def setup_interrupt_handler(log=None): pass
     def get_family_for_product(prod): return prod.upper()
 
-# Upgraded to 14 digits to capture YYYYdddhhmmss and prevent OS-level overwriting
 FILE_PATTERN = re.compile(
-    r"(?:OR_)?(?:ABI-L2-|I_)?(?P<prod>[A-Za-z0-9\-]+).*?_G(?P<sat>\d{2})_(?P<var>.+?)_(?P<time>\d{14})_comparison\.png$"
+    r"^OR_(?P<prod>.+?)_G(?P<sat>\d{2})_(?P<var>.+?)_(?P<time>\d{14})_comparison\.png$"
 )
 
 # ==========================================
@@ -41,7 +41,6 @@ FILE_PATTERN = re.compile(
 # ==========================================
 
 PARENT_TIME_PATTERN = re.compile(r"OR_(?P<dsn>.+?)_G(?P<sat>\d{2}).*?_s(?P<time>\d{14})")
-
 
 def extract_run_datetime(path):
     """Parse a comparison artifact timestamp from the file name or its parent folder."""
@@ -203,11 +202,12 @@ def get_variable_stats(stats_df, prod, sat=None, var=None):
     if stats_df is None or stats_df.empty:
         return np.nan, np.nan, np.nan
 
-    subset = stats_df[stats_df['Product'] == prod]
+    # Ensure robust string matching against the exact Product string
+    subset = stats_df[stats_df['Product'].astype(str).str.strip() == str(prod).strip()]
     if var:
-        subset = subset[subset['Variable'] == var]
+        subset = subset[subset['Variable'].astype(str).str.strip() == str(var).strip()]
     if sat:
-        subset = subset[subset['Sat'] == sat]
+        subset = subset[subset['Sat'].astype(str).str.strip() == str(sat).strip()]
 
     if subset.empty:
         return np.nan, np.nan, np.nan
@@ -332,6 +332,7 @@ def build_pdf_artifact(family, sats_dict, out_dir, stats_df, log):
                 log.verbose(f"  -> Processing variable: {prod}: {var} (G{target_sat})")
                 for _, img_path in sat_vars[(prod, var)]:
                     try:
+                        import matplotlib.pyplot as plt
                         img = plt.imread(img_path)
                         h, w = img.shape[:2]
 
@@ -379,7 +380,11 @@ def run_recorder(dashboard_dir, record_dir, stats_df, log):
         if not match: continue
 
         prod, sat, var, time_str = match.group('prod'), match.group('sat'), match.group('var'), match.group('time')
-        family = get_family_for_product(prod)
+        
+        # Strip prefixes so pattern matching perfectly maps 'CMIPC' to 'CMIP'
+        clean_prod = re.sub(r'^(ABI-L2-|I_)', '', prod, flags=re.IGNORECASE)
+        family = get_family_for_product(clean_prod)
+        
         full_time_int = int(time_str)
 
         records[family][sat][(prod, var)].append((full_time_int, f))
@@ -429,41 +434,44 @@ def main():
     # 1. Execute Workspace Archival & Harvester
     for ws in args.workspaces:
         ws_path = Path(ws).resolve()
-
-        # --- PRE-HARVEST STATS EXTRACTION ---
-        if args.record:
-            possible_stats = [
-                ws_path / "stats" / "stats_summary.csv",
-                ws_path / "stats_summary.csv",
-                ws_path / "stats" / "glance_stats_summary.csv",
-                ws_path / "glance_stats_summary.csv"
-            ]
-
-            stats_target = None
-            for p in possible_stats:
-                if p.exists():
-                    stats_target = p
-                    break
-
-            if stats_target:
-                try:
-                    df = pd.read_csv(stats_target)
-                    if 'Sat' in df.columns:
-                        df['Sat'] = df['Sat'].astype(str).str.zfill(2)
-                    master_stats_list.append(df)
-                    log.debug(f"Successfully extracted memory stats from {ws_path.name} using {stats_target.name}")
-                except Exception as e:
-                    log.warn(f"Failed to read stats in {ws_path.name}: {e}")
-
         process_workspace(ws_path, args, log)
 
-    # 2. Execute PDF Generation (If triggered)
-    if args.record:
-        if args.dashboard:
-            combined_stats_df = pd.concat(master_stats_list, ignore_index=True) if master_stats_list else None
-            run_recorder(Path(args.dashboard).resolve(), Path(args.record).resolve(), combined_stats_df, log)
+    # 2. Historical Stats Crawl & Execute PDF Generation
+    if args.record and args.workspaces:
+        import pandas as pd
+        workspace_root = Path(args.workspaces[0]).resolve().parent
+        log.info("Crawling master workspace root for historical statistical records (last 7 days)...")
+
+        # Cutoff to avoid loading months of old data
+        seven_days_ago = time_mod.time() - (7 * 86400)
+        
+        stat_files = []
+        for sf in workspace_root.rglob("*stats_summary.csv"):
+            try:
+                if sf.stat().st_mtime > seven_days_ago:
+                    stat_files.append(sf)
+            except Exception:
+                pass
+                
+        for sf in stat_files:
+            try:
+                df = pd.read_csv(sf)
+                if 'Sat' in df.columns:
+                    df['Sat'] = df['Sat'].astype(str).str.zfill(2)
+                master_stats_list.append(df)
+            except Exception as e:
+                log.debug(f"Failed to read {sf.name}: {e}")
+
+        if master_stats_list:
+            log.info(f"Successfully loaded {len(stat_files)} recent statistical records.")
+            combined_stats_df = pd.concat(master_stats_list, ignore_index=True)
+            
+            if args.dashboard:
+                run_recorder(Path(args.dashboard).resolve(), Path(args.record).resolve(), combined_stats_df, log)
+            else:
+                log.warn("Cannot generate central diurnal records without a shared --dashboard source path.")
         else:
-            log.warn("Cannot generate central diurnal records without a shared --dashboard source path.")
+            log.warn("No historical stats files found! PDF tables will render as N/A.")
 
 if __name__ == "__main__":
     main()
