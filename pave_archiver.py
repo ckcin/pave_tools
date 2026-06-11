@@ -2,7 +2,7 @@
 """
 PAVE-ARCHIVER: Unified Workspace Lifecycle Manager
 ==================================================
-VERSION: 2.8.0 (Auto-Discovery of Execution Stats)
+VERSION: 2.9.0 (Stats Preservation & Legacy Fallbacks)
 """
 
 import os
@@ -44,37 +44,67 @@ FILE_PATTERN = re.compile(
 # ==========================================
 
 def harvest_dashboard(workspace, dash_dir, log):
-    """Extracts comparison artifacts, renaming and grouping them by DOY to preserve metadata."""
+    """Extracts comparison artifacts, filtering for only the latest scene per variable, then DOY-groups them."""
     validation_dir = workspace / "validation"
     if not validation_dir.exists():
         return
 
     png_files = list(validation_dir.rglob("*_comparison.png"))
 
-    if png_files:
-        log.info(f"Harvesting and DOY-grouping {len(png_files)} comparison artifacts into Dashboard: {dash_dir.name}...")
-        for f in png_files:
-            parent_stem = f.parent.name
-            var_name = f.name.replace('_comparison.png', '')
+    if not png_files:
+        return
 
-            m = re.search(r"OR_(?P<dsn>.+?)_G(?P<sat>\d{2}).*?_s(?P<time>\d{14})", parent_stem)
+    log.info(f"Harvesting artifacts into Dashboard: {dash_dir.name}...")
 
-            if m:
-                dsn = m.group('dsn')
-                sat = m.group('sat')
-                time_str = m.group('time')
-                yyyyddd = time_str[:7]
+    # Track the latest file per unique (DSN/Scene, Sat, Variable) combo
+    # Structure: {(dsn, sat, var_name): (max_time_int, file_path, time_str, yyyyddd)}
+    latest_files = {}
+    unmatched_files = []
 
-                new_name = f"OR_{dsn}_G{sat}_{var_name}_{time_str}_comparison.png"
-                target_dir = dash_dir / yyyyddd
-            else:
-                new_name = f"{parent_stem}_{f.name}"
-                target_dir = dash_dir / "Unknown_DOY"
+    for f in png_files:
+        parent_stem = f.parent.name
+        var_name = f.name.replace('_comparison.png', '')
 
-            target_dir.mkdir(parents=True, exist_ok=True)
-            dest = target_dir / new_name
+        # The 'dsn' group captures the product AND the scene letter (e.g., ABI-L2-CMIPC-M6)
+        m = re.search(r"OR_(?P<dsn>.+?)_G(?P<sat>\d{2}).*?_s(?P<time>\d{14})", parent_stem)
 
-            shutil.copy2(f, dest)
+        if m:
+            dsn = m.group('dsn')
+            sat = m.group('sat')
+            time_str = m.group('time')
+            time_int = int(time_str)
+            yyyyddd = time_str[:7]
+
+            key = (dsn, sat, var_name)
+
+            # If we haven't seen this scene/var yet, or if this one is newer, overwrite the entry
+            if key not in latest_files or time_int > latest_files[key][0]:
+                latest_files[key] = (time_int, f, time_str, yyyyddd)
+        else:
+            unmatched_files.append(f)
+
+    total_copied = 0
+
+    # 1. Export only the most recent matched scene files
+    for (dsn, sat, var_name), (time_int, f, time_str, yyyyddd) in latest_files.items():
+        new_name = f"OR_{dsn}_G{sat}_{var_name}_{time_str}_comparison.png"
+        target_dir = dash_dir / yyyyddd
+        target_dir.mkdir(parents=True, exist_ok=True)
+        dest = target_dir / new_name
+        shutil.copy2(f, dest)
+        total_copied += 1
+
+    # 2. Export any unmatched files normally
+    for f in unmatched_files:
+        parent_stem = f.parent.name
+        new_name = f"{parent_stem}_{f.name}"
+        target_dir = dash_dir / "Unknown_DOY"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        dest = target_dir / new_name
+        shutil.copy2(f, dest)
+        total_copied += 1
+
+    log.info(f"Filtered {len(png_files)} raw validation artifacts down to {total_copied} latest-scene artifacts.")
 
 def archive_folder(folder_path, log):
     """Safely compresses a directory to tar.gz and removes the original if successful."""
@@ -113,7 +143,7 @@ def process_workspace(workspace, args, log):
         dash_dir = Path(args.dashboard).resolve() if args.dashboard else workspace / "dashboard"
         harvest_dashboard(workspace, dash_dir, log)
 
-    core_folders = ["prem", "gccs", "stats", "collocation", "logs"]
+    core_folders = ["prem", "gccs", "collocation", "logs"] #note: stats is intentionally excluded from archival
     if args.clean_validation: core_folders.append("validation")
     if args.clean_glance: core_folders.append("glance")
 
@@ -175,8 +205,14 @@ def build_pdf_artifact(prod, sat, var_dict, out_dir, stats_df, log):
         table_data = [["Variable Name", "Avg R-Squared", "Avg Err Dispersion", "Value Range Limit"]]
         cell_colors = [["#40466e"] * 4] # Dark header row
 
+        r2_tracker = []
+        err_tracker = []
+
         for var in sorted(var_dict.keys()):
             avg_r2, avg_err, val_range = get_variable_stats(stats_df, prod, sat, var)
+
+            if pd.notna(avg_r2): r2_tracker.append(avg_r2)
+            if pd.notna(avg_err): err_tracker.append(avg_err)
 
             r2_str = f"{avg_r2:.4f}" if pd.notna(avg_r2) else "N/A"
             err_str = f"{avg_err:.4f}" if pd.notna(avg_err) else "N/A"
@@ -197,6 +233,15 @@ def build_pdf_artifact(prod, sat, var_dict, out_dir, stats_df, log):
             table_data.append(row)
             cell_colors.append([color] * 4)
 
+        # --- APPEND OVERALL AVERAGE SUMMARY ROW ---
+        if r2_tracker:
+            overall_r2 = np.mean(r2_tracker)
+            overall_err = np.mean(err_tracker) if err_tracker else np.nan
+            overall_color = "palegreen" if overall_r2 >= 0.95 else "moccasin" if overall_r2 >= 0.85 else "lightcoral"
+
+            table_data.append(["OVERALL AVERAGE", f"{overall_r2:.4f}", f"{overall_err:.4f}" if pd.notna(overall_err) else "N/A", "N/A"])
+            cell_colors.append([overall_color] * 4)
+
         if len(table_data) > 1:
             table = ax_table.table(cellText=table_data, cellColours=cell_colors, loc='center', cellLoc='center', colWidths=[0.4, 0.2, 0.2, 0.2])
             table.auto_set_font_size(False)
@@ -207,6 +252,12 @@ def build_pdf_artifact(prod, sat, var_dict, out_dir, stats_df, log):
             for j in range(4):
                 table[(0, j)].get_text().set_color('white')
                 table[(0, j)].get_text().set_weight('bold')
+
+            # Make the Overall Average row bold
+            if r2_tracker:
+                last_row_idx = len(table_data) - 1
+                for j in range(4):
+                    table[(last_row_idx, j)].get_text().set_weight('bold')
         else:
             fig.text(0.5, 0.35, "No statistical data available for table generation.", ha='center', va='center', fontsize=12, color='gray')
 
@@ -316,19 +367,28 @@ def main():
         ws_path = Path(ws).resolve()
 
         # --- PRE-HARVEST STATS EXTRACTION ---
-        # Hunt down the stats_summary.csv BEFORE the stats/ folder gets zipped/removed
         if args.record:
-            stats_target = ws_path / "stats" / "stats_summary.csv"
-            if not stats_target.exists():
-                stats_target = ws_path / "stats_summary.csv"
+            # Check standard and legacy paths to ensure we don't miss data
+            possible_stats = [
+                ws_path / "stats" / "stats_summary.csv",
+                ws_path / "stats_summary.csv",
+                ws_path / "stats" / "glance_stats_summary.csv",
+                ws_path / "glance_stats_summary.csv"
+            ]
 
-            if stats_target.exists():
+            stats_target = None
+            for p in possible_stats:
+                if p.exists():
+                    stats_target = p
+                    break
+
+            if stats_target:
                 try:
                     df = pd.read_csv(stats_target)
                     if 'Sat' in df.columns:
                         df['Sat'] = df['Sat'].astype(str).str.zfill(2)
                     master_stats_list.append(df)
-                    log.debug(f"Successfully extracted memory stats from {ws_path.name}")
+                    log.debug(f"Successfully extracted memory stats from {ws_path.name} using {stats_target.name}")
                 except Exception as e:
                     log.warn(f"Failed to read stats in {ws_path.name}: {e}")
 
