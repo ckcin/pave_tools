@@ -2,7 +2,7 @@
 """
 PAVE-ARCHIVER: Unified Workspace Lifecycle Manager
 ==================================================
-VERSION: 2.10.0 (Combined Satellite PDF Records & Per-Sat Summaries)
+VERSION: 3.0.0 (Product Family Pattern Grouping)
 """
 
 import os
@@ -22,7 +22,7 @@ import pandas as pd
 import numpy as np
 
 try:
-    from pave_utils import Logger, setup_interrupt_handler
+    from pave_utils import Logger, setup_interrupt_handler, get_family_for_product
 except ImportError:
     class DummyLogger:
         def __init__(self, *args, **kwargs): pass
@@ -33,6 +33,7 @@ except ImportError:
         def error(self, m): print(f"[ERROR] {m}")
     Logger = DummyLogger
     def setup_interrupt_handler(log=None): pass
+    def get_family_for_product(prod): return prod.upper()
 
 # Upgraded to 14 digits to capture YYYYdddhhmmss and prevent OS-level overwriting
 FILE_PATTERN = re.compile(
@@ -56,7 +57,6 @@ def harvest_dashboard(workspace, dash_dir, log):
 
     log.info(f"Harvesting artifacts into Dashboard: {dash_dir.name}...")
 
-    # Track the latest file per unique (DSN/Scene, Sat, Variable) combo
     latest_files = {}
     unmatched_files = []
 
@@ -82,7 +82,6 @@ def harvest_dashboard(workspace, dash_dir, log):
 
     total_copied = 0
 
-    # 1. Export only the most recent matched scene files
     for (dsn, sat, var_name), (time_int, f, time_str, yyyyddd) in latest_files.items():
         new_name = f"OR_{dsn}_G{sat}_{var_name}_{time_str}_comparison.png"
         target_dir = dash_dir / yyyyddd
@@ -91,7 +90,6 @@ def harvest_dashboard(workspace, dash_dir, log):
         shutil.copy2(f, dest)
         total_copied += 1
 
-    # 2. Export any unmatched files normally
     for f in unmatched_files:
         parent_stem = f.parent.name
         new_name = f"{parent_stem}_{f.name}"
@@ -155,7 +153,7 @@ def process_workspace(workspace, args, log):
 # ==========================================
 
 def get_variable_stats(stats_df, prod, sat=None, var=None):
-    """Extracts and averages the target metrics for a specific variable. Handles combined satellite averaging if sat=None."""
+    """Extracts and averages the target metrics for a specific variable."""
     if stats_df is None or stats_df.empty:
         return np.nan, np.nan, np.nan
 
@@ -178,23 +176,23 @@ def get_variable_stats(stats_df, prod, sat=None, var=None):
 
     return avg_r2, avg_err, max_range
 
-def _draw_summary_page(pdf, title, subtitle, prod, var_list, stats_df, sat_filter=None):
-    """Helper function to draw a standardized summary table page."""
+def _draw_summary_page(pdf, title, subtitle, family, var_tuple_list, stats_df, sat_filter=None):
+    """Helper function to draw a standardized summary table page utilizing (prod, var) tuples."""
     fig = plt.figure(figsize=(11, 8.5))
     fig.text(0.5, 0.90, title, ha='center', va='center', fontsize=26, weight='bold')
-    fig.text(0.5, 0.83, f"Product: {prod}", ha='center', va='center', fontsize=20)
+    fig.text(0.5, 0.83, f"Product Family: {family}", ha='center', va='center', fontsize=20)
     fig.text(0.5, 0.78, subtitle, ha='center', va='center', fontsize=16, color='gray')
 
     ax_table = fig.add_axes([0.1, 0.05, 0.8, 0.65])
     ax_table.axis('off')
 
-    table_data = [["Variable Name", "Avg R-Squared", "Avg Err Dispersion", "Value Range Limit"]]
+    table_data = [["Product: Variable", "Avg R-Squared", "Avg Err Dispersion", "Value Range Limit"]]
     cell_colors = [["#40466e"] * 4]
 
     r2_tracker = []
     err_tracker = []
 
-    for var in sorted(var_list):
+    for (prod, var) in sorted(var_tuple_list, key=lambda x: (x[0], x[1])):
         avg_r2, avg_err, val_range = get_variable_stats(stats_df, prod, sat=sat_filter, var=var)
 
         if pd.notna(avg_r2): r2_tracker.append(avg_r2)
@@ -204,7 +202,8 @@ def _draw_summary_page(pdf, title, subtitle, prod, var_list, stats_df, sat_filte
         err_str = f"{avg_err:.4f}" if pd.notna(avg_err) else "N/A"
         range_str = f"{val_range:.4f}" if pd.notna(val_range) else "N/A"
 
-        row = [var, r2_str, err_str, range_str]
+        display_name = f"{prod}: {var}"
+        row = [display_name, r2_str, err_str, range_str]
 
         if pd.isna(avg_r2): color = "lightgray"
         elif avg_r2 >= 0.95: color = "palegreen"
@@ -242,29 +241,29 @@ def _draw_summary_page(pdf, title, subtitle, prod, var_list, stats_df, sat_filte
     pdf.savefig(fig)
     plt.close(fig)
 
-def build_pdf_artifact(prod, sats_dict, out_dir, stats_df, log):
-    """Compiles chronological images and summary tables for both satellites into a single PDF."""
-    pdf_filename = f"PAVE_Record_{prod}.pdf"
+def build_pdf_artifact(family, sats_dict, out_dir, stats_df, log):
+    """Compiles grouped chronological images and summary tables for a Product Family into a single PDF."""
+    pdf_filename = f"PAVE_Record_{family}.pdf"
     pdf_path = out_dir / pdf_filename
 
-    log.info(f"Assembling Combined Execution Artifact: {pdf_filename}...")
+    log.info(f"Assembling Product Family Artifact: {pdf_filename}...")
 
     with PdfPages(pdf_path) as pdf:
-        # 1. Gather master list of variables and stats for the combined cover page
-        all_vars = set()
+        # 1. Gather master list of variable tuples for the combined cover page
+        all_var_tuples = set()
         total_images = 0
         sats_present = list(sats_dict.keys())
 
         for sat_data in sats_dict.values():
-            all_vars.update(sat_data.keys())
+            all_var_tuples.update(sat_data.keys())
             total_images += sum(len(items) for items in sat_data.values())
 
-        all_vars = sorted(list(all_vars))
+        all_var_tuples = sorted(list(all_var_tuples), key=lambda x: (x[0], x[1]))
         gen_time = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
 
-        # 2. Render Master Cover Page (Combined Average across all Satellites)
+        # 2. Render Master Cover Page (Combined Average across all Satellites for this Family)
         master_subtitle = f"Satellites: {', '.join([f'G{s}' for s in sats_present])} | Generated: {gen_time} UTC | {total_images} Total Snapshots"
-        _draw_summary_page(pdf, "PAVE Long-Term Verification Record (Combined)", master_subtitle, prod, all_vars, stats_df, sat_filter=None)
+        _draw_summary_page(pdf, "PAVE Long-Term Verification Record (Combined)", master_subtitle, family, all_var_tuples, stats_df, sat_filter=None)
 
         # 3. Process Per-Satellite Pages (Forcing G19 first, then G18)
         for target_sat in ["19", "18"]:
@@ -276,12 +275,12 @@ def build_pdf_artifact(prod, sats_dict, out_dir, stats_df, log):
 
             # 4. Render Satellite-Specific Summary Page
             sat_subtitle = f"Satellite: GOES-{target_sat} Isolated Summary | {sat_total_imgs} Snapshots"
-            _draw_summary_page(pdf, f"GOES-{target_sat} Breakdown", sat_subtitle, prod, sat_vars.keys(), stats_df, sat_filter=target_sat)
+            _draw_summary_page(pdf, f"GOES-{target_sat} Breakdown", sat_subtitle, family, sat_vars.keys(), stats_df, sat_filter=target_sat)
 
             # 5. Append Images for this Satellite
-            for var in sorted(sat_vars.keys()):
-                log.verbose(f"  -> Processing variable: {var} (G{target_sat})")
-                for _, img_path in sat_vars[var]:
+            for (prod, var) in sorted(sat_vars.keys(), key=lambda x: (x[0], x[1])):
+                log.verbose(f"  -> Processing variable: {prod}: {var} (G{target_sat})")
+                for _, img_path in sat_vars[(prod, var)]:
                     try:
                         img = plt.imread(img_path)
                         h, w = img.shape[:2]
@@ -301,7 +300,7 @@ def build_pdf_artifact(prod, sats_dict, out_dir, stats_df, log):
                         plt.close('all')
 
 def run_recorder(dashboard_dir, record_dir, stats_df, log):
-    """Walks the dashboard directory, limits to the 3 absolute most recent images per var, and dispatches to PDF generator."""
+    """Walks the dashboard directory, groups by Product Family, limits to 3 recent images per var, and dispatches to PDF generator."""
     if not dashboard_dir.exists():
         log.error(f"Dashboard path does not exist for recording: {dashboard_dir}")
         return
@@ -316,7 +315,7 @@ def run_recorder(dashboard_dir, record_dir, stats_df, log):
 
     log.info(f"Discovered {len(png_files)} dashboard files. Filtering history for the 3 most recent runs overall...")
 
-    # Structure: records[prod][sat][var] = [(full_time_int, filepath), ...]
+    # Structure: records[family][sat][(prod, var)] = [(full_time_int, filepath), ...]
     records = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
     matched_count = 0
 
@@ -325,27 +324,28 @@ def run_recorder(dashboard_dir, record_dir, stats_df, log):
         if not match: continue
 
         prod, sat, var, time_str = match.group('prod'), match.group('sat'), match.group('var'), match.group('time')
+        family = get_family_for_product(prod)
         full_time_int = int(time_str)
 
-        records[prod][sat][var].append((full_time_int, f))
+        records[family][sat][(prod, var)].append((full_time_int, f))
         matched_count += 1
 
     if matched_count == 0:
         log.warn("No files matched the required PAVE comparison naming format.")
         return
 
-    # Trim logic: Keep only the 3 most recent runs overall per variable
-    for prod, sats in records.items():
+    # Trim logic: Keep only the 3 most recent runs overall per (prod, var) combo
+    for family, sats in records.items():
         for sat, var_dict in sats.items():
-            for var in var_dict:
-                recent_three = sorted(var_dict[var], key=lambda x: x[0], reverse=True)[:3]
-                var_dict[var] = sorted(recent_three, key=lambda x: x[0])
+            for prod_var_tuple in var_dict:
+                recent_three = sorted(var_dict[prod_var_tuple], key=lambda x: x[0], reverse=True)[:3]
+                var_dict[prod_var_tuple] = sorted(recent_three, key=lambda x: x[0])
 
     log.info(f"Successfully filtered images down to the 3 most recent executions overall per variable.")
 
-    # Pass the entire sats dictionary for a single product to allow combined plotting
-    for prod, sats_dict in records.items():
-        build_pdf_artifact(prod, sats_dict, record_dir, stats_df, log)
+    # Dispatch PDF generation based on Family Groups
+    for family, sats_dict in records.items():
+        build_pdf_artifact(family, sats_dict, record_dir, stats_df, log)
 
 def main():
     parser = argparse.ArgumentParser(description="PAVE-ARCHIVER: Unified Workspace Lifecycle Manager")
