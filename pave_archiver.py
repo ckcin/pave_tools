@@ -2,7 +2,7 @@
 """
 PAVE-ARCHIVER: Unified Workspace Lifecycle Manager
 ==================================================
-VERSION: 2.9.0 (Stats Preservation & Legacy Fallbacks)
+VERSION: 2.10.0 (Combined Satellite PDF Records & Per-Sat Summaries)
 """
 
 import os
@@ -57,7 +57,6 @@ def harvest_dashboard(workspace, dash_dir, log):
     log.info(f"Harvesting artifacts into Dashboard: {dash_dir.name}...")
 
     # Track the latest file per unique (DSN/Scene, Sat, Variable) combo
-    # Structure: {(dsn, sat, var_name): (max_time_int, file_path, time_str, yyyyddd)}
     latest_files = {}
     unmatched_files = []
 
@@ -65,7 +64,6 @@ def harvest_dashboard(workspace, dash_dir, log):
         parent_stem = f.parent.name
         var_name = f.name.replace('_comparison.png', '')
 
-        # The 'dsn' group captures the product AND the scene letter (e.g., ABI-L2-CMIPC-M6)
         m = re.search(r"OR_(?P<dsn>.+?)_G(?P<sat>\d{2}).*?_s(?P<time>\d{14})", parent_stem)
 
         if m:
@@ -77,7 +75,6 @@ def harvest_dashboard(workspace, dash_dir, log):
 
             key = (dsn, sat, var_name)
 
-            # If we haven't seen this scene/var yet, or if this one is newer, overwrite the entry
             if key not in latest_files or time_int > latest_files[key][0]:
                 latest_files[key] = (time_int, f, time_str, yyyyddd)
         else:
@@ -143,7 +140,7 @@ def process_workspace(workspace, args, log):
         dash_dir = Path(args.dashboard).resolve() if args.dashboard else workspace / "dashboard"
         harvest_dashboard(workspace, dash_dir, log)
 
-    core_folders = ["prem", "gccs", "collocation", "logs"] #note: stats is intentionally excluded from archival
+    core_folders = ["prem", "gccs", "collocation", "logs"]
     if args.clean_validation: core_folders.append("validation")
     if args.clean_glance: core_folders.append("glance")
 
@@ -157,21 +154,22 @@ def process_workspace(workspace, args, log):
 # PHASE 2: LONG-TERM RECORD GENERATION
 # ==========================================
 
-def get_variable_stats(stats_df, prod, sat, var):
-    """Extracts and averages the target metrics for a specific variable."""
+def get_variable_stats(stats_df, prod, sat=None, var=None):
+    """Extracts and averages the target metrics for a specific variable. Handles combined satellite averaging if sat=None."""
     if stats_df is None or stats_df.empty:
         return np.nan, np.nan, np.nan
 
-    # Filter to current scope
-    subset = stats_df[(stats_df['Product'] == prod) & (stats_df['Sat'] == sat) & (stats_df['Variable'] == var)]
+    subset = stats_df[stats_df['Product'] == prod]
+    if var:
+        subset = subset[subset['Variable'] == var]
+    if sat:
+        subset = subset[subset['Sat'] == sat]
+
     if subset.empty:
         return np.nan, np.nan, np.nan
 
-    # Calculate means based on the Metric column
     r2_vals = subset[subset['Metric'].str.contains('r-squared', case=False, na=False)]['Mean']
     err_vals = subset[subset['Metric'].str.contains('mean abs error', case=False, na=False)]['Mean']
-
-    # Example logic for finding the max range recorded
     range_vals = subset[subset['Metric'].str.contains('range', case=False, na=False)]['Max']
 
     avg_r2 = r2_vals.mean() if not r2_vals.empty else np.nan
@@ -180,113 +178,127 @@ def get_variable_stats(stats_df, prod, sat, var):
 
     return avg_r2, avg_err, max_range
 
-def build_pdf_artifact(prod, sat, var_dict, out_dir, stats_df, log):
-    """Compiles the filtered chronological images into a single multi-page PDF."""
-    pdf_filename = f"PAVE_Record_{prod}_G{sat}.pdf"
+def _draw_summary_page(pdf, title, subtitle, prod, var_list, stats_df, sat_filter=None):
+    """Helper function to draw a standardized summary table page."""
+    fig = plt.figure(figsize=(11, 8.5))
+    fig.text(0.5, 0.90, title, ha='center', va='center', fontsize=26, weight='bold')
+    fig.text(0.5, 0.83, f"Product: {prod}", ha='center', va='center', fontsize=20)
+    fig.text(0.5, 0.78, subtitle, ha='center', va='center', fontsize=16, color='gray')
+
+    ax_table = fig.add_axes([0.1, 0.05, 0.8, 0.65])
+    ax_table.axis('off')
+
+    table_data = [["Variable Name", "Avg R-Squared", "Avg Err Dispersion", "Value Range Limit"]]
+    cell_colors = [["#40466e"] * 4]
+
+    r2_tracker = []
+    err_tracker = []
+
+    for var in sorted(var_list):
+        avg_r2, avg_err, val_range = get_variable_stats(stats_df, prod, sat=sat_filter, var=var)
+
+        if pd.notna(avg_r2): r2_tracker.append(avg_r2)
+        if pd.notna(avg_err): err_tracker.append(avg_err)
+
+        r2_str = f"{avg_r2:.4f}" if pd.notna(avg_r2) else "N/A"
+        err_str = f"{avg_err:.4f}" if pd.notna(avg_err) else "N/A"
+        range_str = f"{val_range:.4f}" if pd.notna(val_range) else "N/A"
+
+        row = [var, r2_str, err_str, range_str]
+
+        if pd.isna(avg_r2): color = "lightgray"
+        elif avg_r2 >= 0.95: color = "palegreen"
+        elif avg_r2 >= 0.85: color = "moccasin"
+        else: color = "lightcoral"
+
+        table_data.append(row)
+        cell_colors.append([color] * 4)
+
+    if r2_tracker:
+        overall_r2 = np.mean(r2_tracker)
+        overall_err = np.mean(err_tracker) if err_tracker else np.nan
+        overall_color = "palegreen" if overall_r2 >= 0.95 else "moccasin" if overall_r2 >= 0.85 else "lightcoral"
+
+        table_data.append(["OVERALL AVERAGE", f"{overall_r2:.4f}", f"{overall_err:.4f}" if pd.notna(overall_err) else "N/A", "N/A"])
+        cell_colors.append([overall_color] * 4)
+
+    if len(table_data) > 1:
+        table = ax_table.table(cellText=table_data, cellColours=cell_colors, loc='center', cellLoc='center', colWidths=[0.4, 0.2, 0.2, 0.2])
+        table.auto_set_font_size(False)
+        table.set_fontsize(10)
+        table.scale(1, 1.5)
+
+        for j in range(4):
+            table[(0, j)].get_text().set_color('white')
+            table[(0, j)].get_text().set_weight('bold')
+
+        if r2_tracker:
+            last_row_idx = len(table_data) - 1
+            for j in range(4):
+                table[(last_row_idx, j)].get_text().set_weight('bold')
+    else:
+        fig.text(0.5, 0.35, "No statistical data available for table generation.", ha='center', va='center', fontsize=12, color='gray')
+
+    pdf.savefig(fig)
+    plt.close(fig)
+
+def build_pdf_artifact(prod, sats_dict, out_dir, stats_df, log):
+    """Compiles chronological images and summary tables for both satellites into a single PDF."""
+    pdf_filename = f"PAVE_Record_{prod}.pdf"
     pdf_path = out_dir / pdf_filename
 
-    log.info(f"Assembling Recent Execution Artifact: {pdf_filename}...")
+    log.info(f"Assembling Combined Execution Artifact: {pdf_filename}...")
 
     with PdfPages(pdf_path) as pdf:
-        # Generate Cover Page
-        fig = plt.figure(figsize=(11, 8.5))
-        fig.text(0.5, 0.90, "PAVE Long-Term Verification Record", ha='center', va='center', fontsize=26, weight='bold')
-        fig.text(0.5, 0.83, f"Product: {prod}", ha='center', va='center', fontsize=20)
-        fig.text(0.5, 0.78, f"Satellite: GOES-{sat}", ha='center', va='center', fontsize=18)
-        fig.text(0.5, 0.73, f"Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC", ha='center', va='center', fontsize=12, color='gray')
+        # 1. Gather master list of variables and stats for the combined cover page
+        all_vars = set()
+        total_images = 0
+        sats_present = list(sats_dict.keys())
 
-        total_images = sum(len(item_list) for item_list in var_dict.values())
-        fig.text(0.5, 0.68, f"Includes {len(var_dict)} Variables | {total_images} Total Snapshots", ha='center', va='center', fontsize=12, color='gray')
+        for sat_data in sats_dict.values():
+            all_vars.update(sat_data.keys())
+            total_images += sum(len(items) for items in sat_data.values())
 
-        # --- EXECUTIVE SUMMARY TABLE ---
-        ax_table = fig.add_axes([0.1, 0.05, 0.8, 0.55])
-        ax_table.axis('off')
+        all_vars = sorted(list(all_vars))
+        gen_time = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
 
-        table_data = [["Variable Name", "Avg R-Squared", "Avg Err Dispersion", "Value Range Limit"]]
-        cell_colors = [["#40466e"] * 4] # Dark header row
+        # 2. Render Master Cover Page (Combined Average across all Satellites)
+        master_subtitle = f"Satellites: {', '.join([f'G{s}' for s in sats_present])} | Generated: {gen_time} UTC | {total_images} Total Snapshots"
+        _draw_summary_page(pdf, "PAVE Long-Term Verification Record (Combined)", master_subtitle, prod, all_vars, stats_df, sat_filter=None)
 
-        r2_tracker = []
-        err_tracker = []
+        # 3. Process Per-Satellite Pages (Forcing G19 first, then G18)
+        for target_sat in ["19", "18"]:
+            if target_sat not in sats_dict:
+                continue
 
-        for var in sorted(var_dict.keys()):
-            avg_r2, avg_err, val_range = get_variable_stats(stats_df, prod, sat, var)
+            sat_vars = sats_dict[target_sat]
+            sat_total_imgs = sum(len(items) for items in sat_vars.values())
 
-            if pd.notna(avg_r2): r2_tracker.append(avg_r2)
-            if pd.notna(avg_err): err_tracker.append(avg_err)
+            # 4. Render Satellite-Specific Summary Page
+            sat_subtitle = f"Satellite: GOES-{target_sat} Isolated Summary | {sat_total_imgs} Snapshots"
+            _draw_summary_page(pdf, f"GOES-{target_sat} Breakdown", sat_subtitle, prod, sat_vars.keys(), stats_df, sat_filter=target_sat)
 
-            r2_str = f"{avg_r2:.4f}" if pd.notna(avg_r2) else "N/A"
-            err_str = f"{avg_err:.4f}" if pd.notna(avg_err) else "N/A"
-            range_str = f"{val_range:.4f}" if pd.notna(val_range) else "N/A"
+            # 5. Append Images for this Satellite
+            for var in sorted(sat_vars.keys()):
+                log.verbose(f"  -> Processing variable: {var} (G{target_sat})")
+                for _, img_path in sat_vars[var]:
+                    try:
+                        img = plt.imread(img_path)
+                        h, w = img.shape[:2]
 
-            row = [var, r2_str, err_str, range_str]
+                        fig = plt.figure(figsize=(w/100, h/100), dpi=100)
+                        ax = fig.add_axes([0, 0, 1, 1])
+                        ax.axis('off')
 
-            # Smart Color Coding logic based on R-Squared
-            if pd.isna(avg_r2):
-                color = "lightgray"
-            elif avg_r2 >= 0.95:
-                color = "palegreen"    # Pass
-            elif avg_r2 >= 0.85:
-                color = "moccasin"     # Close / Caution
-            else:
-                color = "lightcoral"   # Bad / Fail
+                        ax.imshow(img)
+                        ax.text(0.01, 0.01, f"Artifact: {img_path.name}", transform=ax.transAxes, color='black',
+                                fontsize=10, weight='bold', bbox=dict(facecolor='white', alpha=0.7, edgecolor='none'))
 
-            table_data.append(row)
-            cell_colors.append([color] * 4)
-
-        # --- APPEND OVERALL AVERAGE SUMMARY ROW ---
-        if r2_tracker:
-            overall_r2 = np.mean(r2_tracker)
-            overall_err = np.mean(err_tracker) if err_tracker else np.nan
-            overall_color = "palegreen" if overall_r2 >= 0.95 else "moccasin" if overall_r2 >= 0.85 else "lightcoral"
-
-            table_data.append(["OVERALL AVERAGE", f"{overall_r2:.4f}", f"{overall_err:.4f}" if pd.notna(overall_err) else "N/A", "N/A"])
-            cell_colors.append([overall_color] * 4)
-
-        if len(table_data) > 1:
-            table = ax_table.table(cellText=table_data, cellColours=cell_colors, loc='center', cellLoc='center', colWidths=[0.4, 0.2, 0.2, 0.2])
-            table.auto_set_font_size(False)
-            table.set_fontsize(10)
-            table.scale(1, 1.5)
-
-            # Make the header text white for contrast
-            for j in range(4):
-                table[(0, j)].get_text().set_color('white')
-                table[(0, j)].get_text().set_weight('bold')
-
-            # Make the Overall Average row bold
-            if r2_tracker:
-                last_row_idx = len(table_data) - 1
-                for j in range(4):
-                    table[(last_row_idx, j)].get_text().set_weight('bold')
-        else:
-            fig.text(0.5, 0.35, "No statistical data available for table generation.", ha='center', va='center', fontsize=12, color='gray')
-
-        pdf.savefig(fig)
-        plt.close(fig)
-
-        # Append Top 3 Images per Variable
-        for var in sorted(var_dict.keys()):
-            log.verbose(f"  -> Processing variable: {var}")
-            chronological_items = var_dict[var]
-
-            for full_time_int, img_path in chronological_items:
-                try:
-                    img = plt.imread(img_path)
-                    h, w = img.shape[:2]
-
-                    fig = plt.figure(figsize=(w/100, h/100), dpi=100)
-                    ax = fig.add_axes([0, 0, 1, 1])
-                    ax.axis('off')
-
-                    ax.imshow(img)
-                    ax.text(0.01, 0.01, f"Artifact: {img_path.name}", transform=ax.transAxes, color='black',
-                            fontsize=10, weight='bold', bbox=dict(facecolor='white', alpha=0.7, edgecolor='none'))
-
-                    pdf.savefig(fig)
-                    plt.close(fig)
-                except Exception as e:
-                    log.warn(f"Failed to append image {img_path.name}: {e}")
-                    plt.close('all')
+                        pdf.savefig(fig)
+                        plt.close(fig)
+                    except Exception as e:
+                        log.warn(f"Failed to append image {img_path.name}: {e}")
+                        plt.close('all')
 
 def run_recorder(dashboard_dir, record_dir, stats_df, log):
     """Walks the dashboard directory, limits to the 3 absolute most recent images per var, and dispatches to PDF generator."""
@@ -326,17 +338,14 @@ def run_recorder(dashboard_dir, record_dir, stats_df, log):
     for prod, sats in records.items():
         for sat, var_dict in sats.items():
             for var in var_dict:
-                # 1. Sort descending to isolate the 3 highest/newest timestamps overall
                 recent_three = sorted(var_dict[var], key=lambda x: x[0], reverse=True)[:3]
-
-                # 2. Sort those 3 back into ascending chronological order for proper PDF reading sequence
                 var_dict[var] = sorted(recent_three, key=lambda x: x[0])
 
     log.info(f"Successfully filtered images down to the 3 most recent executions overall per variable.")
 
-    for prod, sats in records.items():
-        for sat, var_dict in sats.items():
-            build_pdf_artifact(prod, sat, var_dict, record_dir, stats_df, log)
+    # Pass the entire sats dictionary for a single product to allow combined plotting
+    for prod, sats_dict in records.items():
+        build_pdf_artifact(prod, sats_dict, record_dir, stats_df, log)
 
 def main():
     parser = argparse.ArgumentParser(description="PAVE-ARCHIVER: Unified Workspace Lifecycle Manager")
@@ -368,7 +377,6 @@ def main():
 
         # --- PRE-HARVEST STATS EXTRACTION ---
         if args.record:
-            # Check standard and legacy paths to ensure we don't miss data
             possible_stats = [
                 ws_path / "stats" / "stats_summary.csv",
                 ws_path / "stats_summary.csv",
