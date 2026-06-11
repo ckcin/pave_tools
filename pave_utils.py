@@ -2,7 +2,7 @@
 """
 PAVE UTILS: Shared Infrastructure Module
 ========================================
-VERSION: 1.5.1 (Automated Stream Isolation & TTY Logging Guard with Relaxed Audit)
+VERSION: 1.5.2 (added product family grouping)
 """
 
 import os
@@ -55,6 +55,55 @@ PRODUCT_MAP = {
     "fe284": {"instr": "SUVI", "level": "L1b", "tag": "Fe284", "comp_type": "standard"},
     "he303": {"instr": "SUVI", "level": "L1b", "tag": "He303", "comp_type": "standard"},
 }
+
+# =============================================================================
+# PRODUCT FAMILY GROUPINGS & PATTERN MATCHING
+# =============================================================================
+PRODUCT_FAMILIES = {
+    "Sounding": ["LVMP", "LVTP", "DSI", "TPW", "LSP"],
+    "CloudHeight": ["ACH", "CTP"],
+    "COMP": ["COD", "CPS"],
+    "Cloud_ACT": ["ACT"],
+    "Cloud_ECBH": ["ECBH"],
+    "Cloud_EOCH": ["EOCH"],
+    "Cloud_CCL": ["CCL"],
+    "Radiation": ["RSR", "DSR", "PAR", "SWR"],
+    "SurfaceAlbedo": ["LSA", "BRF", "NBAR", "BRDFF20", "NBARF20"],
+    "DerivedMotion": ["DMW", "DMWV"],
+    "Aerosol_ADP": ["ADP"],
+    "Aerosol_AOD": ["AOD"],
+    "Cryo_AICE": ["AICE"],
+    "Cryo_AITA": ["AITA"],
+    "CMIP": ["CMIP", "MCMIP"],
+    "SST": ["SST"],
+    "RRQPE": ["RRQPE"],
+    "FDC": ["FDC"],
+    "FSC": ["FSC"],
+    "LST": ["LST"],
+    "ESC": ["ESC"],
+    "ESU": ["ESU"],
+    "ETE": ["ETE"]
+}
+
+def get_family_for_product(product_dsn):
+    """
+    Pattern-matches a specific product scene (e.g., 'ACHC' or 'LVMPM1')
+    to its parent Product Family.
+    """
+    prod_upper = product_dsn.upper()
+
+    for family, members in PRODUCT_FAMILIES.items():
+        # Sort by length descending to prevent short-prefix false positives
+        for m in sorted(members, key=len, reverse=True):
+            if prod_upper.startswith(m.upper()):
+                return family
+
+    # Fallback: If not in a family, just return the raw product name
+    return prod_upper
+
+def get_products_in_family(family_name):
+    """Returns the base prefixes for the scheduler."""
+    return PRODUCT_FAMILIES.get(family_name, [])
 
 # =============================================================================
 # LOGGING ENGINE
