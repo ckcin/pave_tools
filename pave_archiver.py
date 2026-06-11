@@ -2,7 +2,43 @@
 """
 PAVE-ARCHIVER: Unified Workspace Lifecycle Manager
 ==================================================
-VERSION: 3.1.0 (Historical Stats Crawl & Regex Alignment)
+VERSION: 3.1.2 (Documentation Update)
+
+LIFECYCLE & REPORTING ARCHITECTURE:
+-----------------------------------
+This engine operates in two distinct phases to manage disk space and generate
+long-term verification artifacts.
+
+PHASE 1: Workspace Cleanup & Dashboard Harvesting
+   - Evaluates completed PAVE workspaces and identifies comparison artifacts (*_comparison.png).
+   - Prevents dashboard bloat by filtering images down to the single latest scene
+     (e.g., extracting only the newest Meso sector out of 10 rapid-fire generations).
+   - Compresses heavy spatial/data directories (prem, gccs, collocation, validation)
+     into .tar.gz archives to reclaim disk space.
+   - Intentionally leaves 'stats' directories uncompressed for historical polling.
+
+PHASE 2: Historical Crawling & Long-Term Record Generation
+   - Initiates a global crawl of the master workspace root, gathering all
+     'stats_summary.csv' files modified within the last 7 days.
+   - Combines these files into a master Pandas dataframe to calculate
+     rolling averages (Avg R-Squared, Err Dispersion, Range).
+   - Scans the global dashboard and groups all artifacts by their 'Product Family'
+     (e.g., grouping ACH and CTP into 'CloudHeight').
+   - Trims the image history down to the 3 most recent executions per variable.
+   - Generates a multi-page PDF record featuring a color-coded Executive Summary
+     table followed by the chronological snapshots.
+
+EXAMPLE STANDALONE USAGE:
+-------------------------
+To run the archiver manually across specific workspaces while triggering PDF generation:
+
+/path/to/pave_archiver.py \
+    /path/to/workspace/Rad_20261621700 \
+    /path/to/workspace/CMIP_20261621700 \
+    --clean-validation \
+    --dashboard /path/to/dashboard \
+    --record /path/to/records \
+    --verbose
 """
 
 import os
@@ -17,6 +53,12 @@ import time as time_mod
 from pathlib import Path
 from collections import defaultdict
 from datetime import datetime, timezone
+
+# Restored to global scope for clean linting and stable execution
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
 
 try:
     from pave_utils import Logger, setup_interrupt_handler, get_family_for_product
@@ -59,7 +101,6 @@ def extract_run_datetime(path):
             pass
 
     return None
-
 
 def get_recent_run_dates(paths, max_dates=3):
     """Returns the latest N distinct run dates present in the provided comparison files."""
@@ -197,12 +238,9 @@ def process_workspace(workspace, args, log):
 
 def get_variable_stats(stats_df, prod, sat=None, var=None):
     """Extracts and averages the target metrics for a specific variable."""
-    import numpy as np
-
     if stats_df is None or stats_df.empty:
         return np.nan, np.nan, np.nan
 
-    # Ensure robust string matching against the exact Product string
     subset = stats_df[stats_df['Product'].astype(str).str.strip() == str(prod).strip()]
     if var:
         subset = subset[subset['Variable'].astype(str).str.strip() == str(var).strip()]
@@ -224,8 +262,6 @@ def get_variable_stats(stats_df, prod, sat=None, var=None):
 
 def _draw_summary_page(pdf, title, subtitle, family, var_tuple_list, stats_df, sat_filter=None):
     """Helper function to draw a standardized summary table page utilizing (prod, var) tuples."""
-    import matplotlib.pyplot as plt
-
     fig = plt.figure(figsize=(11, 8.5))
     fig.text(0.5, 0.90, title, ha='center', va='center', fontsize=26, weight='bold')
     fig.text(0.5, 0.83, f"Product Family: {family}", ha='center', va='center', fontsize=20)
@@ -296,8 +332,6 @@ def build_pdf_artifact(family, sats_dict, out_dir, stats_df, log):
 
     log.info(f"Assembling Product Family Artifact: {pdf_filename}...")
 
-    from matplotlib.backends.backend_pdf import PdfPages
-
     with PdfPages(pdf_path) as pdf:
         # 1. Gather master list of variable tuples for the combined cover page
         all_var_tuples = set()
@@ -332,7 +366,6 @@ def build_pdf_artifact(family, sats_dict, out_dir, stats_df, log):
                 log.verbose(f"  -> Processing variable: {prod}: {var} (G{target_sat})")
                 for _, img_path in sat_vars[(prod, var)]:
                     try:
-                        import matplotlib.pyplot as plt
                         img = plt.imread(img_path)
                         h, w = img.shape[:2]
 
@@ -352,8 +385,6 @@ def build_pdf_artifact(family, sats_dict, out_dir, stats_df, log):
 
 def run_recorder(dashboard_dir, record_dir, stats_df, log):
     """Walks the dashboard directory, filters to last 3 days, groups by Product Family, limits to 3 recent images per var, and dispatches to PDF generator."""
-    import pandas as pd
-
     if not dashboard_dir.exists():
         log.error(f"Dashboard path does not exist for recording: {dashboard_dir}")
         return
@@ -380,11 +411,11 @@ def run_recorder(dashboard_dir, record_dir, stats_df, log):
         if not match: continue
 
         prod, sat, var, time_str = match.group('prod'), match.group('sat'), match.group('var'), match.group('time')
-        
+
         # Strip prefixes so pattern matching perfectly maps 'CMIPC' to 'CMIP'
         clean_prod = re.sub(r'^(ABI-L2-|I_)', '', prod, flags=re.IGNORECASE)
         family = get_family_for_product(clean_prod)
-        
+
         full_time_int = int(time_str)
 
         records[family][sat][(prod, var)].append((full_time_int, f))
@@ -438,13 +469,12 @@ def main():
 
     # 2. Historical Stats Crawl & Execute PDF Generation
     if args.record and args.workspaces:
-        import pandas as pd
         workspace_root = Path(args.workspaces[0]).resolve().parent
         log.info("Crawling master workspace root for historical statistical records (last 7 days)...")
 
         # Cutoff to avoid loading months of old data
         seven_days_ago = time_mod.time() - (7 * 86400)
-        
+
         stat_files = []
         for sf in workspace_root.rglob("*stats_summary.csv"):
             try:
@@ -452,7 +482,7 @@ def main():
                     stat_files.append(sf)
             except Exception:
                 pass
-                
+
         for sf in stat_files:
             try:
                 df = pd.read_csv(sf)
@@ -465,7 +495,7 @@ def main():
         if master_stats_list:
             log.info(f"Successfully loaded {len(stat_files)} recent statistical records.")
             combined_stats_df = pd.concat(master_stats_list, ignore_index=True)
-            
+
             if args.dashboard:
                 run_recorder(Path(args.dashboard).resolve(), Path(args.record).resolve(), combined_stats_df, log)
             else:
