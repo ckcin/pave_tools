@@ -2,7 +2,7 @@
 """
 PAVE: Continuous Background Scheduler
 =====================================
-VERSION: 2.42.0 (Dynamic Product Families Integration)
+VERSION: 2.43.0 (Documentation Update)
 
 SCHEDULING & LOAD BALANCING ARCHITECTURE:
 -----------------------------------------
@@ -40,6 +40,21 @@ SCHEDULING & LOAD BALANCING ARCHITECTURE:
    - Valid workspaces are automatically passed to pave_archiver.py.
    - The archiver autonomously discovers 'stats_summary.csv' within each workspace
      to dynamically generate a color-coded executive summary matrix in the final PDF record.
+
+EXAMPLE PRODUCTION DEPLOYMENT:
+------------------------------
+To run the scheduler continuously in the background, immune to terminal disconnects,
+use the following generic `nohup` construct:
+
+nohup /path/to/pave_scheduler.py \
+    --workspace /path/to/workspace/ \
+    --pave-script /path/to/pave.py \
+    --dashboard /path/to/dashboard \
+    --record /path/to/records \
+    --relax-match \
+    --fast-compare \
+    --verbose \
+    >> /path/to/logs/master_scheduler.log 2>&1 &
 """
 
 import argparse
