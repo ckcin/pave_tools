@@ -2,7 +2,7 @@
 """
 PAVE-ARCHIVER: Unified Workspace Lifecycle Manager
 ==================================================
-VERSION: 3.1.2 (Documentation Update)
+VERSION: 3.1.3 (Datetime Parsing & Unconditional PDF Generation Fix)
 
 LIFECYCLE & REPORTING ARCHITECTURE:
 -----------------------------------
@@ -89,14 +89,17 @@ def extract_run_datetime(path):
     match = FILE_PATTERN.search(path.name)
     if match:
         try:
-            return datetime.strptime(match.group('time'), "%Y%m%d%H%M%S")
+            # GOES-R format is YYYYDDDHHMMSSS (14 chars). Slice to 13 to parse standard seconds.
+            time_str = match.group('time')[:13]
+            return datetime.strptime(time_str, "%Y%j%H%M%S")
         except ValueError:
             pass
 
     match = PARENT_TIME_PATTERN.search(path.parent.name)
     if match:
         try:
-            return datetime.strptime(match.group('time'), "%Y%m%d%H%M%S")
+            time_str = match.group('time')[:13]
+            return datetime.strptime(time_str, "%Y%j%H%M%S")
         except ValueError:
             pass
 
@@ -492,16 +495,18 @@ def main():
             except Exception as e:
                 log.debug(f"Failed to read {sf.name}: {e}")
 
+        # Unconditionally process the record step!
         if master_stats_list:
             log.info(f"Successfully loaded {len(stat_files)} recent statistical records.")
             combined_stats_df = pd.concat(master_stats_list, ignore_index=True)
-
-            if args.dashboard:
-                run_recorder(Path(args.dashboard).resolve(), Path(args.record).resolve(), combined_stats_df, log)
-            else:
-                log.warn("Cannot generate central diurnal records without a shared --dashboard source path.")
         else:
             log.warn("No historical stats files found! PDF tables will render as N/A.")
+            combined_stats_df = None
+
+        if args.dashboard:
+            run_recorder(Path(args.dashboard).resolve(), Path(args.record).resolve(), combined_stats_df, log)
+        else:
+            log.warn("Cannot generate central diurnal records without a shared --dashboard source path.")
 
 if __name__ == "__main__":
     main()
