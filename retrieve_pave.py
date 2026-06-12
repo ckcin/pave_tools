@@ -2,7 +2,7 @@
 """
 RETRIEVE-PAVE: Data Collection Engine
 =====================================
-VERSION: 1.5.1 (Relaxed Matching Flag Architecture Support)
+VERSION: 1.6.2 (Corrected IP Sidecar URI path)
 """
 
 import argparse
@@ -13,6 +13,8 @@ import subprocess
 import tarfile
 import re
 import shlex
+import json
+import boto3
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
@@ -174,6 +176,17 @@ def get_on_prem_products(args, gccs_path, prem_path, log):
 
     if tmp_sync_dir.exists(): shutil.rmtree(tmp_sync_dir)
 
+def _fetch_byte_range(s3_client, bucket, key, offset, size, target, log):
+    """Thread-safe worker function to extract a specific byte-range from S3 directly to disk."""
+    try:
+        resp = s3_client.get_object(Bucket=bucket, Key=key, Range=f"bytes={offset}-{offset+size-1}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with open(target, 'wb') as f:
+            f.write(resp['Body'].read())
+        log.verbose(f"  -> Extracted Byte-Range: {target.name} ({size/1024/1024:.2f} MB)")
+    except Exception as e:
+        log.error(f"Byte-range fetch failed for {target.name}: {e}")
+
 def extract_ips(args, prem_path, gccs_path, log):
     if getattr(args, 'skip_ip', False):
         log.info("Skipping Intermediate Product (IP) recovery as requested.")
@@ -182,7 +195,7 @@ def extract_ips(args, prem_path, gccs_path, log):
     gccs_ip_refs = list(gccs_path.rglob("*I_ABI*.nc"))
     if not gccs_ip_refs: 
         return
-    log.info(f"Targeted IP Recovery ({len(gccs_ip_refs)} files)")
+    log.info(f"Targeted IP Recovery ({len(gccs_ip_refs)} files needed)")
 
     preserve_ip = getattr(args, 'preserve_ip', False)
     ip_data_dir = prem_path.parent / "ip_data"
@@ -190,13 +203,59 @@ def extract_ips(args, prem_path, gccs_path, log):
         ip_data_dir.mkdir(parents=True, exist_ok=True)
 
     target_sats = [args.sat] if getattr(args, 'sat', None) else [18, 19]
+    
+    # Establish S3 Client for Byte-Range API calls
+    session = boto3.Session(profile_name="geocloud")
+    s3 = session.client('s3')
+    
+    bucket = EGRESS_ROOT.split('/')[0]
+    base_prefix = "/".join(EGRESS_ROOT.split('/')[1:])
+    index_prefix = f"{base_prefix}-index"
 
     with ThreadPoolExecutor(max_workers=args.threads) as executor:
         for ts in args.times:
             for sat in target_sats:
                 tar_name = f"GOES-{sat}_ABI_L2_IntermediateProducts_day{ts[4:7]}_hour{ts[7:9]}.tar"
-                executor.submit(run_s3_sync, f"s3://{EGRESS_ROOT}/GOES-{sat}/", prem_path, tar_name, log, label=f"IP Tar Sync")
+                tar_key = f"{base_prefix}/GOES-{sat}/{tar_name}"
+                
+                # 1. Byte-Range Optimization Attempt
+                index_data = None
+                if not preserve_ip:
+                    # Explicitly removed the GOES-{sat}/ subfolder from the index path
+                    idx_key = f"{index_prefix}/{tar_name}.index.json"
+                    full_uri = f"s3://{bucket}/{idx_key}"
+                    
+                    log.debug(f"Attempting to fetch IP sidecar index: {full_uri}")
+                    
+                    try:
+                        resp = s3.get_object(Bucket=bucket, Key=idx_key)
+                        index_data = resp['Body'].read().decode('utf-8')
+                        log.debug(f"Successfully loaded S3 Index Sidecar: {full_uri}")
+                    except Exception as e:
+                        log.debug(f"Failed to fetch sidecar index ({full_uri}): {e}")
 
+                if index_data:
+                    log.info(f"Using high-speed byte-range extraction for {tar_name}...")
+                    try:
+                        entries = json.loads(index_data)
+                    except json.JSONDecodeError:
+                        entries = [json.loads(line) for line in index_data.splitlines() if line.strip()]
+
+                    for ip_ref in gccs_ip_refs:
+                        target = prem_path / ip_ref.relative_to(gccs_path)
+                        if target.exists(): continue
+                        
+                        start_key = get_start_key(ip_ref.name)
+                        match = next((item for item in entries if start_key in item.get('name', '')), None)
+
+                        if match:
+                            executor.submit(_fetch_byte_range, s3, bucket, tar_key, match['offset_data'], match['size'], target, log)
+                else:
+                    # 2. Fallback to Full Tarball Retrieval
+                    log.info(f"Index sidecar not found (or --preserve-ip active). Falling back to full tarball sync for {tar_name}...")
+                    executor.submit(run_s3_sync, f"s3://{EGRESS_ROOT}/GOES-{sat}/", prem_path, tar_name, log, label=f"IP Tar Sync")
+
+    # Final Cleanup for any Fallback Tarballs that were downloaded
     for tar_path in prem_path.glob("*.tar"):
         try:
             with tarfile.open(tar_path, 'r') as tf:
