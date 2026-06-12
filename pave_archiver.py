@@ -2,7 +2,7 @@
 """
 PAVE-ARCHIVER: Unified Workspace Lifecycle Manager
 ==================================================
-VERSION: 3.1.3 (Datetime Parsing & Unconditional PDF Generation Fix)
+VERSION: 3.2.1 (Ragged CSV Shift Bug & Sat Parsing Fix)
 
 LIFECYCLE & REPORTING ARCHITECTURE:
 -----------------------------------
@@ -11,34 +11,14 @@ long-term verification artifacts.
 
 PHASE 1: Workspace Cleanup & Dashboard Harvesting
    - Evaluates completed PAVE workspaces and identifies comparison artifacts (*_comparison.png).
-   - Prevents dashboard bloat by filtering images down to the single latest scene
-     (e.g., extracting only the newest Meso sector out of 10 rapid-fire generations).
-   - Compresses heavy spatial/data directories (prem, gccs, collocation, validation)
-     into .tar.gz archives to reclaim disk space.
-   - Intentionally leaves 'stats' directories uncompressed for historical polling.
+   - Prevents dashboard bloat by filtering images down to the single latest scene.
+   - Compresses heavy spatial/data directories into .tar.gz archives.
 
 PHASE 2: Historical Crawling & Long-Term Record Generation
-   - Initiates a global crawl of the master workspace root, gathering all
-     'stats_summary.csv' files modified within the last 7 days.
-   - Combines these files into a master Pandas dataframe to calculate
-     rolling averages (Avg R-Squared, Err Dispersion, Range).
-   - Scans the global dashboard and groups all artifacts by their 'Product Family'
-     (e.g., grouping ACH and CTP into 'CloudHeight').
-   - Trims the image history down to the 3 most recent executions per variable.
-   - Generates a multi-page PDF record featuring a color-coded Executive Summary
-     table followed by the chronological snapshots.
-
-EXAMPLE STANDALONE USAGE:
--------------------------
-To run the archiver manually across specific workspaces while triggering PDF generation:
-
-/path/to/pave_archiver.py \
-    /path/to/workspace/Rad_20261621700 \
-    /path/to/workspace/CMIP_20261621700 \
-    --clean-validation \
-    --dashboard /path/to/dashboard \
-    --record /path/to/records \
-    --verbose
+   - Initiates a global crawl of the master workspace root for recent stats.
+   - Safely parses ragged CSVs to prevent Pandas Multi-Index shifting bugs.
+   - Scans the global dashboard and groups artifacts by 'Product Family'.
+   - Explicitly restricts PDF generation ONLY to the active Product Families.
 """
 
 import os
@@ -49,6 +29,7 @@ import argparse
 import tarfile
 import shutil
 import re
+import csv
 import time as time_mod
 from pathlib import Path
 from collections import defaultdict
@@ -213,18 +194,30 @@ def archive_folder(folder_path, log):
         log.error(f"Failed to archive {folder_path.name}: {e}")
 
 def process_workspace(workspace, args, log):
-    """Executes the lifecycle sweep on a single PAVE workspace."""
+    """Executes the lifecycle sweep on a single PAVE workspace and identifies active Product Families."""
     workspace = Path(workspace).resolve()
     if not workspace.exists() or not workspace.is_dir():
         log.warn(f"Workspace not found: {workspace}")
-        return
+        return set()
 
     log.info(f"--- Lifecycle Sweep: {workspace.name} ---")
 
+    # 1. Identify which Product Families are actively being processed in this workspace
+    active_families = set()
+    val_dir = workspace / "validation"
+    if val_dir.exists():
+        for f in val_dir.rglob("*_comparison.png"):
+            m = re.search(r"OR_(?P<dsn>.+?)_G(?P<sat>\d{2}).*?_s(?P<time>\d{14})", f.parent.name)
+            if m:
+                clean_prod = re.sub(r'^(ABI-L2-|I_)', '', m.group('dsn'), flags=re.IGNORECASE)
+                active_families.add(get_family_for_product(clean_prod))
+
+    # 2. Harvest Dashboard if requested
     if args.clean_validation:
         dash_dir = Path(args.dashboard).resolve() if args.dashboard else workspace / "dashboard"
         harvest_dashboard(workspace, dash_dir, log)
 
+    # 3. Archive
     core_folders = ["prem", "gccs", "collocation", "logs"]
     if args.clean_validation: core_folders.append("validation")
     if args.clean_glance: core_folders.append("glance")
@@ -233,6 +226,8 @@ def process_workspace(workspace, args, log):
         folder_path = workspace / f_name
         if folder_path.exists():
             archive_folder(folder_path, log)
+
+    return active_families
 
 
 # ==========================================
@@ -386,8 +381,8 @@ def build_pdf_artifact(family, sats_dict, out_dir, stats_df, log):
                         log.warn(f"Failed to append image {img_path.name}: {e}")
                         plt.close('all')
 
-def run_recorder(dashboard_dir, record_dir, stats_df, log):
-    """Walks the dashboard directory, filters to last 3 days, groups by Product Family, limits to 3 recent images per var, and dispatches to PDF generator."""
+def run_recorder(dashboard_dir, record_dir, stats_df, active_families, log):
+    """Walks the dashboard directory, limits to 3 recent images per var, and dispatches to PDF generator ONLY for active families."""
     if not dashboard_dir.exists():
         log.error(f"Dashboard path does not exist for recording: {dashboard_dir}")
         return
@@ -403,7 +398,7 @@ def run_recorder(dashboard_dir, record_dir, stats_df, log):
     recent_dates = get_recent_run_dates(png_files, max_dates=3)
     filtered_files = [f for f in png_files if extract_run_datetime(f) and extract_run_datetime(f).date() in recent_dates]
 
-    log.info(f"Discovered {len(filtered_files)}/{len(png_files)} files from latest {len(recent_dates)} run dates. Filtering history for the 3 most recent runs overall...")
+    log.info(f"Discovered {len(filtered_files)}/{len(png_files)} files from latest {len(recent_dates)} run dates. Filtering history...")
 
     # Structure: records[family][sat][(prod, var)] = [(full_time_int, filepath), ...]
     records = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
@@ -435,11 +430,19 @@ def run_recorder(dashboard_dir, record_dir, stats_df, log):
                 recent_three = sorted(var_dict[prod_var_tuple], key=lambda x: x[0], reverse=True)[:3]
                 var_dict[prod_var_tuple] = sorted(recent_three, key=lambda x: x[0])
 
-    log.info(f"Successfully filtered images down to the 3 most recent executions overall per variable.")
+    log.info(f"Successfully grouped and trimmed dashboard artifacts.")
 
-    # Dispatch PDF generation based on Family Groups
+    # Dispatch PDF generation strictly based on the Active Families list
+    updated_count = 0
     for family, sats_dict in records.items():
-        build_pdf_artifact(family, sats_dict, record_dir, stats_df, log)
+        if family in active_families:
+            build_pdf_artifact(family, sats_dict, record_dir, stats_df, log)
+            updated_count += 1
+
+    if updated_count == 0:
+        log.warn("No dashboard artifacts matched the active product families. No PDFs generated.")
+    else:
+        log.info(f"Successfully generated/updated {updated_count} PDF records.")
 
 def main():
     parser = argparse.ArgumentParser(description="PAVE-ARCHIVER: Unified Workspace Lifecycle Manager")
@@ -464,14 +467,21 @@ def main():
     setup_interrupt_handler(log)
 
     master_stats_list = []
+    active_families = set()
 
-    # 1. Execute Workspace Archival & Harvester
+    # 1. Execute Workspace Archival & Identify Active Families
     for ws in args.workspaces:
         ws_path = Path(ws).resolve()
-        process_workspace(ws_path, args, log)
+        fams = process_workspace(ws_path, args, log)
+        active_families.update(fams)
+
+    if not active_families:
+        log.warn("No active product families identified in the workspaces. PDF records will not be updated.")
+    else:
+        log.info(f"Targeting PDF updates for active families: {', '.join(active_families)}")
 
     # 2. Historical Stats Crawl & Execute PDF Generation
-    if args.record and args.workspaces:
+    if args.record and args.workspaces and active_families:
         workspace_root = Path(args.workspaces[0]).resolve().parent
         log.info("Crawling master workspace root for historical statistical records (last 7 days)...")
 
@@ -486,16 +496,35 @@ def main():
             except Exception:
                 pass
 
+        # Safely parse ragged CSV files to prevent Pandas Multi-Index shifting bugs
+        columns_to_keep = ['Product', 'Variable', 'Sat', 'Metric', 'Count', 'Min', 'Max', 'Mean', 'Median', 'NaN_Count']
+
         for sf in stat_files:
             try:
-                df = pd.read_csv(sf)
-                if 'Sat' in df.columns:
-                    df['Sat'] = df['Sat'].astype(str).str.zfill(2)
-                master_stats_list.append(df)
-            except Exception as e:
-                log.debug(f"Failed to read {sf.name}: {e}")
+                parsed_data = []
+                with open(sf, 'r') as f:
+                    reader = csv.reader(f)
+                    header = next(reader, None)
+                    if not header: continue
 
-        # Unconditionally process the record step!
+                    for row in reader:
+                        if len(row) >= 10:
+                            parsed_data.append(row[:10])
+
+                if parsed_data:
+                    df = pd.DataFrame(parsed_data, columns=columns_to_keep)
+
+                    # Force numerical conversion for the exact target columns
+                    for numeric_col in ['Mean', 'Max']:
+                        df[numeric_col] = pd.to_numeric(df[numeric_col], errors='coerce')
+
+                    # Fix the "G18" vs "18" lookup mismatch
+                    df['Sat'] = df['Sat'].astype(str).str.replace('G', '', case=False).str.zfill(2)
+
+                    master_stats_list.append(df)
+            except Exception as e:
+                log.debug(f"Failed to safely parse ragged CSV {sf.name}: {e}")
+
         if master_stats_list:
             log.info(f"Successfully loaded {len(stat_files)} recent statistical records.")
             combined_stats_df = pd.concat(master_stats_list, ignore_index=True)
@@ -504,7 +533,7 @@ def main():
             combined_stats_df = None
 
         if args.dashboard:
-            run_recorder(Path(args.dashboard).resolve(), Path(args.record).resolve(), combined_stats_df, log)
+            run_recorder(Path(args.dashboard).resolve(), Path(args.record).resolve(), combined_stats_df, active_families, log)
         else:
             log.warn("Cannot generate central diurnal records without a shared --dashboard source path.")
 
