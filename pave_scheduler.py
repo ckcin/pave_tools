@@ -2,7 +2,7 @@
 """
 PAVE: Continuous Background Scheduler
 =====================================
-VERSION: 2.43.0 (Documentation Update)
+VERSION: 2.44.0 (Manual DOY Backfill & Override)
 
 SCHEDULING & LOAD BALANCING ARCHITECTURE:
 -----------------------------------------
@@ -205,12 +205,17 @@ def run_pave(dsn, channels, hour_str, target_date, workspace_dir, pave_script, s
 
     return target_workspace_folder
 
-def execute_slot(workspace_dir, pave_script, log, dashboard_path=None, record_path=None, relax_match=False, fast_compare=False, time_slot=None):
+def execute_slot(workspace_dir, pave_script, log, dashboard_path=None, record_path=None, relax_match=False, fast_compare=False, time_slot=None, override_doy=None, override_year=None):
     now = get_now_utc()
 
     if time_slot is not None:
         slot_hour = time_slot
-        target_date = now
+        if override_doy is not None:
+            target_year = override_year if override_year is not None else now.year
+            # Dynamically construct the specific historical date object
+            target_date = datetime.datetime.strptime(f"{target_year}{override_doy:03d}", "%Y%j").replace(tzinfo=datetime.timezone.utc)
+        else:
+            target_date = now
     else:
         candidate_triggers = []
         for d in [now - datetime.timedelta(days=1), now]:
@@ -228,8 +233,11 @@ def execute_slot(workspace_dir, pave_script, log, dashboard_path=None, record_pa
     target_day_idx = target_date.weekday()
 
     if target_day_idx in [5, 6]:
-        log.info("Target day is a Weekend (Saturday/Sunday). Standby.")
-        return
+        if time_slot is None:
+            log.info("Target day is a Weekend (Saturday/Sunday). Standby.")
+            return
+        else:
+            log.info("Target day is a Weekend, but proceeding anyway due to manual override.")
 
     hour_str = f"{slot_hour:02d}"
     target_sat = SLOT_TO_SAT[slot_hour]
@@ -347,7 +355,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="PAVE Continuous Background Scheduler")
     parser.add_argument("--workspace", type=str, default=os.getcwd(), help="The directory where PAVE outputs and logs will be generated.")
     parser.add_argument("--pave-script", type=str, default=os.path.join(SCRIPT_DIR, "pave.py"), help="The explicit path to pave.py.")
+    
+    # MANUAL OVERRIDE FLAGS
     parser.add_argument("--time-slot", type=int, choices=[1, 5, 9, 13, 17, 21], help="Run a specific time slot immediately and exit.")
+    parser.add_argument("--doy", type=int, help="Override the Day of Year (1-366) for manual execution. Must be used with --time-slot.")
+    parser.add_argument("--year", type=int, help="Override the Year (e.g., 2026). Defaults to current year.")
 
     parser.add_argument("--dashboard", type=str, help="Path to the shared dashboard extraction folder.")
     parser.add_argument("--record", type=str, help="Path to the long-term artifact PDF output folder.")
@@ -369,6 +381,10 @@ if __name__ == "__main__":
     if not os.path.isfile(abs_pave_script):
         log.error(f"CRITICAL ERROR: 'pave.py' not found at: {abs_pave_script}")
         sys.exit(1)
+        
+    if args.doy is not None and args.time_slot is None:
+        log.error("CRITICAL ERROR: --doy override can only be used in conjunction with a specific --time-slot.")
+        sys.exit(1)
 
     log.info("=========================================")
     log.info("  PAVE SCHEDULER INITIALIZED")
@@ -384,14 +400,19 @@ if __name__ == "__main__":
         log.info(f"  Dashboard Out: {os.path.abspath(args.dashboard)}")
     if args.record:
         log.info(f"  Records Out:   {os.path.abspath(args.record)}")
+        
     if args.time_slot is not None:
-        log.info(f"  MODE:          OVERRIDE EXECUTION (Slot {args.time_slot:02d}Z)")
+        if args.doy is not None:
+            target_year = args.year if args.year else get_now_utc().year
+            log.info(f"  MODE:          OVERRIDE EXECUTION (Year {target_year}, DOY {args.doy:03d}, Slot {args.time_slot:02d}Z)")
+        else:
+            log.info(f"  MODE:          OVERRIDE EXECUTION (Current DOY, Slot {args.time_slot:02d}Z)")
     else:
         log.info("  MODE:          CONTINUOUS DAEMON (Immediate Boot Trigger Active)")
     log.info("=========================================")
 
     if args.time_slot is not None:
-        execute_slot(abs_workspace, abs_pave_script, log, dashboard_path=args.dashboard, record_path=args.record, relax_match=args.relax_match, fast_compare=args.fast_compare, time_slot=args.time_slot)
+        execute_slot(abs_workspace, abs_pave_script, log, dashboard_path=args.dashboard, record_path=args.record, relax_match=args.relax_match, fast_compare=args.fast_compare, time_slot=args.time_slot, override_doy=args.doy, override_year=args.year)
         log.info("--- OVERRIDE EXECUTION COMPLETE ---")
     else:
         log.info("Boot verification check: Executing target slot for current hour profile...")
