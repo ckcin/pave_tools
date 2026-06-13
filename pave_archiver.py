@@ -2,7 +2,7 @@
 """
 PAVE-ARCHIVER: Unified Workspace Lifecycle Manager
 ==================================================
-VERSION: 3.3.1 (Condensed Summary Tables)
+VERSION: 3.3.2 (ABI-L1b Prefix Stripping Fix)
 
 LIFECYCLE & REPORTING ARCHITECTURE:
 -----------------------------------
@@ -16,8 +16,8 @@ PHASE 1: Workspace Cleanup & Dashboard Harvesting
 
 PHASE 2: Historical Crawling & Long-Term Record Generation
    - Safely parses ragged CSVs to prevent Pandas Multi-Index shifting bugs.
-   - SCENE MERGING: Strips GOES scene tags (F, C, M1, M2) so Full Disk, CONUS,
-     and Meso scenes all merge into the same single product PDF.
+   - SCENE MERGING: Strips GOES scene tags (F, C, M1, M2) and L1b/L2 prefixes
+     so Full Disk, CONUS, and Meso scenes all merge into the same single product PDF.
    - TABLE CONDENSING: Summary tables aggregate stats into a single row per base variable.
    - Explicitly restricts PDF generation ONLY to the active Product Families.
 """
@@ -67,8 +67,9 @@ FILE_PATTERN = re.compile(
 PARENT_TIME_PATTERN = re.compile(r"OR_(?P<dsn>.+?)_G(?P<sat>\d{2}).*?_s(?P<time>\d{14})")
 
 def clean_product_name(prod_str):
-    """Normalizes wild GOES namings by stripping prefixes, mode channels, and scene tags."""
-    clean = re.sub(r'^(ABI-L2-|I_ABI-L2-|I_)', '', str(prod_str), flags=re.IGNORECASE)
+    """Normalizes wild GOES namings by stripping L1b/L2 prefixes, mode channels, and scene tags."""
+    # ROBUST FIX: Catches ABI-L2-, ABI-L1b-, I_ABI-L2-, and I_ prefixes
+    clean = re.sub(r'^(ABI-L[12][a-zA-Z]?-|I_ABI-L[12][a-zA-Z]?-|I_)', '', str(prod_str), flags=re.IGNORECASE)
     clean = re.sub(r'-M\d+C\d+$', '', clean, flags=re.IGNORECASE)
     clean = re.sub(r'(F|C|M1|M2)$', '', clean, flags=re.IGNORECASE)
     return clean.strip().upper()
@@ -137,7 +138,6 @@ def harvest_dashboard(workspace, dash_dir, log):
     unmatched_files = []
 
     for f in filtered_files:
-        # ROBUST FIX: Use the file pattern regex directly on the filename
         m = FILE_PATTERN.search(f.name)
         if m:
             dsn = m.group('prod')
