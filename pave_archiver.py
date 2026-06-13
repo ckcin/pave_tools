@@ -2,7 +2,7 @@
 """
 PAVE-ARCHIVER: Unified Workspace Lifecycle Manager
 ==================================================
-VERSION: 3.3.0 (Scene Merging & Robust Stat Mapping)
+VERSION: 3.3.1 (Condensed Summary Tables)
 
 LIFECYCLE & REPORTING ARCHITECTURE:
 -----------------------------------
@@ -18,6 +18,7 @@ PHASE 2: Historical Crawling & Long-Term Record Generation
    - Safely parses ragged CSVs to prevent Pandas Multi-Index shifting bugs.
    - SCENE MERGING: Strips GOES scene tags (F, C, M1, M2) so Full Disk, CONUS,
      and Meso scenes all merge into the same single product PDF.
+   - TABLE CONDENSING: Summary tables aggregate stats into a single row per base variable.
    - Explicitly restricts PDF generation ONLY to the active Product Families.
 """
 
@@ -294,8 +295,13 @@ def _draw_summary_page(pdf, title, subtitle, family, var_tuple_list, stats_df, s
     r2_tracker = []
     err_tracker = []
 
-    for (prod, var) in sorted(var_tuple_list, key=lambda x: (x[0], x[1])):
-        avg_r2, avg_err, val_range = get_variable_stats(stats_df, prod, sat=sat_filter, var=var)
+    # CONDENSE SCENES: Collapse the incoming tuple list into unique base variables
+    unique_vars = set()
+    for prod, var in var_tuple_list:
+        unique_vars.add((clean_product_name(prod), var))
+
+    for (clean_prod, var) in sorted(list(unique_vars), key=lambda x: (x[0], x[1])):
+        avg_r2, avg_err, val_range = get_variable_stats(stats_df, clean_prod, sat=sat_filter, var=var)
 
         if pd.notna(avg_r2): r2_tracker.append(avg_r2)
         if pd.notna(avg_err): err_tracker.append(avg_err)
@@ -304,8 +310,7 @@ def _draw_summary_page(pdf, title, subtitle, family, var_tuple_list, stats_df, s
         err_str = f"{avg_err:.4f}" if pd.notna(avg_err) else "N/A"
         range_str = f"{val_range:.4f}" if pd.notna(val_range) else "N/A"
 
-        # Dynamically display the exact scene in the table (e.g. ABI-L2-RadC vs ABI-L2-RadF)
-        display_name = f"{prod.replace('ABI-L2-', '')}: {var}"
+        display_name = f"{clean_prod}: {var}"
         row = [display_name, r2_str, err_str, range_str]
 
         if pd.isna(avg_r2): color = "lightgray"
@@ -361,7 +366,6 @@ def build_pdf_artifact(family, sats_dict, out_dir, stats_df, log):
             all_var_tuples.update(sat_data.keys())
             total_images += sum(len(items) for items in sat_data.values())
 
-        all_var_tuples = sorted(list(all_var_tuples), key=lambda x: (x[0], x[1]))
         gen_time = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
 
         # 2. Render Master Cover Page (Combined Average across all Satellites for this Family)
