@@ -2,7 +2,7 @@
 """
 PAVE-ARCHIVER: Unified Workspace Lifecycle Manager
 ==================================================
-VERSION: 3.3.2 (ABI-L1b Prefix Stripping Fix)
+VERSION: 3.3.3 (Channel Preservation & Mode Stripping Fix)
 
 LIFECYCLE & REPORTING ARCHITECTURE:
 -----------------------------------
@@ -16,8 +16,8 @@ PHASE 1: Workspace Cleanup & Dashboard Harvesting
 
 PHASE 2: Historical Crawling & Long-Term Record Generation
    - Safely parses ragged CSVs to prevent Pandas Multi-Index shifting bugs.
-   - SCENE MERGING: Strips GOES scene tags (F, C, M1, M2) and L1b/L2 prefixes
-     so Full Disk, CONUS, and Meso scenes all merge into the same single product PDF.
+   - SCENE MERGING: Strips GOES scene tags (F, C, M1, M2) but PRESERVES channel tags
+     (_C01) so scenes merge together, but channels remain isolated in their own PDFs.
    - TABLE CONDENSING: Summary tables aggregate stats into a single row per base variable.
    - Explicitly restricts PDF generation ONLY to the active Product Families.
 """
@@ -67,12 +67,24 @@ FILE_PATTERN = re.compile(
 PARENT_TIME_PATTERN = re.compile(r"OR_(?P<dsn>.+?)_G(?P<sat>\d{2}).*?_s(?P<time>\d{14})")
 
 def clean_product_name(prod_str):
-    """Normalizes wild GOES namings by stripping L1b/L2 prefixes, mode channels, and scene tags."""
-    # ROBUST FIX: Catches ABI-L2-, ABI-L1b-, I_ABI-L2-, and I_ prefixes
-    clean = re.sub(r'^(ABI-L[12][a-zA-Z]?-|I_ABI-L[12][a-zA-Z]?-|I_)', '', str(prod_str), flags=re.IGNORECASE)
-    clean = re.sub(r'-M\d+C\d+$', '', clean, flags=re.IGNORECASE)
+    """Normalizes wild GOES namings by stripping L1b/L2 prefixes, mode, and scene tags, but PRESERVING the channel."""
+    clean = str(prod_str)
+
+    # 1. Extract channel if present (e.g., from -M6C13)
+    ch_match = re.search(r'-M\d+(C\d+)', clean, flags=re.IGNORECASE)
+    ch_suffix = f"_{ch_match.group(1).upper()}" if ch_match else ""
+
+    # 2. Strip standard prefixes
+    clean = re.sub(r'^(ABI-L[12][a-zA-Z]?-|I_ABI-L[12][a-zA-Z]?-|I_)', '', clean, flags=re.IGNORECASE)
+
+    # 3. Strip Mode (and Channel) from the base string so it cleanly ends with the scene
+    clean = re.sub(r'-M\d+(C\d+)?$', '', clean, flags=re.IGNORECASE)
+
+    # 4. Strip Scene Tags (F, C, M1, M2)
     clean = re.sub(r'(F|C|M1|M2)$', '', clean, flags=re.IGNORECASE)
-    return clean.strip().upper()
+
+    # 5. Recombine the normalized base product with the isolated channel
+    return f"{clean.strip().upper()}{ch_suffix}"
 
 def extract_run_datetime(path):
     """Parse a comparison artifact timestamp from the file name or its parent folder."""
@@ -211,8 +223,17 @@ def process_workspace(workspace, args, log):
 
     # 1. Derive the product family directly from the workspace folder name
     try:
-        base_product = workspace.name.split('_')[0]
-        norm_prod = clean_product_name(base_product)
+        parts = workspace.name.split('_')
+        base_product = parts[0]
+
+        # Identify if the workspace explicitly passes a channel (e.g., CH01) and format it to match the file extraction (_C01)
+        ch_tag = ""
+        for p in parts:
+            if p.upper().startswith("CH") and p[2:].isdigit():
+                ch_tag = f"_C{p[2:]}"
+                break
+
+        norm_prod = clean_product_name(base_product) + ch_tag
         fam = get_family_for_product(norm_prod)
         active_families.add(fam if fam else norm_prod)
     except Exception as e:
@@ -435,7 +456,7 @@ def run_recorder(dashboard_dir, record_dir, stats_df, active_families, log):
 
         prod, sat, var, time_str = match.group('prod'), match.group('sat'), match.group('var'), match.group('time')
 
-        # SCENE MERGE: Strip the scene tags (F/C/M1/M2) before getting the family!
+        # SCENE MERGE & CHANNEL ISOLATION
         norm_prod = clean_product_name(prod)
         fam = get_family_for_product(norm_prod)
         family = fam if fam else norm_prod
