@@ -2,7 +2,7 @@
 """
 PAVE-ARCHIVER: Unified Workspace Lifecycle Manager
 ==================================================
-VERSION: 3.2.1 (Ragged CSV Shift Bug & Sat Parsing Fix)
+VERSION: 3.3.0 (Scene Merging & Robust Stat Mapping)
 
 LIFECYCLE & REPORTING ARCHITECTURE:
 -----------------------------------
@@ -15,9 +15,9 @@ PHASE 1: Workspace Cleanup & Dashboard Harvesting
    - Compresses heavy spatial/data directories into .tar.gz archives.
 
 PHASE 2: Historical Crawling & Long-Term Record Generation
-   - Initiates a global crawl of the master workspace root for recent stats.
    - Safely parses ragged CSVs to prevent Pandas Multi-Index shifting bugs.
-   - Scans the global dashboard and groups artifacts by 'Product Family'.
+   - SCENE MERGING: Strips GOES scene tags (F, C, M1, M2) so Full Disk, CONUS,
+     and Meso scenes all merge into the same single product PDF.
    - Explicitly restricts PDF generation ONLY to the active Product Families.
 """
 
@@ -60,10 +60,17 @@ FILE_PATTERN = re.compile(
 )
 
 # ==========================================
-# UTILITY: RUN-DATE FILTERING
+# UTILITY: SCENE PARSING & FILTERING
 # ==========================================
 
 PARENT_TIME_PATTERN = re.compile(r"OR_(?P<dsn>.+?)_G(?P<sat>\d{2}).*?_s(?P<time>\d{14})")
+
+def clean_product_name(prod_str):
+    """Normalizes wild GOES namings by stripping prefixes, mode channels, and scene tags."""
+    clean = re.sub(r'^(ABI-L2-|I_ABI-L2-|I_)', '', str(prod_str), flags=re.IGNORECASE)
+    clean = re.sub(r'-M\d+C\d+$', '', clean, flags=re.IGNORECASE)
+    clean = re.sub(r'(F|C|M1|M2)$', '', clean, flags=re.IGNORECASE)
+    return clean.strip().upper()
 
 def extract_run_datetime(path):
     """Parse a comparison artifact timestamp from the file name or its parent folder."""
@@ -129,20 +136,17 @@ def harvest_dashboard(workspace, dash_dir, log):
     unmatched_files = []
 
     for f in filtered_files:
-        parent_stem = f.parent.name
-        var_name = f.name.replace('_comparison.png', '')
-
-        m = re.search(r"OR_(?P<dsn>.+?)_G(?P<sat>\d{2}).*?_s(?P<time>\d{14})", parent_stem)
-
+        # ROBUST FIX: Use the file pattern regex directly on the filename
+        m = FILE_PATTERN.search(f.name)
         if m:
-            dsn = m.group('dsn')
+            dsn = m.group('prod')
             sat = m.group('sat')
+            var_name = m.group('var')
             time_str = m.group('time')
             time_int = int(time_str)
             yyyyddd = time_str[:7]
 
             key = (dsn, sat, var_name)
-
             if key not in latest_files or time_int > latest_files[key][0]:
                 latest_files[key] = (time_int, f, time_str, yyyyddd)
         else:
@@ -202,15 +206,26 @@ def process_workspace(workspace, args, log):
 
     log.info(f"--- Lifecycle Sweep: {workspace.name} ---")
 
-    # 1. Identify which Product Families are actively being processed in this workspace
     active_families = set()
+
+    # 1. Derive the product family directly from the workspace folder name
+    try:
+        base_product = workspace.name.split('_')[0]
+        norm_prod = clean_product_name(base_product)
+        fam = get_family_for_product(norm_prod)
+        active_families.add(fam if fam else norm_prod)
+    except Exception as e:
+        log.debug(f"Could not parse workspace name for family: {e}")
+
+    # Fallback: Scan the validation directory to catch anything else
     val_dir = workspace / "validation"
     if val_dir.exists():
         for f in val_dir.rglob("*_comparison.png"):
-            m = re.search(r"OR_(?P<dsn>.+?)_G(?P<sat>\d{2}).*?_s(?P<time>\d{14})", f.parent.name)
+            m = FILE_PATTERN.search(f.name)
             if m:
-                clean_prod = re.sub(r'^(ABI-L2-|I_)', '', m.group('dsn'), flags=re.IGNORECASE)
-                active_families.add(get_family_for_product(clean_prod))
+                norm_prod = clean_product_name(m.group('prod'))
+                fam = get_family_for_product(norm_prod)
+                active_families.add(fam if fam else norm_prod)
 
     # 2. Harvest Dashboard if requested
     if args.clean_validation:
@@ -235,11 +250,16 @@ def process_workspace(workspace, args, log):
 # ==========================================
 
 def get_variable_stats(stats_df, prod, sat=None, var=None):
-    """Extracts and averages the target metrics for a specific variable."""
+    """Extracts and averages the target metrics, perfectly mapping scenes to their base product stats."""
     if stats_df is None or stats_df.empty:
         return np.nan, np.nan, np.nan
 
-    subset = stats_df[stats_df['Product'].astype(str).str.strip() == str(prod).strip()]
+    # Normalize BOTH the target string and the DataFrame to strip scene tags (RadC == RAD)
+    clean_target_prod = clean_product_name(prod)
+    df_prods = stats_df['Product'].astype(str).apply(clean_product_name)
+
+    subset = stats_df[df_prods == clean_target_prod]
+
     if var:
         subset = subset[subset['Variable'].astype(str).str.strip() == str(var).strip()]
     if sat:
@@ -284,7 +304,8 @@ def _draw_summary_page(pdf, title, subtitle, family, var_tuple_list, stats_df, s
         err_str = f"{avg_err:.4f}" if pd.notna(avg_err) else "N/A"
         range_str = f"{val_range:.4f}" if pd.notna(val_range) else "N/A"
 
-        display_name = f"{prod}: {var}"
+        # Dynamically display the exact scene in the table (e.g. ABI-L2-RadC vs ABI-L2-RadF)
+        display_name = f"{prod.replace('ABI-L2-', '')}: {var}"
         row = [display_name, r2_str, err_str, range_str]
 
         if pd.isna(avg_r2): color = "lightgray"
@@ -410,9 +431,10 @@ def run_recorder(dashboard_dir, record_dir, stats_df, active_families, log):
 
         prod, sat, var, time_str = match.group('prod'), match.group('sat'), match.group('var'), match.group('time')
 
-        # Strip prefixes so pattern matching perfectly maps 'CMIPC' to 'CMIP'
-        clean_prod = re.sub(r'^(ABI-L2-|I_)', '', prod, flags=re.IGNORECASE)
-        family = get_family_for_product(clean_prod)
+        # SCENE MERGE: Strip the scene tags (F/C/M1/M2) before getting the family!
+        norm_prod = clean_product_name(prod)
+        fam = get_family_for_product(norm_prod)
+        family = fam if fam else norm_prod
 
         full_time_int = int(time_str)
 
