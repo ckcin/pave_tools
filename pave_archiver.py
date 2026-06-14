@@ -2,7 +2,7 @@
 """
 PAVE-ARCHIVER: Unified Workspace Lifecycle Manager
 ==================================================
-VERSION: 3.3.3 (Channel Preservation & Mode Stripping Fix)
+VERSION: 3.3.4 (Mathematically Strict Per-Variable Averaging)
 
 LIFECYCLE & REPORTING ARCHITECTURE:
 -----------------------------------
@@ -16,10 +16,9 @@ PHASE 1: Workspace Cleanup & Dashboard Harvesting
 
 PHASE 2: Historical Crawling & Long-Term Record Generation
    - Safely parses ragged CSVs to prevent Pandas Multi-Index shifting bugs.
-   - SCENE MERGING: Strips GOES scene tags (F, C, M1, M2) but PRESERVES channel tags
-     (_C01) so scenes merge together, but channels remain isolated in their own PDFs.
+   - SCENE MERGING: Strips GOES scene tags but PRESERVES channel tags.
    - TABLE CONDENSING: Summary tables aggregate stats into a single row per base variable.
-   - Explicitly restricts PDF generation ONLY to the active Product Families.
+   - METRIC ISOLATION: Averages are calculated per distinct variable (e.g., separating DQF from Radiance).
 """
 
 import os
@@ -91,7 +90,6 @@ def extract_run_datetime(path):
     match = FILE_PATTERN.search(path.name)
     if match:
         try:
-            # GOES-R format is YYYYDDDHHMMSSS (14 chars). Slice to 13 to parse standard seconds.
             time_str = match.group('time')[:13]
             return datetime.strptime(time_str, "%Y%j%H%M%S")
         except ValueError:
@@ -226,7 +224,6 @@ def process_workspace(workspace, args, log):
         parts = workspace.name.split('_')
         base_product = parts[0]
 
-        # Identify if the workspace explicitly passes a channel (e.g., CH01) and format it to match the file extraction (_C01)
         ch_tag = ""
         for p in parts:
             if p.upper().startswith("CH") and p[2:].isdigit():
@@ -276,7 +273,6 @@ def get_variable_stats(stats_df, prod, sat=None, var=None):
     if stats_df is None or stats_df.empty:
         return np.nan, np.nan, np.nan
 
-    # Normalize BOTH the target string and the DataFrame to strip scene tags (RadC == RAD)
     clean_target_prod = clean_product_name(prod)
     df_prods = stats_df['Product'].astype(str).apply(clean_product_name)
 
@@ -313,8 +309,8 @@ def _draw_summary_page(pdf, title, subtitle, family, var_tuple_list, stats_df, s
     table_data = [["Product: Variable", "Avg R-Squared", "Avg Err Dispersion", "Value Range Limit"]]
     cell_colors = [["#40466e"] * 4]
 
-    r2_tracker = []
-    err_tracker = []
+    # Track metrics separately per unique variable (so DQFs don't average with meteorological values)
+    var_trackers = defaultdict(lambda: {'r2': [], 'err': []})
 
     # CONDENSE SCENES: Collapse the incoming tuple list into unique base variables
     unique_vars = set()
@@ -324,8 +320,8 @@ def _draw_summary_page(pdf, title, subtitle, family, var_tuple_list, stats_df, s
     for (clean_prod, var) in sorted(list(unique_vars), key=lambda x: (x[0], x[1])):
         avg_r2, avg_err, val_range = get_variable_stats(stats_df, clean_prod, sat=sat_filter, var=var)
 
-        if pd.notna(avg_r2): r2_tracker.append(avg_r2)
-        if pd.notna(avg_err): err_tracker.append(avg_err)
+        if pd.notna(avg_r2): var_trackers[var]['r2'].append(avg_r2)
+        if pd.notna(avg_err): var_trackers[var]['err'].append(avg_err)
 
         r2_str = f"{avg_r2:.4f}" if pd.notna(avg_r2) else "N/A"
         err_str = f"{avg_err:.4f}" if pd.notna(avg_err) else "N/A"
@@ -342,13 +338,28 @@ def _draw_summary_page(pdf, title, subtitle, family, var_tuple_list, stats_df, s
         table_data.append(row)
         cell_colors.append([color] * 4)
 
-    if r2_tracker:
-        overall_r2 = np.mean(r2_tracker)
-        overall_err = np.mean(err_tracker) if err_tracker else np.nan
-        overall_color = "palegreen" if overall_r2 >= 0.95 else "moccasin" if overall_r2 >= 0.85 else "lightcoral"
+    # ISOLATED SUMMARY ROWS: Calculate averages distinctly per variable
+    summary_indices = []
+    for var in sorted(var_trackers.keys()):
+        r2_list = var_trackers[var]['r2']
+        err_list = var_trackers[var]['err']
 
-        table_data.append(["OVERALL AVERAGE", f"{overall_r2:.4f}", f"{overall_err:.4f}" if pd.notna(overall_err) else "N/A", "N/A"])
-        cell_colors.append([overall_color] * 4)
+        # Only add a summary row if this specific variable appeared in multiple products/channels
+        if len(r2_list) > 1:
+            v_avg_r2 = np.mean(r2_list)
+            v_avg_err = np.mean(err_list) if err_list else np.nan
+
+            r2_str = f"{v_avg_r2:.4f}"
+            err_str = f"{v_avg_err:.4f}" if pd.notna(v_avg_err) else "N/A"
+
+            if pd.isna(v_avg_r2): color = "lightgray"
+            elif v_avg_r2 >= 0.95: color = "palegreen"
+            elif v_avg_r2 >= 0.85: color = "moccasin"
+            else: color = "lightcoral"
+
+            table_data.append([f"COMBINED AVERAGE: {var}", r2_str, err_str, "N/A"])
+            cell_colors.append([color] * 4)
+            summary_indices.append(len(table_data) - 1)
 
     if len(table_data) > 1:
         table = ax_table.table(cellText=table_data, cellColours=cell_colors, loc='center', cellLoc='center', colWidths=[0.4, 0.2, 0.2, 0.2])
@@ -360,10 +371,10 @@ def _draw_summary_page(pdf, title, subtitle, family, var_tuple_list, stats_df, s
             table[(0, j)].get_text().set_color('white')
             table[(0, j)].get_text().set_weight('bold')
 
-        if r2_tracker:
-            last_row_idx = len(table_data) - 1
+        # Bold the isolated summary rows at the bottom
+        for idx in summary_indices:
             for j in range(4):
-                table[(last_row_idx, j)].get_text().set_weight('bold')
+                table[(idx, j)].get_text().set_weight('bold')
     else:
         fig.text(0.5, 0.35, "No statistical data available for table generation.", ha='center', va='center', fontsize=12, color='gray')
 
@@ -378,7 +389,6 @@ def build_pdf_artifact(family, sats_dict, out_dir, stats_df, log):
     log.info(f"Assembling Product Family Artifact: {pdf_filename}...")
 
     with PdfPages(pdf_path) as pdf:
-        # 1. Gather master list of variable tuples for the combined cover page
         all_var_tuples = set()
         total_images = 0
         sats_present = list(sats_dict.keys())
@@ -389,11 +399,9 @@ def build_pdf_artifact(family, sats_dict, out_dir, stats_df, log):
 
         gen_time = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
 
-        # 2. Render Master Cover Page (Combined Average across all Satellites for this Family)
         master_subtitle = f"Satellites: {', '.join([f'G{s}' for s in sats_present])} | Generated: {gen_time} UTC | {total_images} Total Snapshots"
         _draw_summary_page(pdf, "PAVE Long-Term Verification Record (Combined)", master_subtitle, family, all_var_tuples, stats_df, sat_filter=None)
 
-        # 3. Process Per-Satellite Pages (Forcing G19 first, then G18)
         for target_sat in ["19", "18"]:
             if target_sat not in sats_dict:
                 continue
@@ -401,11 +409,9 @@ def build_pdf_artifact(family, sats_dict, out_dir, stats_df, log):
             sat_vars = sats_dict[target_sat]
             sat_total_imgs = sum(len(items) for items in sat_vars.values())
 
-            # 4. Render Satellite-Specific Summary Page
             sat_subtitle = f"Satellite: GOES-{target_sat} Isolated Summary | {sat_total_imgs} Snapshots"
             _draw_summary_page(pdf, f"GOES-{target_sat} Breakdown", sat_subtitle, family, sat_vars.keys(), stats_df, sat_filter=target_sat)
 
-            # 5. Append Images for this Satellite
             for (prod, var) in sorted(sat_vars.keys(), key=lambda x: (x[0], x[1])):
                 log.verbose(f"  -> Processing variable: {prod}: {var} (G{target_sat})")
                 for _, img_path in sat_vars[(prod, var)]:
@@ -446,7 +452,6 @@ def run_recorder(dashboard_dir, record_dir, stats_df, active_families, log):
 
     log.info(f"Discovered {len(filtered_files)}/{len(png_files)} files from latest {len(recent_dates)} run dates. Filtering history...")
 
-    # Structure: records[family][sat][(prod, var)] = [(full_time_int, filepath), ...]
     records = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
     matched_count = 0
 
@@ -456,7 +461,6 @@ def run_recorder(dashboard_dir, record_dir, stats_df, active_families, log):
 
         prod, sat, var, time_str = match.group('prod'), match.group('sat'), match.group('var'), match.group('time')
 
-        # SCENE MERGE & CHANNEL ISOLATION
         norm_prod = clean_product_name(prod)
         fam = get_family_for_product(norm_prod)
         family = fam if fam else norm_prod
@@ -470,7 +474,6 @@ def run_recorder(dashboard_dir, record_dir, stats_df, active_families, log):
         log.warn("No files matched the required PAVE comparison naming format.")
         return
 
-    # Trim logic: Keep only the 3 most recent runs overall per (prod, var) combo
     for family, sats in records.items():
         for sat, var_dict in sats.items():
             for prod_var_tuple in var_dict:
@@ -479,7 +482,6 @@ def run_recorder(dashboard_dir, record_dir, stats_df, active_families, log):
 
     log.info(f"Successfully grouped and trimmed dashboard artifacts.")
 
-    # Dispatch PDF generation strictly based on the Active Families list
     updated_count = 0
     for family, sats_dict in records.items():
         if family in active_families:
@@ -495,15 +497,12 @@ def main():
     parser = argparse.ArgumentParser(description="PAVE-ARCHIVER: Unified Workspace Lifecycle Manager")
     parser.add_argument("workspaces", nargs="+", help="Paths to PAVE workspace directories to archive")
 
-    # Archiver Flags
     parser.add_argument("--clean-validation", action="store_true", help="Harvest dashboard items, then archive and remove the validation/ folder")
     parser.add_argument("--clean-glance", action="store_true", help="Archive and remove the legacy glance/ folder")
 
-    # Dashboard & Record Destinations
     parser.add_argument("--dashboard", type=str, help="Optional: Shared path to aggregate all dashboard comparison images globally")
     parser.add_argument("--record", type=str, help="Optional: Trigger PDF generation and output artifacts to this path")
 
-    # Logging
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
     parser.add_argument("-q", "--quiet", action="store_true", help="Restrict logging to warnings/errors")
 
@@ -516,7 +515,6 @@ def main():
     master_stats_list = []
     active_families = set()
 
-    # 1. Execute Workspace Archival & Identify Active Families
     for ws in args.workspaces:
         ws_path = Path(ws).resolve()
         fams = process_workspace(ws_path, args, log)
@@ -527,12 +525,10 @@ def main():
     else:
         log.info(f"Targeting PDF updates for active families: {', '.join(active_families)}")
 
-    # 2. Historical Stats Crawl & Execute PDF Generation
     if args.record and args.workspaces and active_families:
         workspace_root = Path(args.workspaces[0]).resolve().parent
         log.info("Crawling master workspace root for historical statistical records (last 7 days)...")
 
-        # Cutoff to avoid loading months of old data
         seven_days_ago = time_mod.time() - (7 * 86400)
 
         stat_files = []
@@ -543,7 +539,6 @@ def main():
             except Exception:
                 pass
 
-        # Safely parse ragged CSV files to prevent Pandas Multi-Index shifting bugs
         columns_to_keep = ['Product', 'Variable', 'Sat', 'Metric', 'Count', 'Min', 'Max', 'Mean', 'Median', 'NaN_Count']
 
         for sf in stat_files:
@@ -561,11 +556,9 @@ def main():
                 if parsed_data:
                     df = pd.DataFrame(parsed_data, columns=columns_to_keep)
 
-                    # Force numerical conversion for the exact target columns
                     for numeric_col in ['Mean', 'Max']:
                         df[numeric_col] = pd.to_numeric(df[numeric_col], errors='coerce')
 
-                    # Fix the "G18" vs "18" lookup mismatch
                     df['Sat'] = df['Sat'].astype(str).str.replace('G', '', case=False).str.zfill(2)
 
                     master_stats_list.append(df)
