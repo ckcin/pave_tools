@@ -2,7 +2,7 @@
 """
 PAVE-ARCHIVER: Unified Workspace Lifecycle Manager
 ==================================================
-VERSION: 3.3.5 (No Combined Average Rows)
+VERSION: 3.3.6 (N/A Math Exclusion Fix)
 
 LIFECYCLE & REPORTING ARCHITECTURE:
 -----------------------------------
@@ -18,6 +18,7 @@ PHASE 2: Historical Crawling & Long-Term Record Generation
    - Safely parses ragged CSVs to prevent Pandas Multi-Index shifting bugs.
    - SCENE MERGING: Strips GOES scene tags but PRESERVES channel tags.
    - TABLE CONDENSING: Summary tables aggregate stats into a single row per base variable.
+   - MATH FILTERING: Aggregation math actively ignores N/A values across scenes.
 """
 
 import os
@@ -268,7 +269,7 @@ def process_workspace(workspace, args, log):
 # ==========================================
 
 def get_variable_stats(stats_df, prod, sat=None, var=None):
-    """Extracts and averages the target metrics, perfectly mapping scenes to their base product stats."""
+    """Extracts and averages the target metrics, perfectly mapping scenes to their base product stats and safely ignoring N/A values."""
     if stats_df is None or stats_df.empty:
         return np.nan, np.nan, np.nan
 
@@ -285,9 +286,11 @@ def get_variable_stats(stats_df, prod, sat=None, var=None):
     if subset.empty:
         return np.nan, np.nan, np.nan
 
-    r2_vals = subset[subset['Metric'].str.contains('r-squared', case=False, na=False)]['Mean']
-    err_vals = subset[subset['Metric'].str.contains('mean abs error', case=False, na=False)]['Mean']
-    range_vals = subset[subset['Metric'].str.contains('range', case=False, na=False)]['Max']
+    # MATH FILTERING: Explicitly force the columns to numeric and dropna to purge N/A strings
+    # This ensures a failed scene doesn't drag the variable average into N/A if other scenes passed
+    r2_vals = pd.to_numeric(subset[subset['Metric'].str.contains('r-squared', case=False, na=False)]['Mean'], errors='coerce').dropna()
+    err_vals = pd.to_numeric(subset[subset['Metric'].str.contains('mean abs error', case=False, na=False)]['Mean'], errors='coerce').dropna()
+    range_vals = pd.to_numeric(subset[subset['Metric'].str.contains('range', case=False, na=False)]['Max'], errors='coerce').dropna()
 
     avg_r2 = r2_vals.mean() if not r2_vals.empty else np.nan
     avg_err = err_vals.mean() if not err_vals.empty else np.nan
