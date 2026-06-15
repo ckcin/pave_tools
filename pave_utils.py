@@ -67,7 +67,7 @@ PRODUCT_FAMILIES = {
     "Cloud_ECBH": ["ECBH"],
     "Cloud_EOCH": ["EOCH"],
     "Cloud_CCL": ["CCL"],
-    "Radiation": ["RSR", "DSR", "PAR", "SWR"],
+    "Radiation": ["RSR", "DSR", "PAR", "SWR", "ERBCLMF"],
     "SurfaceAlbedo": ["LSA", "BRF", "NBAR", "BRDFF20", "NBARF20"],
     "DerivedMotion": ["DMW", "DMWV"],
     "Aerosol_ADP": ["ADP"],
