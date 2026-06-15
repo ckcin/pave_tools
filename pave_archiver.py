@@ -2,7 +2,7 @@
 """
 PAVE-ARCHIVER: Unified Workspace Lifecycle Manager
 ==================================================
-VERSION: 3.3.4 (Mathematically Strict Per-Variable Averaging)
+VERSION: 3.3.5 (No Combined Average Rows)
 
 LIFECYCLE & REPORTING ARCHITECTURE:
 -----------------------------------
@@ -18,7 +18,6 @@ PHASE 2: Historical Crawling & Long-Term Record Generation
    - Safely parses ragged CSVs to prevent Pandas Multi-Index shifting bugs.
    - SCENE MERGING: Strips GOES scene tags but PRESERVES channel tags.
    - TABLE CONDENSING: Summary tables aggregate stats into a single row per base variable.
-   - METRIC ISOLATION: Averages are calculated per distinct variable (e.g., separating DQF from Radiance).
 """
 
 import os
@@ -309,9 +308,6 @@ def _draw_summary_page(pdf, title, subtitle, family, var_tuple_list, stats_df, s
     table_data = [["Product: Variable", "Avg R-Squared", "Avg Err Dispersion", "Value Range Limit"]]
     cell_colors = [["#40466e"] * 4]
 
-    # Track metrics separately per unique variable (so DQFs don't average with meteorological values)
-    var_trackers = defaultdict(lambda: {'r2': [], 'err': []})
-
     # CONDENSE SCENES: Collapse the incoming tuple list into unique base variables
     unique_vars = set()
     for prod, var in var_tuple_list:
@@ -319,9 +315,6 @@ def _draw_summary_page(pdf, title, subtitle, family, var_tuple_list, stats_df, s
 
     for (clean_prod, var) in sorted(list(unique_vars), key=lambda x: (x[0], x[1])):
         avg_r2, avg_err, val_range = get_variable_stats(stats_df, clean_prod, sat=sat_filter, var=var)
-
-        if pd.notna(avg_r2): var_trackers[var]['r2'].append(avg_r2)
-        if pd.notna(avg_err): var_trackers[var]['err'].append(avg_err)
 
         r2_str = f"{avg_r2:.4f}" if pd.notna(avg_r2) else "N/A"
         err_str = f"{avg_err:.4f}" if pd.notna(avg_err) else "N/A"
@@ -338,29 +331,6 @@ def _draw_summary_page(pdf, title, subtitle, family, var_tuple_list, stats_df, s
         table_data.append(row)
         cell_colors.append([color] * 4)
 
-    # ISOLATED SUMMARY ROWS: Calculate averages distinctly per variable
-    summary_indices = []
-    for var in sorted(var_trackers.keys()):
-        r2_list = var_trackers[var]['r2']
-        err_list = var_trackers[var]['err']
-
-        # Only add a summary row if this specific variable appeared in multiple products/channels
-        if len(r2_list) > 1:
-            v_avg_r2 = np.mean(r2_list)
-            v_avg_err = np.mean(err_list) if err_list else np.nan
-
-            r2_str = f"{v_avg_r2:.4f}"
-            err_str = f"{v_avg_err:.4f}" if pd.notna(v_avg_err) else "N/A"
-
-            if pd.isna(v_avg_r2): color = "lightgray"
-            elif v_avg_r2 >= 0.95: color = "palegreen"
-            elif v_avg_r2 >= 0.85: color = "moccasin"
-            else: color = "lightcoral"
-
-            table_data.append([f"COMBINED AVERAGE: {var}", r2_str, err_str, "N/A"])
-            cell_colors.append([color] * 4)
-            summary_indices.append(len(table_data) - 1)
-
     if len(table_data) > 1:
         table = ax_table.table(cellText=table_data, cellColours=cell_colors, loc='center', cellLoc='center', colWidths=[0.4, 0.2, 0.2, 0.2])
         table.auto_set_font_size(False)
@@ -370,11 +340,6 @@ def _draw_summary_page(pdf, title, subtitle, family, var_tuple_list, stats_df, s
         for j in range(4):
             table[(0, j)].get_text().set_color('white')
             table[(0, j)].get_text().set_weight('bold')
-
-        # Bold the isolated summary rows at the bottom
-        for idx in summary_indices:
-            for j in range(4):
-                table[(idx, j)].get_text().set_weight('bold')
     else:
         fig.text(0.5, 0.35, "No statistical data available for table generation.", ha='center', va='center', fontsize=12, color='gray')
 
