@@ -81,7 +81,7 @@ PRODUCT_FAMILIES = {
     "RRQPE": ["RRQPE"],
     "FDC": ["FDC"],
     "FSC": ["FSC"],
-    "LST": ["LST"],
+    "LST": ["LST", "CLST"],
     "ESC": ["ESC"],
     "ESU": ["ESU"],
     "ETE": ["ETE"]
@@ -185,7 +185,7 @@ def print_symmetry_table(prem_fld, gccs_fld, log, relax_match=False):
 
     p_files = list(p_root.rglob("*.nc"))
     g_files = list(g_root.rglob("*.nc"))
-    
+
     # Pre-build gccs lookup: rel_dir -> {filename: path}
     g_lookup = {}
     for gf in g_files:
