@@ -2,7 +2,7 @@
 """
 PAVE-ARCHIVER: Unified Workspace Lifecycle Manager
 ==================================================
-VERSION: 3.3.76 (logging cleanup)
+VERSION: 3.4.0 (Pagination Engine & N/A Scrubbing)
 
 LIFECYCLE & REPORTING ARCHITECTURE:
 -----------------------------------
@@ -17,8 +17,9 @@ PHASE 1: Workspace Cleanup & Dashboard Harvesting
 PHASE 2: Historical Crawling & Long-Term Record Generation
    - Safely parses ragged CSVs to prevent Pandas Multi-Index shifting bugs.
    - SCENE MERGING: Strips GOES scene tags but PRESERVES channel tags.
-   - TABLE CONDENSING: Summary tables aggregate stats into a single row per base variable.
-   - MATH FILTERING: Aggregation math actively ignores N/A values across scenes.
+   - TABLE PAGINATION: Automatically detects massive variable lists (like DMW)
+     and cleanly spans them across multiple pages to prevent overflow.
+   - MATH FILTERING: Aggregation math aggressively drops N/As, Infs, and NaNs.
 """
 
 import os
@@ -286,11 +287,14 @@ def get_variable_stats(stats_df, prod, sat=None, var=None):
     if subset.empty:
         return np.nan, np.nan, np.nan
 
-    # MATH FILTERING: Explicitly force the columns to numeric and dropna to purge N/A strings
-    # This ensures a failed scene doesn't drag the variable average into N/A if other scenes passed
-    r2_vals = pd.to_numeric(subset[subset['Metric'].str.contains('r-squared', case=False, na=False)]['Mean'], errors='coerce').dropna()
-    err_vals = pd.to_numeric(subset[subset['Metric'].str.contains('mean abs error', case=False, na=False)]['Mean'], errors='coerce').dropna()
-    range_vals = pd.to_numeric(subset[subset['Metric'].str.contains('range', case=False, na=False)]['Max'], errors='coerce').dropna()
+    # BULLETPROOF MATH FILTERING: Aggressively convert to float, then kill Infs and NaNs
+    def clean_series(series):
+        s = pd.to_numeric(series, errors='coerce')
+        return s.replace([np.inf, -np.inf], np.nan).dropna()
+
+    r2_vals = clean_series(subset[subset['Metric'].str.contains('r-squared', case=False, na=False)]['Mean'])
+    err_vals = clean_series(subset[subset['Metric'].str.contains('mean abs error', case=False, na=False)]['Mean'])
+    range_vals = clean_series(subset[subset['Metric'].str.contains('range', case=False, na=False)]['Max'])
 
     avg_r2 = r2_vals.mean() if not r2_vals.empty else np.nan
     avg_err = err_vals.mean() if not err_vals.empty else np.nan
@@ -299,17 +303,14 @@ def get_variable_stats(stats_df, prod, sat=None, var=None):
     return avg_r2, avg_err, max_range
 
 def _draw_summary_page(pdf, title, subtitle, family, var_tuple_list, stats_df, sat_filter=None):
-    """Helper function to draw a standardized summary table page utilizing (prod, var) tuples."""
-    fig = plt.figure(figsize=(11, 8.5))
-    fig.text(0.5, 0.90, title, ha='center', va='center', fontsize=26, weight='bold')
-    fig.text(0.5, 0.83, f"Product Family: {family}", ha='center', va='center', fontsize=20)
-    fig.text(0.5, 0.78, subtitle, ha='center', va='center', fontsize=16, color='gray')
+    """Helper function to draw summary tables, featuring automated pagination to prevent overflowing large suites."""
+    header_row = ["Product: Variable", "Avg R-Squared", "Avg Err Dispersion", "Value Range Limit"]
+    header_color = ["#40466e"] * 4
 
-    ax_table = fig.add_axes([0.1, 0.05, 0.8, 0.65])
-    ax_table.axis('off')
-
-    table_data = [["Product: Variable", "Avg R-Squared", "Avg Err Dispersion", "Value Range Limit"]]
-    cell_colors = [["#40466e"] * 4]
+    all_data_rows = []
+    all_data_colors = []
+    r2_tracker = []
+    err_tracker = []
 
     # CONDENSE SCENES: Collapse the incoming tuple list into unique base variables
     unique_vars = set()
@@ -331,23 +332,73 @@ def _draw_summary_page(pdf, title, subtitle, family, var_tuple_list, stats_df, s
         elif avg_r2 >= 0.85: color = "moccasin"
         else: color = "lightcoral"
 
-        table_data.append(row)
-        cell_colors.append([color] * 4)
+        if pd.notna(avg_r2): r2_tracker.append(avg_r2)
+        if pd.notna(avg_err): err_tracker.append(avg_err)
 
-    if len(table_data) > 1:
+        all_data_rows.append(row)
+        all_data_colors.append([color] * 4)
+
+    if r2_tracker:
+        overall_r2 = np.mean(r2_tracker)
+        overall_err = np.mean(err_tracker) if err_tracker else np.nan
+        overall_color = "palegreen" if overall_r2 >= 0.95 else "moccasin" if overall_r2 >= 0.85 else "lightcoral"
+
+        all_data_rows.append(["OVERALL AVERAGE", f"{overall_r2:.4f}", f"{overall_err:.4f}" if pd.notna(overall_err) else "N/A", "N/A"])
+        all_data_colors.append([overall_color] * 4)
+
+    if not all_data_rows:
+        fig = plt.figure(figsize=(11, 8.5))
+        fig.text(0.5, 0.90, title, ha='center', va='center', fontsize=26, weight='bold')
+        fig.text(0.5, 0.83, f"Product Family: {family}", ha='center', va='center', fontsize=20)
+        fig.text(0.5, 0.78, subtitle, ha='center', va='center', fontsize=16, color='gray')
+        fig.text(0.5, 0.35, "No statistical data available for table generation.", ha='center', va='center', fontsize=12, color='gray')
+        pdf.savefig(fig)
+        plt.close(fig)
+        return
+
+    # PAGINATION ENGINE: Split the rows into manageable chunks to prevent barcode squishing
+    MAX_ROWS_PER_PAGE = 30
+    total_pages = max(1, (len(all_data_rows) - 1) // MAX_ROWS_PER_PAGE + 1)
+
+    for i in range(total_pages):
+        start_idx = i * MAX_ROWS_PER_PAGE
+        end_idx = start_idx + MAX_ROWS_PER_PAGE
+        chunk_rows = all_data_rows[start_idx:end_idx]
+        chunk_colors = all_data_colors[start_idx:end_idx]
+
+        fig = plt.figure(figsize=(11, 8.5))
+        fig.text(0.5, 0.90, title, ha='center', va='center', fontsize=26, weight='bold')
+        fig.text(0.5, 0.83, f"Product Family: {family}", ha='center', va='center', fontsize=20)
+
+        # Inject dynamic page numbering into the subtitle if needed
+        page_subtitle = subtitle + (f" | Page {i+1} of {total_pages}" if total_pages > 1 else "")
+        fig.text(0.5, 0.78, page_subtitle, ha='center', va='center', fontsize=16, color='gray')
+
+        ax_table = fig.add_axes([0.1, 0.05, 0.8, 0.65])
+        ax_table.axis('off')
+
+        table_data = [header_row] + chunk_rows
+        cell_colors = [header_color] + chunk_colors
+
         table = ax_table.table(cellText=table_data, cellColours=cell_colors, loc='center', cellLoc='center', colWidths=[0.4, 0.2, 0.2, 0.2])
         table.auto_set_font_size(False)
         table.set_fontsize(10)
-        table.scale(1, 1.5)
+
+        # Scale cell height safely depending on how many rows ended up on this specific page
+        table.scale(1, min(1.8, 40 / len(table_data)))
 
         for j in range(4):
             table[(0, j)].get_text().set_color('white')
             table[(0, j)].get_text().set_weight('bold')
-    else:
-        fig.text(0.5, 0.35, "No statistical data available for table generation.", ha='center', va='center', fontsize=12, color='gray')
 
-    pdf.savefig(fig)
-    plt.close(fig)
+        # Bold the OVERALL AVERAGE row if it rendered on the current chunk
+        if r2_tracker and i == total_pages - 1:
+            last_row_idx = len(table_data) - 1
+            for j in range(4):
+                table[(last_row_idx, j)].get_text().set_weight('bold')
+
+        pdf.savefig(fig)
+        plt.close(fig)
 
 def build_pdf_artifact(family, sats_dict, out_dir, stats_df, log):
     """Compiles grouped chronological images and summary tables for a Product Family into a single PDF."""
@@ -525,6 +576,11 @@ def main():
                     df = pd.DataFrame(parsed_data, columns=columns_to_keep)
 
                     for numeric_col in ['Mean', 'Max']:
+                        # Add a proactive string wipe just in case 'nan' or 'N/A' gets parsed as a raw string
+                        df[numeric_col] = df[numeric_col].replace(
+                            to_replace=[r'^\s*n/?a\s*$', r'^\s*none\s*$', r'^\s*nan\s*$'],
+                            value=np.nan, regex=True, flags=re.IGNORECASE
+                        )
                         df[numeric_col] = pd.to_numeric(df[numeric_col], errors='coerce')
 
                     df['Sat'] = df['Sat'].astype(str).str.replace('G', '', case=False).str.zfill(2)
