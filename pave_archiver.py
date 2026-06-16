@@ -2,7 +2,7 @@
 """
 PAVE-ARCHIVER: Unified Workspace Lifecycle Manager
 ==================================================
-VERSION: 3.3.6 (N/A Math Exclusion Fix)
+VERSION: 3.3.76 (logging cleanup)
 
 LIFECYCLE & REPORTING ARCHITECTURE:
 -----------------------------------
@@ -194,7 +194,7 @@ def archive_folder(folder_path, log):
         return
 
     tar_path = folder_path.parent / f"{folder_path.name}.tar.gz"
-    log.info(f"Compressing {folder_path.name}/ into {tar_path.name}...")
+    log.verbose(f"Compressing {folder_path.name}/ into {tar_path.name}...")
 
     try:
         with tarfile.open(tar_path, "w:gz") as tar:

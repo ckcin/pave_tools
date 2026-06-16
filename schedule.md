@@ -24,7 +24,7 @@ The scheduler mathematically divides the master product list into three payload 
 * **Imagery & Winds:** Rad/CMIP (Ch 01, 04, 07, 10, 13, 16) + DMW (Ch 07, 10)
 * **Cloud Families:** COMP (COD, CPS), Cloud_EOCH
 * **Surface Albedo Family:** LSA, BRF *(+ Daily NBAR/BRDF Quirks)*
-* **Scalars:** RRQPE, LST, ETE
+* **Scalars:** RRQPE, LST (&CLST), ETE
 * **Cryosphere:** Cryo_AICE *(Automatically snaps to nearest 3-hour mark)*
 
 ### **Group B**
