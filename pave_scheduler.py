@@ -2,7 +2,7 @@
 """
 PAVE: Continuous Background Scheduler
 =====================================
-VERSION: 2.44.0 (Manual DOY Backfill & Override)
+VERSION: 2.51.0 (Enforced --catch-up Engine Alignment)
 
 SCHEDULING & LOAD BALANCING ARCHITECTURE:
 -----------------------------------------
@@ -40,6 +40,10 @@ SCHEDULING & LOAD BALANCING ARCHITECTURE:
    - Valid workspaces are automatically passed to pave_archiver.py.
    - The archiver autonomously discovers 'stats_summary.csv' within each workspace
      to dynamically generate a color-coded executive summary matrix in the final PDF record.
+
+9. Catch-Up Mode:
+   - Triggered via `--catch-up` combined with explicit `--doy` and `--year` overrides.
+   - Loops rapidly through historical time metrics step-by-step before handing off to live operational tracking loops.
 
 EXAMPLE PRODUCTION DEPLOYMENT:
 ------------------------------
@@ -106,20 +110,9 @@ RAW_PRODUCTS = [
     "RadCMIP|09", "RadCMIP|10", "RadCMIP|11", "RadCMIP|12",
     "RadCMIP|13", "RadCMIP|14", "RadCMIP|15", "RadCMIP|16",
 
-    # Delegate standard products and groups directly to the centralized dict
-    "Sounding",
-    "CloudHeight",
-    "COMP",
-    "Cloud_ACT",
-    "Cloud_ECBH",
-    "Cloud_EOCH",
-    "Cloud_CCL",
-    "Radiation",
-    "SurfaceAlbedo",
-    "Aerosol_ADP",
-    "Aerosol_AOD",
-    "Cryo_AICE",
-    "Cryo_AITA",
+    "Sounding", "CloudHeight", "COMP", "Cloud_ACT", "Cloud_ECBH",
+    "Cloud_EOCH", "Cloud_CCL", "Radiation", "SurfaceAlbedo",
+    "Aerosol_ADP", "Aerosol_AOD", "Cryo_AICE", "Cryo_AITA",
 
     "SST", "RRQPE", "FDC", "FSC", "LST", "ESC", "ESU", "ETE"
 ]
@@ -152,14 +145,14 @@ def wait_until_pave_finishes(log):
                 if first_wait:
                     log.warn("Active pave.py process detected. Waiting in queue...")
                     first_wait = False
-                time.sleep(60)
+                time.sleep(10)
             else:
                 break
         except subprocess.CalledProcessError as exc:
             if exc.returncode == 1:
                 break
             log.error(f"Error checking active pave.py processes: {exc.output.decode().strip()}")
-            time.sleep(60)
+            time.sleep(10)
 
 def run_pave(dsn, channels, hour_str, target_date, workspace_dir, pave_script, sat, log, relax_match=False, fast_compare=False):
     timestamp = f"{target_date.year}{target_date.strftime('%j')}{hour_str}0"
@@ -175,11 +168,8 @@ def run_pave(dsn, channels, hour_str, target_date, workspace_dir, pave_script, s
         "--verbose"
     ]
 
-    if relax_match:
-        cmd.append("--relax-match")
-
-    if fast_compare:
-        cmd.append("--fast-compare")
+    if relax_match: cmd.append("--relax-match")
+    if fast_compare: cmd.append("--fast-compare")
 
     channel_str = ""
     folder_tag = ""
@@ -212,7 +202,6 @@ def execute_slot(workspace_dir, pave_script, log, dashboard_path=None, record_pa
         slot_hour = time_slot
         if override_doy is not None:
             target_year = override_year if override_year is not None else now.year
-            # Dynamically construct the specific historical date object
             target_date = datetime.datetime.strptime(f"{target_year}{override_doy:03d}", "%Y%j").replace(tzinfo=datetime.timezone.utc)
         else:
             target_date = now
@@ -230,21 +219,21 @@ def execute_slot(workspace_dir, pave_script, log, dashboard_path=None, record_pa
         target_date = latest_date
         slot_hour = latest_data_hour
 
-    target_day_idx = target_date.weekday()
+    target_date_idx = target_date.weekday()
 
-    if target_day_idx in [5, 6]:
+    if target_date_idx in [5, 6]:
         if time_slot is None:
             log.info("Target day is a Weekend (Saturday/Sunday). Standby.")
             return
         else:
-            log.info("Target day is a Weekend, but proceeding anyway due to manual override.")
+            log.info("Target day is a Weekend, but proceeding anyway due to execution override context.")
 
     hour_str = f"{slot_hour:02d}"
     target_sat = SLOT_TO_SAT[slot_hour]
 
     tasks = get_slot_tasks(target_date, slot_hour)
 
-    log.info(f"--- PAVE AUTOMATION | Executing for: {target_date.strftime('%Y-%m-%d')} (DOY {target_date.strftime('%j')}) | Data Slot {hour_str}:00Z (G{target_sat}) ---")
+    log.info(f"--- PAVE SCHEDULER ENGINE | Target: {target_date.strftime('%Y-%m-%d')} (DOY {target_date.strftime('%j')}) | Data Slot {hour_str}:00Z (G{target_sat}) ---")
 
     active_workspaces = []
 
@@ -259,11 +248,9 @@ def execute_slot(workspace_dir, pave_script, log, dashboard_path=None, record_pa
 
     for entry in tasks:
         try:
-            # --- DYNAMIC FAMILY MAPPING ---
             if entry in PRODUCT_FAMILIES:
                 family_members = get_products_in_family(entry)
                 for member_dsn in family_members:
-                    # Specific Cryosphere Timeline Alignment rule
                     if member_dsn in ["AICE", "AITA"]:
                         floor_3hr = (slot_hour // 3) * 3
                         ice_hour_str = f"{floor_3hr:02d}"
@@ -271,10 +258,8 @@ def execute_slot(workspace_dir, pave_script, log, dashboard_path=None, record_pa
                         folder = run_pave(member_dsn, None, ice_hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, relax_match=relax_match, fast_compare=fast_compare)
                     else:
                         folder = run_pave(member_dsn, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, relax_match=relax_match, fast_compare=fast_compare)
-
                     active_workspaces.append(folder)
 
-            # --- HARDCODED CASCADING TRIGGERS (Rad/CMIP -> DMW) ---
             elif "|" in entry:
                 dsn, channel = entry.split("|")
                 if dsn == "RadCMIP":
@@ -285,48 +270,40 @@ def execute_slot(workspace_dir, pave_script, log, dashboard_path=None, record_pa
                     if channel in ["02", "07", "08", "09", "10"]:
                         f_dmw = run_pave("DMW", [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, relax_match=relax_match, fast_compare=fast_compare)
                         active_workspaces.append(f_dmw)
-
                     if channel == "08":
                         f_dmwv = run_pave("DMWV", [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, relax_match=relax_match, fast_compare=fast_compare)
                         active_workspaces.append(f_dmwv)
                 else:
                     folder = run_pave(dsn, [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, relax_match=relax_match, fast_compare=fast_compare)
                     active_workspaces.append(folder)
-
-            # --- STANDALONE PRODUCTS ---
             else:
                 folder = run_pave(entry, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, relax_match=relax_match, fast_compare=fast_compare)
                 active_workspaces.append(folder)
         except Exception as e:
             log.error(f"Task {entry} failed to execute: {e}")
 
-    # --- DAILY QUIRKS (NBAR/BRDF Post-LSA Synchronization) ---
     if "SurfaceAlbedo" in tasks:
         if slot_hour == 17:
-            log.info("Triggering Daily Quirks (NBAR / BRDF) for G19 at 12Z (Closest post-generation LSA slot)...")
+            log.info("Triggering Daily Quirks (NBAR / BRDF) for G19 at 12Z...")
             for special_dsn in ["NBAR", "BRDF"]:
                 folder = run_pave(special_dsn, None, "12", target_date, workspace_dir, pave_script, sat="19", log=log, relax_match=relax_match, fast_compare=fast_compare)
                 active_workspaces.append(folder)
-
         if slot_hour == 21:
-            log.info("Triggering Daily Quirks (NBAR / BRDF) for G18 at 14Z (Closest post-generation LSA slot)...")
+            log.info("Triggering Daily Quirks (NBAR / BRDF) for G18 at 14Z...")
             for special_dsn in ["NBAR", "BRDF"]:
                 folder = run_pave(special_dsn, None, "14", target_date, workspace_dir, pave_script, sat="18", log=log, relax_match=relax_match, fast_compare=fast_compare)
                 active_workspaces.append(folder)
 
     valid_paths = [f for f in active_workspaces if os.path.isdir(f)]
 
-    # --- AUTOMATED WORKSPACE LIFECYCLE (HARVEST, ARCHIVE, & RECORD) ---
     if valid_paths:
         log.info("Evaluating processed folders for lifecycle sweep (Harvesting, Archiving, Recording)...")
         archiver_script = os.path.join(SCRIPT_DIR, "pave_archiver.py")
-
         arch_cmd = [sys.executable, archiver_script] + valid_paths + ["--clean-validation"]
 
-        if dashboard_path:
-            arch_cmd.extend(["--dashboard", dashboard_path])
-        if record_path:
-            arch_cmd.extend(["--record", record_path])
+        if dashboard_path: arch_cmd.extend(["--dashboard", dashboard_path])
+        if record_path: arch_cmd.extend(["--record", record_path])
+        arch_cmd.append("--debug-stats")
 
         log.info(f"LAUNCHING UNIFIED LIFECYCLE SWEEP: {' '.join(arch_cmd)}")
         try:
@@ -346,20 +323,50 @@ def wait_for_next_slot(log):
             candidate_triggers.append(d.replace(hour=exec_h, minute=0, second=0, microsecond=0))
 
     next_trigger = next(t for t in candidate_triggers if t > now)
-
     sleep_seconds = (next_trigger - now).total_seconds()
     log.info(f"Sleeping for {sleep_seconds/3600:.2f} hours until the next execution window at {next_trigger.strftime('%H:%M:%S')} UTC...")
     time.sleep(sleep_seconds)
+
+def handle_catch_up_loop(abs_workspace, abs_pave_script, args, log):
+    """Executes a sequential matrix catch-up loop step-by-step using enforced DOY and Year configurations."""
+    cursor_hour = args.time_slot
+    cursor_date = datetime.datetime.strptime(f"{args.year}{args.doy:03d}", "%Y%j").replace(tzinfo=datetime.timezone.utc)
+
+    log.info(f"[CATCH-UP PROCESSING SYSTEM ACTIVATED]")
+    log.info(f"  Walking forward from anchor: {cursor_date.strftime('%Y-%m-%d')} (DOY {cursor_date.strftime('%j')}) slot {cursor_hour:02d}Z")
+
+    while True:
+        now_utc = get_now_utc()
+        exec_window = cursor_date.replace(hour=(cursor_hour + EXEC_DELAY_HOURS), minute=0, second=0, microsecond=0)
+
+        if exec_window > now_utc:
+            log.info(f"[SYNC COMPLETE] Catch-up processing horizon has aligned with current tracking time. Switching to background daemon.")
+            break
+
+        execute_slot(
+            abs_workspace, abs_pave_script, log,
+            dashboard_path=args.dashboard, record_path=args.record,
+            relax_match=args.relax_match, fast_compare=args.fast_compare,
+            time_slot=cursor_hour, override_doy=int(cursor_date.strftime('%j')), override_year=cursor_date.year
+        )
+
+        current_idx = ALLOWED_SLOTS.index(cursor_hour)
+        if current_idx == len(ALLOWED_SLOTS) - 1:
+            cursor_hour = ALLOWED_SLOTS[0]
+            cursor_date += datetime.timedelta(days=1)
+        else:
+            cursor_hour = ALLOWED_SLOTS[current_idx + 1]
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="PAVE Continuous Background Scheduler")
     parser.add_argument("--workspace", type=str, default=os.getcwd(), help="The directory where PAVE outputs and logs will be generated.")
     parser.add_argument("--pave-script", type=str, default=os.path.join(SCRIPT_DIR, "pave.py"), help="The explicit path to pave.py.")
-    
-    # MANUAL OVERRIDE FLAGS
-    parser.add_argument("--time-slot", type=int, choices=[1, 5, 9, 13, 17, 21], help="Run a specific time slot immediately and exit.")
-    parser.add_argument("--doy", type=int, help="Override the Day of Year (1-366) for manual execution. Must be used with --time-slot.")
-    parser.add_argument("--year", type=int, help="Override the Year (e.g., 2026). Defaults to current year.")
+
+    # SYSTEM INTERACTION AND BACKFILL CONTROLS
+    parser.add_argument("--time-slot", type=int, choices=[1, 5, 9, 13, 17, 21], help="Target database execution hour slot.")
+    parser.add_argument("--doy", type=int, help="Override Day of Year for standalone override or baseline catch-up loops.")
+    parser.add_argument("--year", type=int, help="Override year configuration details.")
+    parser.add_argument("--catch-up", action="store_true", help="Automate cyclical matrix loops sequentially from baseline parameters up to live runtime window.")
 
     parser.add_argument("--dashboard", type=str, help="Path to the shared dashboard extraction folder.")
     parser.add_argument("--record", type=str, help="Path to the long-term artifact PDF output folder.")
@@ -381,10 +388,16 @@ if __name__ == "__main__":
     if not os.path.isfile(abs_pave_script):
         log.error(f"CRITICAL ERROR: 'pave.py' not found at: {abs_pave_script}")
         sys.exit(1)
-        
-    if args.doy is not None and args.time_slot is None:
-        log.error("CRITICAL ERROR: --doy override can only be used in conjunction with a specific --time-slot.")
-        sys.exit(1)
+
+    # VALIDATION GATE: Enforce strict positional configurations
+    if args.catch_up:
+        if args.time_slot is None or args.doy is None or args.year is None:
+            log.error("CRITICAL ARGUMENT ERROR: The --catch-up option strictly requires that --time-slot, --doy, and --year are all specified to anchor the baseline tracking timeline.")
+            sys.exit(1)
+    else:
+        if args.doy is not None and args.time_slot is None:
+            log.error("CRITICAL ERROR: --doy override can only be used in conjunction with a specific --time-slot.")
+            sys.exit(1)
 
     log.info("=========================================")
     log.info("  PAVE SCHEDULER INITIALIZED")
@@ -392,29 +405,21 @@ if __name__ == "__main__":
     log.info(f"  Workspace Dir: {abs_workspace}")
     log.info(f"  Rotation Loop: {CYCLE_DAYS} Days (DOY-Anchored)")
     log.info(f"  Execution:     Same-Day Target (+{EXEC_DELAY_HOURS}hr Delay)")
-    if args.relax_match:
-        log.info("  Matching Mode: RELAXED (Start-Time '_s' Anchor Only)")
-    if args.fast_compare:
-        log.info("  Engine Mode:   FAST-COMPARE (Standalone plots disabled)")
-    if args.dashboard:
-        log.info(f"  Dashboard Out: {os.path.abspath(args.dashboard)}")
-    if args.record:
-        log.info(f"  Records Out:   {os.path.abspath(args.record)}")
-        
-    if args.time_slot is not None:
-        if args.doy is not None:
-            target_year = args.year if args.year else get_now_utc().year
-            log.info(f"  MODE:          OVERRIDE EXECUTION (Year {target_year}, DOY {args.doy:03d}, Slot {args.time_slot:02d}Z)")
-        else:
-            log.info(f"  MODE:          OVERRIDE EXECUTION (Current DOY, Slot {args.time_slot:02d}Z)")
-    else:
-        log.info("  MODE:          CONTINUOUS DAEMON (Immediate Boot Trigger Active)")
+    if args.relax_match: log.info("  Matching Mode: RELAXED (Start-Time '_s' Anchor Only)")
+    if args.fast_compare: log.info("  Engine Mode:   FAST-COMPARE (Standalone plots disabled)")
+    if args.dashboard: log.info(f"  Dashboard Out: {os.path.abspath(args.dashboard)}")
+    if args.record: log.info(f"  Records Out:   {os.path.abspath(args.record)}")
     log.info("=========================================")
 
-    if args.time_slot is not None:
+    # Branch execution parameters based on validation metrics
+    if args.catch_up:
+        handle_catch_up_loop(abs_workspace, abs_pave_script, args, log)
+        log.info("Catch-up phase cleared successfully. Transitioning system into runtime loops...")
+
+    if args.time_slot is not None and not args.catch_up:
         execute_slot(abs_workspace, abs_pave_script, log, dashboard_path=args.dashboard, record_path=args.record, relax_match=args.relax_match, fast_compare=args.fast_compare, time_slot=args.time_slot, override_doy=args.doy, override_year=args.year)
         log.info("--- OVERRIDE EXECUTION COMPLETE ---")
-    else:
+    elif not args.catch_up:
         log.info("Boot verification check: Executing target slot for current hour profile...")
         execute_slot(abs_workspace, abs_pave_script, log, dashboard_path=args.dashboard, record_path=args.record, relax_match=args.relax_match, fast_compare=args.fast_compare)
 
