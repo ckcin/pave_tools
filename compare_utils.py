@@ -2,7 +2,7 @@
 """
 COMPARE-PAVE: Shared Utility Suite
 ==================================
-VERSION: 1.37.1 (Hexbin Extent Bounds Fixed)
+VERSION: 1.38.0 (Zero-Variance Uniform Array R-Squared Patch)
 """
 
 import os
@@ -137,10 +137,17 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
         try:
             samp_p = data_p.ravel()[sample_idx]
             samp_g = data_g.ravel()[sample_idx]
-            if np.any(samp_p != samp_p[0]) and np.any(samp_g != samp_g[0]):
+
+            # MATH PATCH: Catch completely uniform zero-variance edge cases explicitly
+            if np.all(samp_p == samp_p[0]) and np.all(samp_g == samp_g[0]):
+                if samp_p[0] == samp_g[0]:
+                    r_sq = 1.0  # Perfect match on flat data
+                    r_sq_is_na = False
+            else:
+                # Calculate variance normally if there is texture
                 r_sq = float(pearsonr(samp_p, samp_g)[0] ** 2)
                 r_sq_is_na = False
-        except:
+        except Exception:
             r_sq = 0.0
             r_sq_is_na = True
 
@@ -318,7 +325,10 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
             ax4.set_xlim(axis_bounds); ax4.set_ylim(axis_bounds)
         else:
             ax4.set_title("Correlation ($R^2$: N/A)", weight='bold', fontsize=12)
-            ax4.text(0.5, 0.5, "Data Constant or N/A\nNo Variance to Plot", ha='center', va='center', color='gray', weight='bold', transform=ax4.transAxes)
+
+            # Update visual hint so analysts know exactly why it is greyed out
+            status_hint = "Data perfectly uniform\nNo variance to plot" if (len(samp_p) > 0 and np.all(samp_p == samp_p[0])) else "Data Constant or N/A\nNo Variance to Plot"
+            ax4.text(0.5, 0.5, status_hint, ha='center', va='center', color='gray', weight='bold', transform=ax4.transAxes)
 
         # Histogram
         ax6.set_box_aspect(1)
@@ -423,7 +433,13 @@ def execute_1d_scatter_dashboard(data_p, data_g, var, tmp_dir, pair_info, fast_m
         try:
             samp_p = data_p[sample_idx]
             samp_g = data_g[sample_idx]
-            if np.any(samp_p != samp_p[0]) and np.any(samp_g != samp_g[0]):
+
+            # MATH PATCH: Check for uniform zero-variance edge cases explicitly
+            if np.all(samp_p == samp_p[0]) and np.all(samp_g == samp_g[0]):
+                if samp_p[0] == samp_g[0]:
+                    r_sq = 1.0
+                    r_sq_is_na = False
+            else:
                 r_sq = float(pearsonr(samp_p, samp_g)[0] ** 2)
                 r_sq_is_na = False
         except:
@@ -450,6 +466,10 @@ def execute_1d_scatter_dashboard(data_p, data_g, var, tmp_dir, pair_info, fast_m
         if len(samp_p) > 0:
             vmin_scat = min(np.nanmin(samp_p), np.nanmin(samp_g))
             vmax_scat = max(np.nanmax(samp_p), np.nanmax(samp_g))
+
+            if vmin_scat == vmax_scat:
+                vmin_scat -= 0.1; vmax_scat += 0.1
+
             im_scat = ax_scat.hexbin(samp_p, samp_g, gridsize=40, cmap='viridis', mincnt=1, bins='log', extent=[vmin_scat, vmax_scat, vmin_scat, vmax_scat])
             ax_scat.set_title(f"Correlation ($R^2$: {'N/A' if r_sq_is_na else f'{r_sq:.4f}'})", weight='bold', fontsize=12)
             plt.colorbar(im_scat, ax=ax_scat, label='log10(count)', fraction=0.046, pad=0.04)
@@ -581,8 +601,15 @@ def compare_sparse_vectors(ds_p, ds_g, vt, v1, v2, tmp_dir, pair_info, instr, pr
         try:
             samp_p = grid_spd_p.ravel()[sample_idx]
             samp_g = grid_spd_g.ravel()[sample_idx]
-            r_sq = float(pearsonr(samp_p, samp_g)[0] ** 2)
-            r_sq_is_na = False
+
+            # MATH PATCH: Catch uniform edge cases for binned vector wind speeds
+            if np.all(samp_p == samp_p[0]) and np.all(samp_g == samp_g[0]):
+                if samp_p[0] == samp_g[0]:
+                    r_sq = 1.0
+                    r_sq_is_na = False
+            else:
+                r_sq = float(pearsonr(samp_p, samp_g)[0] ** 2)
+                r_sq_is_na = False
         except:
             pass
 
@@ -669,6 +696,10 @@ def compare_sparse_vectors(ds_p, ds_g, vt, v1, v2, tmp_dir, pair_info, instr, pr
             if len(samp_p) > 0 and not r_sq_is_na:
                 vmin_scat = min(np.nanmin(samp_p), np.nanmin(samp_g))
                 vmax_scat = max(np.nanmax(samp_p), np.nanmax(samp_g))
+
+                if vmin_scat == vmax_scat:
+                    vmin_scat -= 0.1; vmax_scat += 0.1
+
                 im_scat = ax_scat.hexbin(samp_p, samp_g, gridsize=40, cmap='viridis', mincnt=1, bins='log', extent=[vmin_scat, vmax_scat, vmin_scat, vmax_scat])
                 _add_local_cbar(im_scat, ax_scat, label='log10(count)')
                 ax_scat.set_title(f"{v1} Correlation ($R^2$: {'N/A' if r_sq_is_na else f'{r_sq:.4f}'})", weight='bold', fontsize=12)
@@ -756,15 +787,20 @@ def compare_sparse_vectors(ds_p, ds_g, vt, v1, v2, tmp_dir, pair_info, instr, pr
         if len(samp_p) > 0 and not r_sq_is_na:
             vmin_scat = min(np.nanmin(samp_p), np.nanmin(samp_g))
             vmax_scat = max(np.nanmax(samp_p), np.nanmax(samp_g))
+
+            if vmin_scat == vmax_scat:
+                vmin_scat -= 0.1; vmax_scat += 0.1
+
             im4 = ax4.hexbin(samp_p, samp_g, gridsize=40, cmap='viridis', mincnt=1, bins='log', extent=[vmin_scat, vmax_scat, vmin_scat, vmax_scat])
-            ax4.set_title(f"Speed Correlation ($R^2$: {'N/A' if r_sq_is_na else f'{r_sq:.4f}'})", weight='bold', fontsize=12)
+            ax4.set_title(f"Correlation ($R^2$: {r_sq:.4f})", weight='bold', fontsize=12)
             _add_local_cbar(im4, ax4, label='log10(count)')
             axis_bounds = [vmin_scat, vmax_scat]
             ax4.plot(axis_bounds, axis_bounds, color='red', linestyle='--', linewidth=1.5, alpha=0.6, zorder=5)
             ax4.set_xlim(axis_bounds); ax4.set_ylim(axis_bounds)
         else:
-            ax4.set_title("Speed Correlation ($R^2$: N/A)", weight='bold', fontsize=12)
-            ax4.text(0.5, 0.5, "No overlapping tracking data matrix segments found.", ha='center', va='center', color='gray')
+            ax4.set_title("Correlation ($R^2$: N/A)", weight='bold', fontsize=12)
+            status_hint = "Data perfectly uniform\nNo variance to plot" if (len(samp_p) > 0 and np.all(samp_p == samp_p[0])) else "No overlapping tracking\ndata matrix segments found."
+            ax4.text(0.5, 0.5, status_hint, ha='center', va='center', color='gray', weight='bold', transform=ax4.transAxes)
 
         # Cell 6: Speed Delta Histogram
         ax6.set_box_aspect(1)
