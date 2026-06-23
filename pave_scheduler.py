@@ -2,7 +2,7 @@
 """
 PAVE: Continuous Background Scheduler
 =====================================
-VERSION: 2.60.0 (Shared IP Tarball Caching Optimization)
+VERSION: 2.61.0 (Aggressive Runtime Tarball Cleanup)
 
 SCHEDULING & LOAD BALANCING ARCHITECTURE:
 -----------------------------------------
@@ -41,9 +41,10 @@ SCHEDULING & LOAD BALANCING ARCHITECTURE:
    - The archiver autonomously discovers 'stats_summary.csv' within each workspace
      to dynamically generate a color-coded executive summary matrix in the final PDF record.
 
-9. Shared IP Tarball Cache:
+9. Shared IP Tarball Cache & Local Purge:
    - Dynamically intercepts preserved intermediate product tarballs from the initial run.
    - Hot-loads cached tarballs into downstream workspaces before execution to eliminate redundant S3 retrievals.
+   - IMMEDIATELY purges the local tarball copies from the workspace post-execution to prevent massive runtime disk bloating.
 
 10. Catch-Up Mode:
    - Triggered via `--catch-up` combined with explicit `--doy` and `--year` overrides.
@@ -224,6 +225,17 @@ def run_pave(dsn, channels, hour_str, target_date, workspace_dir, pave_script, s
                 if not os.path.exists(dst_cached):
                     log.info(f"Preserving freshly extracted IP tarball to slot-level cache: {item}")
                     shutil.copy2(src_preserved, dst_cached)
+
+        # --- IMMEDIATE RUNTIME CLEANUP ---
+        # Annihilate the local ip_data folder to prevent the disk from bloating
+        log.verbose("Purging preserved IP tarballs from local workspace to reclaim active disk space.")
+        shutil.rmtree(workspace_ip_data, ignore_errors=True)
+
+    # Extra safety sweep: Nuke any lingering .tar files in the local prem directory
+    if os.path.isdir(target_prem_dir):
+        for item in os.listdir(target_prem_dir):
+            if item.endswith(".tar"):
+                os.remove(os.path.join(target_prem_dir, item))
 
     return target_workspace_folder
 

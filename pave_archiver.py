@@ -2,7 +2,7 @@
 """
 PAVE-ARCHIVER: Unified Workspace Lifecycle Manager
 ==================================================
-VERSION: 3.4.3 (Granular Stats Debugging Engine)
+VERSION: 3.5.0 (IP Tarball Purge Optimization)
 
 LIFECYCLE & REPORTING ARCHITECTURE:
 -----------------------------------
@@ -12,6 +12,7 @@ long-term verification artifacts.
 PHASE 1: Workspace Cleanup & Dashboard Harvesting
    - Evaluates completed PAVE workspaces and identifies comparison artifacts (*_comparison.png).
    - Prevents dashboard bloat by filtering images down to the single latest scene.
+   - TARBALL PURGE: Actively deletes massive IP .tar files and ip_data/ folders to prevent storage leaks.
    - Compresses heavy spatial/data directories into .tar.gz archives.
 
 PHASE 2: Historical Crawling & Long-Term Record Generation
@@ -180,6 +181,22 @@ def harvest_dashboard(workspace, dash_dir, log):
 
     log.info(f"Filtered {len(png_files)} raw validation artifacts down to {total_copied} latest-scene artifacts.")
 
+def purge_ip_tarballs(workspace, log):
+    """Actively hunts and destroys massive .tar files and ip_data/ folders to prevent storage leaks."""
+    ip_data_dir = workspace / "ip_data"
+    if ip_data_dir.exists():
+        log.verbose(f"Purging preserved IP data directory to reclaim space: {ip_data_dir.name}/")
+        shutil.rmtree(ip_data_dir, ignore_errors=True)
+
+    for data_dir in [workspace / "prem", workspace / "gccs"]:
+        if data_dir.exists():
+            for tar_file in data_dir.rglob("*.tar"):
+                try:
+                    log.verbose(f"Deleting leftover IP tarball: {tar_file.name}")
+                    tar_file.unlink()
+                except Exception as e:
+                    log.debug(f"Could not delete tarball {tar_file.name}: {e}")
+
 def archive_folder(folder_path, log):
     """Safely compresses a directory to tar.gz and removes the original if successful."""
     if not folder_path.exists() or not folder_path.is_dir():
@@ -243,6 +260,9 @@ def process_workspace(workspace, args, log):
     if args.clean_validation:
         dash_dir = Path(args.dashboard).resolve() if args.dashboard else workspace / "dashboard"
         harvest_dashboard(workspace, dash_dir, log)
+
+    # Nuke the massive IP tarballs before archiving starts
+    purge_ip_tarballs(workspace, log)
 
     core_folders = ["prem", "gccs", "collocation", "logs"]
     if args.clean_validation: core_folders.append("validation")
