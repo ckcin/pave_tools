@@ -2,7 +2,7 @@
 """
 PAVE: Continuous Background Scheduler
 =====================================
-VERSION: 2.51.0 (Enforced --catch-up Engine Alignment)
+VERSION: 2.60.0 (Shared IP Tarball Caching Optimization)
 
 SCHEDULING & LOAD BALANCING ARCHITECTURE:
 -----------------------------------------
@@ -41,7 +41,11 @@ SCHEDULING & LOAD BALANCING ARCHITECTURE:
    - The archiver autonomously discovers 'stats_summary.csv' within each workspace
      to dynamically generate a color-coded executive summary matrix in the final PDF record.
 
-9. Catch-Up Mode:
+9. Shared IP Tarball Cache:
+   - Dynamically intercepts preserved intermediate product tarballs from the initial run.
+   - Hot-loads cached tarballs into downstream workspaces before execution to eliminate redundant S3 retrievals.
+
+10. Catch-Up Mode:
    - Triggered via `--catch-up` combined with explicit `--doy` and `--year` overrides.
    - Loops rapidly through historical time metrics step-by-step before handing off to live operational tracking loops.
 
@@ -67,6 +71,8 @@ import datetime
 import time
 import sys
 import os
+import re
+import shutil
 
 # --- PATH RESOLUTION & IMPORTS ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -154,33 +160,47 @@ def wait_until_pave_finishes(log):
             log.error(f"Error checking active pave.py processes: {exc.output.decode().strip()}")
             time.sleep(10)
 
-def run_pave(dsn, channels, hour_str, target_date, workspace_dir, pave_script, sat, log, relax_match=False, fast_compare=False):
+def run_pave(dsn, channels, hour_str, target_date, workspace_dir, pave_script, sat, log, cache_dir, relax_match=False, fast_compare=False):
     timestamp = f"{target_date.year}{target_date.strftime('%j')}{hour_str}0"
 
     log_dir = os.path.join(workspace_dir, "logs")
     os.makedirs(log_dir, exist_ok=True)
+
+    channel_str = ""
+    folder_tag = ""
+    if channels:
+        ch_tag = f"CH{''.join(channels)}"
+        channel_str = f"_{ch_tag}"
+        folder_tag = f"_{ch_tag}"
+
+    target_workspace_folder = os.path.join(workspace_dir, f"{dsn}_{timestamp}{folder_tag}")
+    target_prem_dir = os.path.join(target_workspace_folder, "prem")
+
+    # --- INJECT CACHED IP TARBALLS BEFORE RUNNING ---
+    if os.path.isdir(cache_dir) and any(os.scandir(cache_dir)):
+        os.makedirs(target_prem_dir, exist_ok=True)
+        for cached_item in os.listdir(cache_dir):
+            if cached_item.endswith(".tar"):
+                src_tar = os.path.join(cache_dir, cached_item)
+                dst_tar = os.path.join(target_prem_dir, cached_item)
+                log.info(f"Hot-loading cached IP tarball into runtime workspace: {cached_item}")
+                shutil.copy2(src_tar, dst_tar)
 
     cmd = [
         sys.executable, pave_script, dsn,
         "--times", timestamp,
         "--prefix", dsn,
         "--sat", sat,
+        "--preserve-ip",  # Keep the tarball in workspace/ip_data so the scheduler can harvest it
         "--verbose"
     ]
 
     if relax_match: cmd.append("--relax-match")
     if fast_compare: cmd.append("--fast-compare")
 
-    channel_str = ""
-    folder_tag = ""
     if channels:
         cmd.extend(["--channels"] + channels)
-        ch_tag = f"CH{''.join(channels)}"
         cmd.extend(["--tag", ch_tag])
-        channel_str = f"_{ch_tag}"
-        folder_tag = f"_{ch_tag}"
-
-    target_workspace_folder = os.path.join(workspace_dir, f"{dsn}_{timestamp}{folder_tag}")
 
     execution_time_str = get_now_utc().strftime("%Y%m%d_%H%M%S")
     log_filename = f"pave_run_{dsn}{channel_str}_G{sat}_{timestamp}_{execution_time_str}.log"
@@ -192,6 +212,18 @@ def run_pave(dsn, channels, hour_str, target_date, workspace_dir, pave_script, s
 
     with open(log_filepath, "w") as log_file:
         subprocess.run(cmd, stdout=log_file, stderr=subprocess.STDOUT, cwd=workspace_dir)
+
+    # --- HARVEST PRESERVED IP TARBALL INTO CENTRAL SLOT CACHE ---
+    workspace_ip_data = os.path.join(target_workspace_folder, "ip_data")
+    if os.path.isdir(workspace_ip_data):
+        for item in os.listdir(workspace_ip_data):
+            if item.endswith(".tar"):
+                os.makedirs(cache_dir, exist_ok=True)
+                src_preserved = os.path.join(workspace_ip_data, item)
+                dst_cached = os.path.join(cache_dir, item)
+                if not os.path.exists(dst_cached):
+                    log.info(f"Preserving freshly extracted IP tarball to slot-level cache: {item}")
+                    shutil.copy2(src_preserved, dst_cached)
 
     return target_workspace_folder
 
@@ -235,10 +267,12 @@ def execute_slot(workspace_dir, pave_script, log, dashboard_path=None, record_pa
 
     log.info(f"--- PAVE SCHEDULER ENGINE | Target: {target_date.strftime('%Y-%m-%d')} (DOY {target_date.strftime('%j')}) | Data Slot {hour_str}:00Z (G{target_sat}) ---")
 
+    # Initialize a temporary slot-level IP cache directory
+    slot_ip_cache = os.path.join(workspace_dir, f".ip_cache_{target_date.year}{target_date.strftime('%j')}{hour_str}")
     active_workspaces = []
 
     try:
-        folder = run_pave("ACM", None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, relax_match=relax_match, fast_compare=fast_compare)
+        folder = run_pave("ACM", None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, cache_dir=slot_ip_cache, relax_match=relax_match, fast_compare=fast_compare)
         active_workspaces.append(folder)
     except Exception as e:
         log.error(f"Persistent Monitor ACM failed to execute: {e}")
@@ -255,29 +289,29 @@ def execute_slot(workspace_dir, pave_script, log, dashboard_path=None, record_pa
                         floor_3hr = (slot_hour // 3) * 3
                         ice_hour_str = f"{floor_3hr:02d}"
                         log.info(f"Syncing cryosphere product '{member_dsn}' timeline to preceding 3-hour match: {ice_hour_str}0")
-                        folder = run_pave(member_dsn, None, ice_hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, relax_match=relax_match, fast_compare=fast_compare)
+                        folder = run_pave(member_dsn, None, ice_hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, cache_dir=slot_ip_cache, relax_match=relax_match, fast_compare=fast_compare)
                     else:
-                        folder = run_pave(member_dsn, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, relax_match=relax_match, fast_compare=fast_compare)
+                        folder = run_pave(member_dsn, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, cache_dir=slot_ip_cache, relax_match=relax_match, fast_compare=fast_compare)
                     active_workspaces.append(folder)
 
             elif "|" in entry:
                 dsn, channel = entry.split("|")
                 if dsn == "RadCMIP":
-                    f_rad = run_pave("Rad", [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, relax_match=relax_match, fast_compare=fast_compare)
-                    f_cmip = run_pave("CMIP", [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, relax_match=relax_match, fast_compare=fast_compare)
+                    f_rad = run_pave("Rad", [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, cache_dir=slot_ip_cache, relax_match=relax_match, fast_compare=fast_compare)
+                    f_cmip = run_pave("CMIP", [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, cache_dir=slot_ip_cache, relax_match=relax_match, fast_compare=fast_compare)
                     active_workspaces.extend([f_rad, f_cmip])
 
                     if channel in ["02", "07", "08", "09", "10"]:
-                        f_dmw = run_pave("DMW", [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, relax_match=relax_match, fast_compare=fast_compare)
+                        f_dmw = run_pave("DMW", [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, cache_dir=slot_ip_cache, relax_match=relax_match, fast_compare=fast_compare)
                         active_workspaces.append(f_dmw)
                     if channel == "08":
-                        f_dmwv = run_pave("DMWV", [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, relax_match=relax_match, fast_compare=fast_compare)
+                        f_dmwv = run_pave("DMWV", [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, cache_dir=slot_ip_cache, relax_match=relax_match, fast_compare=fast_compare)
                         active_workspaces.append(f_dmwv)
                 else:
-                    folder = run_pave(dsn, [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, relax_match=relax_match, fast_compare=fast_compare)
+                    folder = run_pave(dsn, [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, cache_dir=slot_ip_cache, relax_match=relax_match, fast_compare=fast_compare)
                     active_workspaces.append(folder)
             else:
-                folder = run_pave(entry, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, relax_match=relax_match, fast_compare=fast_compare)
+                folder = run_pave(entry, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, cache_dir=slot_ip_cache, relax_match=relax_match, fast_compare=fast_compare)
                 active_workspaces.append(folder)
         except Exception as e:
             log.error(f"Task {entry} failed to execute: {e}")
@@ -286,15 +320,21 @@ def execute_slot(workspace_dir, pave_script, log, dashboard_path=None, record_pa
         if slot_hour == 17:
             log.info("Triggering Daily Quirks (NBAR / BRDF) for G19 at 12Z...")
             for special_dsn in ["NBAR", "BRDF"]:
-                folder = run_pave(special_dsn, None, "12", target_date, workspace_dir, pave_script, sat="19", log=log, relax_match=relax_match, fast_compare=fast_compare)
+                folder = run_pave(special_dsn, None, "12", target_date, workspace_dir, pave_script, sat="19", log=log, cache_dir=slot_ip_cache, relax_match=relax_match, fast_compare=fast_compare)
                 active_workspaces.append(folder)
         if slot_hour == 21:
             log.info("Triggering Daily Quirks (NBAR / BRDF) for G18 at 14Z...")
             for special_dsn in ["NBAR", "BRDF"]:
-                folder = run_pave(special_dsn, None, "14", target_date, workspace_dir, pave_script, sat="18", log=log, relax_match=relax_match, fast_compare=fast_compare)
+                folder = run_pave(special_dsn, None, "14", target_date, workspace_dir, pave_script, sat="18", log=log, cache_dir=slot_ip_cache, relax_match=relax_match, fast_compare=fast_compare)
                 active_workspaces.append(folder)
 
     valid_paths = [f for f in active_workspaces if os.path.isdir(f)]
+
+    # --- CLEANUP AT THE END OF THE SLOT EXECUTION ---
+    # Erase the slot's centralized intermediate cache folder to preserve disk blocks
+    if os.path.isdir(slot_ip_cache):
+        log.verbose(f"Clearing temporary time slot intermediate cache: {slot_ip_cache}")
+        shutil.rmtree(slot_ip_cache)
 
     if valid_paths:
         log.info("Evaluating processed folders for lifecycle sweep (Harvesting, Archiving, Recording)...")
