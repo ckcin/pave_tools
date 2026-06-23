@@ -2,7 +2,7 @@
 """
 PAVE: Continuous Background Scheduler
 =====================================
-VERSION: 2.61.0 (Aggressive Runtime Tarball Cleanup)
+VERSION: 2.70.0 (Unified CLI Flag Propagation Downstream)
 
 SCHEDULING & LOAD BALANCING ARCHITECTURE:
 -----------------------------------------
@@ -161,7 +161,7 @@ def wait_until_pave_finishes(log):
             log.error(f"Error checking active pave.py processes: {exc.output.decode().strip()}")
             time.sleep(10)
 
-def run_pave(dsn, channels, hour_str, target_date, workspace_dir, pave_script, sat, log, cache_dir, relax_match=False, fast_compare=False):
+def run_pave(dsn, channels, hour_str, target_date, workspace_dir, pave_script, sat, log, cache_dir, relax_match=False, fast_compare=False, verbose=False, debug=False):
     timestamp = f"{target_date.year}{target_date.strftime('%j')}{hour_str}0"
 
     log_dir = os.path.join(workspace_dir, "logs")
@@ -192,12 +192,13 @@ def run_pave(dsn, channels, hour_str, target_date, workspace_dir, pave_script, s
         "--times", timestamp,
         "--prefix", dsn,
         "--sat", sat,
-        "--preserve-ip",  # Keep the tarball in workspace/ip_data so the scheduler can harvest it
-        "--verbose"
+        "--preserve-ip"  # Keep the tarball in workspace/ip_data so the scheduler can harvest it
     ]
 
     if relax_match: cmd.append("--relax-match")
     if fast_compare: cmd.append("--fast-compare")
+    if verbose: cmd.append("--verbose")
+    if debug: cmd.append("--debug")
 
     if channels:
         cmd.extend(["--channels"] + channels)
@@ -239,7 +240,7 @@ def run_pave(dsn, channels, hour_str, target_date, workspace_dir, pave_script, s
 
     return target_workspace_folder
 
-def execute_slot(workspace_dir, pave_script, log, dashboard_path=None, record_path=None, relax_match=False, fast_compare=False, time_slot=None, override_doy=None, override_year=None):
+def execute_slot(workspace_dir, pave_script, log, dashboard_path=None, record_path=None, relax_match=False, fast_compare=False, time_slot=None, override_doy=None, override_year=None, verbose=False, debug=False):
     now = get_now_utc()
 
     if time_slot is not None:
@@ -284,7 +285,7 @@ def execute_slot(workspace_dir, pave_script, log, dashboard_path=None, record_pa
     active_workspaces = []
 
     try:
-        folder = run_pave("ACM", None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, cache_dir=slot_ip_cache, relax_match=relax_match, fast_compare=fast_compare)
+        folder = run_pave("ACM", None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, cache_dir=slot_ip_cache, relax_match=relax_match, fast_compare=fast_compare, verbose=verbose, debug=debug)
         active_workspaces.append(folder)
     except Exception as e:
         log.error(f"Persistent Monitor ACM failed to execute: {e}")
@@ -301,29 +302,29 @@ def execute_slot(workspace_dir, pave_script, log, dashboard_path=None, record_pa
                         floor_3hr = (slot_hour // 3) * 3
                         ice_hour_str = f"{floor_3hr:02d}"
                         log.info(f"Syncing cryosphere product '{member_dsn}' timeline to preceding 3-hour match: {ice_hour_str}0")
-                        folder = run_pave(member_dsn, None, ice_hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, cache_dir=slot_ip_cache, relax_match=relax_match, fast_compare=fast_compare)
+                        folder = run_pave(member_dsn, None, ice_hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, cache_dir=slot_ip_cache, relax_match=relax_match, fast_compare=fast_compare, verbose=verbose, debug=debug)
                     else:
-                        folder = run_pave(member_dsn, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, cache_dir=slot_ip_cache, relax_match=relax_match, fast_compare=fast_compare)
+                        folder = run_pave(member_dsn, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, cache_dir=slot_ip_cache, relax_match=relax_match, fast_compare=fast_compare, verbose=verbose, debug=debug)
                     active_workspaces.append(folder)
 
             elif "|" in entry:
                 dsn, channel = entry.split("|")
                 if dsn == "RadCMIP":
-                    f_rad = run_pave("Rad", [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, cache_dir=slot_ip_cache, relax_match=relax_match, fast_compare=fast_compare)
-                    f_cmip = run_pave("CMIP", [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, cache_dir=slot_ip_cache, relax_match=relax_match, fast_compare=fast_compare)
+                    f_rad = run_pave("Rad", [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, cache_dir=slot_ip_cache, relax_match=relax_match, fast_compare=fast_compare, verbose=verbose, debug=debug)
+                    f_cmip = run_pave("CMIP", [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, cache_dir=slot_ip_cache, relax_match=relax_match, fast_compare=fast_compare, verbose=verbose, debug=debug)
                     active_workspaces.extend([f_rad, f_cmip])
 
                     if channel in ["02", "07", "08", "09", "10"]:
-                        f_dmw = run_pave("DMW", [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, cache_dir=slot_ip_cache, relax_match=relax_match, fast_compare=fast_compare)
+                        f_dmw = run_pave("DMW", [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, cache_dir=slot_ip_cache, relax_match=relax_match, fast_compare=fast_compare, verbose=verbose, debug=debug)
                         active_workspaces.append(f_dmw)
                     if channel == "08":
-                        f_dmwv = run_pave("DMWV", [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, cache_dir=slot_ip_cache, relax_match=relax_match, fast_compare=fast_compare)
+                        f_dmwv = run_pave("DMWV", [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, cache_dir=slot_ip_cache, relax_match=relax_match, fast_compare=fast_compare, verbose=verbose, debug=debug)
                         active_workspaces.append(f_dmwv)
                 else:
-                    folder = run_pave(dsn, [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, cache_dir=slot_ip_cache, relax_match=relax_match, fast_compare=fast_compare)
+                    folder = run_pave(dsn, [channel], hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, cache_dir=slot_ip_cache, relax_match=relax_match, fast_compare=fast_compare, verbose=verbose, debug=debug)
                     active_workspaces.append(folder)
             else:
-                folder = run_pave(entry, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, cache_dir=slot_ip_cache, relax_match=relax_match, fast_compare=fast_compare)
+                folder = run_pave(entry, None, hour_str, target_date, workspace_dir, pave_script, sat=target_sat, log=log, cache_dir=slot_ip_cache, relax_match=relax_match, fast_compare=fast_compare, verbose=verbose, debug=debug)
                 active_workspaces.append(folder)
         except Exception as e:
             log.error(f"Task {entry} failed to execute: {e}")
@@ -332,18 +333,17 @@ def execute_slot(workspace_dir, pave_script, log, dashboard_path=None, record_pa
         if slot_hour == 17:
             log.info("Triggering Daily Quirks (NBAR / BRDF) for G19 at 12Z...")
             for special_dsn in ["NBAR", "BRDF"]:
-                folder = run_pave(special_dsn, None, "12", target_date, workspace_dir, pave_script, sat="19", log=log, cache_dir=slot_ip_cache, relax_match=relax_match, fast_compare=fast_compare)
+                folder = run_pave(special_dsn, None, "12", target_date, workspace_dir, pave_script, sat="19", log=log, cache_dir=slot_ip_cache, relax_match=relax_match, fast_compare=fast_compare, verbose=verbose, debug=debug)
                 active_workspaces.append(folder)
         if slot_hour == 21:
             log.info("Triggering Daily Quirks (NBAR / BRDF) for G18 at 14Z...")
             for special_dsn in ["NBAR", "BRDF"]:
-                folder = run_pave(special_dsn, None, "14", target_date, workspace_dir, pave_script, sat="18", log=log, cache_dir=slot_ip_cache, relax_match=relax_match, fast_compare=fast_compare)
+                folder = run_pave(special_dsn, None, "14", target_date, workspace_dir, pave_script, sat="18", log=log, cache_dir=slot_ip_cache, relax_match=relax_match, fast_compare=fast_compare, verbose=verbose, debug=debug)
                 active_workspaces.append(folder)
 
     valid_paths = [f for f in active_workspaces if os.path.isdir(f)]
 
     # --- CLEANUP AT THE END OF THE SLOT EXECUTION ---
-    # Erase the slot's centralized intermediate cache folder to preserve disk blocks
     if os.path.isdir(slot_ip_cache):
         log.verbose(f"Clearing temporary time slot intermediate cache: {slot_ip_cache}")
         shutil.rmtree(slot_ip_cache)
@@ -355,7 +355,12 @@ def execute_slot(workspace_dir, pave_script, log, dashboard_path=None, record_pa
 
         if dashboard_path: arch_cmd.extend(["--dashboard", dashboard_path])
         if record_path: arch_cmd.extend(["--record", record_path])
-        arch_cmd.append("--debug-stats")
+
+        # Safely pass CLI flags down the archiver pipe
+        if verbose: arch_cmd.append("--verbose")
+        if debug:
+            arch_cmd.append("--debug")
+            arch_cmd.append("--debug-stats")
 
         log.info(f"LAUNCHING UNIFIED LIFECYCLE SWEEP: {' '.join(arch_cmd)}")
         try:
@@ -399,7 +404,8 @@ def handle_catch_up_loop(abs_workspace, abs_pave_script, args, log):
             abs_workspace, abs_pave_script, log,
             dashboard_path=args.dashboard, record_path=args.record,
             relax_match=args.relax_match, fast_compare=args.fast_compare,
-            time_slot=cursor_hour, override_doy=int(cursor_date.strftime('%j')), override_year=cursor_date.year
+            time_slot=cursor_hour, override_doy=int(cursor_date.strftime('%j')), override_year=cursor_date.year,
+            verbose=args.verbose, debug=args.debug
         )
 
         current_idx = ALLOWED_SLOTS.index(cursor_hour)
@@ -469,12 +475,12 @@ if __name__ == "__main__":
         log.info("Catch-up phase cleared successfully. Transitioning system into runtime loops...")
 
     if args.time_slot is not None and not args.catch_up:
-        execute_slot(abs_workspace, abs_pave_script, log, dashboard_path=args.dashboard, record_path=args.record, relax_match=args.relax_match, fast_compare=args.fast_compare, time_slot=args.time_slot, override_doy=args.doy, override_year=args.year)
+        execute_slot(abs_workspace, abs_pave_script, log, dashboard_path=args.dashboard, record_path=args.record, relax_match=args.relax_match, fast_compare=args.fast_compare, time_slot=args.time_slot, override_doy=args.doy, override_year=args.year, verbose=args.verbose, debug=args.debug)
         log.info("--- OVERRIDE EXECUTION COMPLETE ---")
     elif not args.catch_up:
         log.info("Boot verification check: Executing target slot for current hour profile...")
-        execute_slot(abs_workspace, abs_pave_script, log, dashboard_path=args.dashboard, record_path=args.record, relax_match=args.relax_match, fast_compare=args.fast_compare)
+        execute_slot(abs_workspace, abs_pave_script, log, dashboard_path=args.dashboard, record_path=args.record, relax_match=args.relax_match, fast_compare=args.fast_compare, verbose=args.verbose, debug=args.debug)
 
         while True:
             wait_for_next_slot(log)
-            execute_slot(abs_workspace, abs_pave_script, log, dashboard_path=args.dashboard, record_path=args.record, relax_match=args.relax_match, fast_compare=args.fast_compare)
+            execute_slot(abs_workspace, abs_pave_script, log, dashboard_path=args.dashboard, record_path=args.record, relax_match=args.relax_match, fast_compare=args.fast_compare, verbose=args.verbose, debug=args.debug)

@@ -2,7 +2,7 @@
 """
 PAVE-ARCHIVER: Unified Workspace Lifecycle Manager
 ==================================================
-VERSION: 3.5.0 (IP Tarball Purge Optimization)
+VERSION: 3.6.0 (Unified Debug & Verbose Flag Integration)
 
 LIFECYCLE & REPORTING ARCHITECTURE:
 -----------------------------------
@@ -19,7 +19,7 @@ PHASE 2: Historical Crawling & Long-Term Record Generation
    - Safely parses ragged CSVs to prevent Pandas Multi-Index shifting bugs.
    - SCENE MERGING: Strips GOES scene tags but PRESERVES channel tags.
    - TABLE PAGINATION: Cleanly spans variable lists across multiple pages (capped at 20 rows).
-   - DEBUG ENGINE: Traces string matching and data frames to pinpoint N/A dropouts.
+   - DEBUG ENGINE: Traces string matching and data frames ONLY when --debug is explicitly passed.
 """
 
 import os
@@ -548,15 +548,16 @@ def main():
     parser.add_argument("--debug-stats", action="store_true", help="Activate deep text and tracking diagnostic logs for summary CSV parsing math")
 
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
+    parser.add_argument("-d", "--debug", action="store_true", help="Enable debug logging and metrics tracing")
     parser.add_argument("-q", "--quiet", action="store_true", help="Restrict logging to warnings/errors")
 
     args = parser.parse_args()
 
-    log_level = "VERBOSE" if args.verbose else "QUIET" if args.quiet else "INFO"
+    log_level = "DEBUG" if args.debug else "VERBOSE" if args.verbose else "QUIET" if args.quiet else "INFO"
     log = Logger(log_level)
     setup_interrupt_handler(log)
 
-    if args.debug_stats:
+    if args.debug_stats or args.debug:
         DEBUG_STATS_MODE = True
         log.info("[DEBUG ENGINE ACTIVATED] Statistics query paths will dump to stdout.")
 
