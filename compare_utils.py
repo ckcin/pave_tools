@@ -2,7 +2,7 @@
 """
 COMPARE-PAVE: Shared Utility Suite
 ==================================
-VERSION: 1.38.0 (Zero-Variance Uniform Array R-Squared Patch)
+VERSION: 1.39.0 (AllClose Math Patch & CSV NaN Aggregation Fix)
 """
 
 import os
@@ -127,7 +127,6 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
     r_sq_is_na = True
     num_common = np.count_nonzero(common)
 
-    # PERFORMANCE FIX: Pre-calculate the 500k sample arrays to prevent hexbin overload
     samp_p, samp_g = np.array([]), np.array([])
 
     if num_common > 1:
@@ -138,15 +137,19 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
             samp_p = data_p.ravel()[sample_idx]
             samp_g = data_g.ravel()[sample_idx]
 
-            # MATH PATCH: Catch completely uniform zero-variance edge cases explicitly
-            if np.all(samp_p == samp_p[0]) and np.all(samp_g == samp_g[0]):
-                if samp_p[0] == samp_g[0]:
-                    r_sq = 1.0  # Perfect match on flat data
-                    r_sq_is_na = False
-            else:
-                # Calculate variance normally if there is texture
-                r_sq = float(pearsonr(samp_p, samp_g)[0] ** 2)
+            # MATH PATCH: Safely handle 1-1 uniform matching via np.allclose
+            if np.allclose(samp_p, samp_g, atol=1e-5, rtol=1e-5, equal_nan=True):
+                r_sq = 1.0  # Perfect match on flat or dynamic data
                 r_sq_is_na = False
+            else:
+                # If they don't match perfectly, check if one of them is entirely flat
+                if np.ptp(samp_p) == 0 or np.ptp(samp_g) == 0:
+                    r_sq = 0.0
+                    r_sq_is_na = False
+                else:
+                    r = pearsonr(samp_p, samp_g)[0]
+                    r_sq = float(r**2) if np.isfinite(r) else 0.0
+                    r_sq_is_na = False
         except Exception:
             r_sq = 0.0
             r_sq_is_na = True
@@ -160,7 +163,6 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
 
     kwargs = {'aspect': 'equal', 'origin': origin}
 
-    # FEATURE FIX: Quantize the continuous colormap into discrete blocks to prevent smearing
     if is_bitset:
         try:
             kwargs['cmap'] = plt.get_cmap(cmap, 16)
@@ -170,7 +172,6 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
     else:
         kwargs['cmap'] = cmap
 
-    # FEATURE FIX: Handle completely blank/NaN arrays caused by FillValue masking
     v_p, v_g = data_p[np.isfinite(data_p)], data_g[np.isfinite(data_g)]
     if len(v_p) > 0 and len(v_g) > 0:
         if is_bitset or len(np.unique(v_p)) <= 25:
@@ -218,18 +219,14 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
         div = make_axes_locatable(ax)
         return plt.colorbar(im, cax=div.append_axes("right", size="5%", pad=0.05), label=label)
 
-    # --- PERFORMANCE: DOWN-SAMPLE VISUAL ARRAYS FOR PLOTTING SPEED ---
-    # We do NOT downsample bitsets to avoid destroying precise categorical coordinate maps
     plot_step = max(1, max(h, w) // 1200) if not is_bitset else 1
     plot_p = data_p[::plot_step, ::plot_step] if plot_step > 1 else data_p
     plot_g = data_g[::plot_step, ::plot_step] if plot_step > 1 else data_g
     plot_diff = diff_array[::plot_step, ::plot_step] if plot_step > 1 else diff_array
     plot_mismatch = mismatch_mask[::plot_step, ::plot_step] if plot_step > 1 else mismatch_mask
 
-    # PERFORMANCE FIX: Allow bypass of standalone generation to save heavy I/O
     if not fast_mode:
         try:
-            # --- 1. STANDALONE COMPONENTS ---
             spatial_exports = [
                 ('1_GCCS', 'GCCS', plot_g, kwargs),
                 ('2_PREM', 'PREM', plot_p, kwargs),
@@ -262,7 +259,7 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
                     ax_scat.set_xlim(limits); ax_scat.set_ylim(limits)
                 else:
                     ax_scat.set_title(f"{var} Correlation ($R^2$: N/A)", weight='bold', fontsize=12)
-                    ax_scat.text(0.5, 0.5, "Data Constant or N/A\nNo Variance to Plot", ha='center', va='center', color='gray', weight='bold')
+                    ax_scat.text(0.5, 0.5, "Data perfectly matched or N/A\nNo variance to plot.", ha='center', va='center', color='gray', weight='bold')
                 _add_corner_labels(ax_scat, "SCATTER", upscale=True)
                 fig_scat.savefig(tmp_dir / f"{var}_5_SCATTER.png", dpi=100, bbox_inches='tight')
             finally:
@@ -283,7 +280,7 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
         except Exception:
             pass
 
-    # --- 2. MASTER DASHBOARD (Landscape Optimization Format) ---
+    # --- 2. MASTER DASHBOARD ---
     fig = plt.figure(figsize=(24, 12))
     try:
         prem_name, gccs_name = pair_info.split(" <-> ", 1) if " <-> " in pair_info else (pair_info, "Unknown")
@@ -325,9 +322,7 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
             ax4.set_xlim(axis_bounds); ax4.set_ylim(axis_bounds)
         else:
             ax4.set_title("Correlation ($R^2$: N/A)", weight='bold', fontsize=12)
-
-            # Update visual hint so analysts know exactly why it is greyed out
-            status_hint = "Data perfectly uniform\nNo variance to plot" if (len(samp_p) > 0 and np.all(samp_p == samp_p[0])) else "Data Constant or N/A\nNo Variance to Plot"
+            status_hint = "Data matched or uniform\nNo variance to plot" if (len(samp_p) > 0 and np.allclose(samp_p, samp_g, equal_nan=True)) else "Data Constant or N/A\nNo Variance to Plot"
             ax4.text(0.5, 0.5, status_hint, ha='center', va='center', color='gray', weight='bold', transform=ax4.transAxes)
 
         # Histogram
@@ -406,7 +401,7 @@ def execute_visual_comparison(data_p, data_g, var, tmp_dir, pair_info, strategy_
     return [
        {'Metric': 'r-squared correlation', 'Value': np.nan if r_sq_is_na else r_sq},
        {'Metric': 'mean abs error', 'Value': np.mean(abs_diffs) if len(abs_diffs) > 0 else np.nan},
-       {'Metric': 'value range max', 'Value': np.nanmax(data_p) if np.any(mask_p) else np.nan} # Or however you define range
+       {'Metric': 'value range max', 'Value': np.nanmax(data_p) if np.any(mask_p) else np.nan}
     ]
 
 def execute_1d_scatter_dashboard(data_p, data_g, var, tmp_dir, pair_info, fast_mode=False):
@@ -434,14 +429,18 @@ def execute_1d_scatter_dashboard(data_p, data_g, var, tmp_dir, pair_info, fast_m
             samp_p = data_p[sample_idx]
             samp_g = data_g[sample_idx]
 
-            # MATH PATCH: Check for uniform zero-variance edge cases explicitly
-            if np.all(samp_p == samp_p[0]) and np.all(samp_g == samp_g[0]):
-                if samp_p[0] == samp_g[0]:
-                    r_sq = 1.0
-                    r_sq_is_na = False
-            else:
-                r_sq = float(pearsonr(samp_p, samp_g)[0] ** 2)
+            # MATH PATCH: Catch uniform zero-variance matched edge cases
+            if np.allclose(samp_p, samp_g, atol=1e-5, rtol=1e-5, equal_nan=True):
+                r_sq = 1.0
                 r_sq_is_na = False
+            else:
+                if np.ptp(samp_p) == 0 or np.ptp(samp_g) == 0:
+                    r_sq = 0.0
+                    r_sq_is_na = False
+                else:
+                    r = pearsonr(samp_p, samp_g)[0]
+                    r_sq = float(r**2) if np.isfinite(r) else 0.0
+                    r_sq_is_na = False
         except:
             pass
 
@@ -463,7 +462,7 @@ def execute_1d_scatter_dashboard(data_p, data_g, var, tmp_dir, pair_info, fast_m
         # Scatter Plot
         ax_scat.set_box_aspect(1)
         ax_scat.set_xlabel("On-Prem Values", fontsize=11); ax_scat.set_ylabel("GCCS Values", fontsize=11)
-        if len(samp_p) > 0:
+        if len(samp_p) > 0 and not r_sq_is_na:
             vmin_scat = min(np.nanmin(samp_p), np.nanmin(samp_g))
             vmax_scat = max(np.nanmax(samp_p), np.nanmax(samp_g))
 
@@ -471,14 +470,15 @@ def execute_1d_scatter_dashboard(data_p, data_g, var, tmp_dir, pair_info, fast_m
                 vmin_scat -= 0.1; vmax_scat += 0.1
 
             im_scat = ax_scat.hexbin(samp_p, samp_g, gridsize=40, cmap='viridis', mincnt=1, bins='log', extent=[vmin_scat, vmax_scat, vmin_scat, vmax_scat])
-            ax_scat.set_title(f"Correlation ($R^2$: {'N/A' if r_sq_is_na else f'{r_sq:.4f}'})", weight='bold', fontsize=12)
+            ax_scat.set_title(f"Correlation ($R^2$: {r_sq:.4f})", weight='bold', fontsize=12)
             plt.colorbar(im_scat, ax=ax_scat, label='log10(count)', fraction=0.046, pad=0.04)
             axis_bounds = [vmin_scat, vmax_scat]
             ax_scat.plot(axis_bounds, axis_bounds, color='red', linestyle='--', linewidth=1.5, alpha=0.6, zorder=5)
             ax_scat.set_xlim(axis_bounds); ax_scat.set_ylim(axis_bounds)
         else:
             ax_scat.set_title("Correlation ($R^2$: N/A)", weight='bold', fontsize=12)
-            ax_scat.text(0.5, 0.5, "Data Constant or N/A", ha='center', va='center', color='gray')
+            status_hint = "Data matched or uniform\nNo variance to plot" if (len(samp_p) > 0 and np.allclose(samp_p, samp_g, equal_nan=True)) else "Data Constant or N/A\nNo Variance to Plot"
+            ax_scat.text(0.5, 0.5, status_hint, ha='center', va='center', color='gray')
 
         # Histogram
         ax_hist.set_box_aspect(1)
@@ -533,7 +533,7 @@ def execute_1d_scatter_dashboard(data_p, data_g, var, tmp_dir, pair_info, fast_m
     return [
         {'Metric': 'r-squared correlation', 'Value': np.nan if r_sq_is_na else r_sq},
         {'Metric': 'mean abs error', 'Value': np.mean(abs_diffs) if len(abs_diffs) > 0 else np.nan},
-        {'Metric': 'value range max', 'Value': np.nanmax(data_p) if np.any(mask_p) else np.nan} # Or however you define range
+        {'Metric': 'value range max', 'Value': np.nanmax(data_p) if np.any(mask_p) else np.nan}
     ]
 
 
@@ -603,13 +603,17 @@ def compare_sparse_vectors(ds_p, ds_g, vt, v1, v2, tmp_dir, pair_info, instr, pr
             samp_g = grid_spd_g.ravel()[sample_idx]
 
             # MATH PATCH: Catch uniform edge cases for binned vector wind speeds
-            if np.all(samp_p == samp_p[0]) and np.all(samp_g == samp_g[0]):
-                if samp_p[0] == samp_g[0]:
-                    r_sq = 1.0
-                    r_sq_is_na = False
-            else:
-                r_sq = float(pearsonr(samp_p, samp_g)[0] ** 2)
+            if np.allclose(samp_p, samp_g, atol=1e-5, rtol=1e-5, equal_nan=True):
+                r_sq = 1.0
                 r_sq_is_na = False
+            else:
+                if np.ptp(samp_p) == 0 or np.ptp(samp_g) == 0:
+                    r_sq = 0.0
+                    r_sq_is_na = False
+                else:
+                    r = pearsonr(samp_p, samp_g)[0]
+                    r_sq = float(r**2) if np.isfinite(r) else 0.0
+                    r_sq_is_na = False
         except:
             pass
 
@@ -792,14 +796,14 @@ def compare_sparse_vectors(ds_p, ds_g, vt, v1, v2, tmp_dir, pair_info, instr, pr
                 vmin_scat -= 0.1; vmax_scat += 0.1
 
             im4 = ax4.hexbin(samp_p, samp_g, gridsize=40, cmap='viridis', mincnt=1, bins='log', extent=[vmin_scat, vmax_scat, vmin_scat, vmax_scat])
-            ax4.set_title(f"Correlation ($R^2$: {r_sq:.4f})", weight='bold', fontsize=12)
+            ax4.set_title(f"Speed Correlation ($R^2$: {'N/A' if r_sq_is_na else f'{r_sq:.4f}'})", weight='bold', fontsize=12)
             _add_local_cbar(im4, ax4, label='log10(count)')
             axis_bounds = [vmin_scat, vmax_scat]
             ax4.plot(axis_bounds, axis_bounds, color='red', linestyle='--', linewidth=1.5, alpha=0.6, zorder=5)
             ax4.set_xlim(axis_bounds); ax4.set_ylim(axis_bounds)
         else:
-            ax4.set_title("Correlation ($R^2$: N/A)", weight='bold', fontsize=12)
-            status_hint = "Data perfectly uniform\nNo variance to plot" if (len(samp_p) > 0 and np.all(samp_p == samp_p[0])) else "No overlapping tracking\ndata matrix segments found."
+            ax4.set_title("Speed Correlation ($R^2$: N/A)", weight='bold', fontsize=12)
+            status_hint = "Data matched or uniform\nNo variance to plot" if (len(samp_p) > 0 and np.allclose(samp_p, samp_g, equal_nan=True)) else "No overlapping tracking\ndata matrix segments found."
             ax4.text(0.5, 0.5, status_hint, ha='center', va='center', color='gray', weight='bold', transform=ax4.transAxes)
 
         # Cell 6: Speed Delta Histogram
@@ -884,12 +888,23 @@ def write_aggregated_summary(dest_root, stats_root, log):
     df = pd.DataFrame(all_raw).sort_values('Start')
     df['Value'] = pd.to_numeric(df['Value'], errors='coerce')
     summary_file = stats_root / "stats_summary.csv"
+
     with open(summary_file, 'w') as f:
-        f.write("Product,Variable,Sat,Metric,Count,Min,Max,Mean,Median,NaN,T1,V1,T2,V2...\n")
+        f.write("Product,Variable,Sat,Metric,Count,Min,Max,Mean,Median,NaN_Count,T1,V1,T2,V2...\n")
         for (p, v, m, s), g in df.groupby(['Product', 'Variable', 'Metric', 'Sat'], sort=False):
             vals = g['Value'].dropna()
-            line = [p, v, s, m, len(g), vals.min() if not vals.empty else 0, vals.max() if not vals.empty else 0,
-                    vals.mean() if not vals.empty else 0, vals.median() if not vals.empty else 0, g['Value'].isna().sum()]
+
+            # BUG FIX: Safely inject 'NaN' strings when arrays drop out to prevent false 0.0 fallbacks
+            min_v = vals.min() if not vals.empty else 'NaN'
+            max_v = vals.max() if not vals.empty else 'NaN'
+            mean_v = vals.mean() if not vals.empty else 'NaN'
+            med_v = vals.median() if not vals.empty else 'NaN'
+
+            line = [p, v, s, m, len(g), min_v, max_v, mean_v, med_v, g['Value'].isna().sum()]
             ts = []
-            for _, r in g.iterrows(): ts.extend([r['Start'], r['Value']])
+
+            for _, r in g.iterrows():
+                val_output = r['Value'] if pd.notna(r['Value']) else 'NaN'
+                ts.extend([r['Start'], val_output])
+
             f.write(",".join(map(str, line)) + "," + ",".join(map(str, ts)) + "\n")

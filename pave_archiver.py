@@ -2,7 +2,7 @@
 """
 PAVE-ARCHIVER: Unified Workspace Lifecycle Manager
 ==================================================
-VERSION: 3.6.0 (Unified Debug & Verbose Flag Integration)
+VERSION: 3.7.0 (Removed Overall Average Row)
 
 LIFECYCLE & REPORTING ARCHITECTURE:
 -----------------------------------
@@ -333,8 +333,6 @@ def _draw_summary_page(pdf, title, subtitle, family, var_tuple_list, stats_df, s
 
     all_data_rows = []
     all_data_colors = []
-    r2_tracker = []
-    err_tracker = []
 
     unique_vars = set()
     for prod, var in var_tuple_list:
@@ -359,19 +357,8 @@ def _draw_summary_page(pdf, title, subtitle, family, var_tuple_list, stats_df, s
         elif avg_r2 >= 0.85: color = "moccasin"
         else: color = "lightcoral"
 
-        if pd.notna(avg_r2): r2_tracker.append(avg_r2)
-        if pd.notna(avg_err): err_tracker.append(avg_err)
-
         all_data_rows.append(row)
         all_data_colors.append([color] * 4)
-
-    if r2_tracker:
-        overall_r2 = np.mean(r2_tracker)
-        overall_err = np.mean(err_tracker) if err_tracker else np.nan
-        overall_color = "palegreen" if overall_r2 >= 0.95 else "moccasin" if overall_r2 >= 0.85 else "lightcoral"
-
-        all_data_rows.append(["OVERALL AVERAGE", f"{overall_r2:.4f}", f"{overall_err:.4f}" if pd.notna(overall_err) else "N/A", "N/A"])
-        all_data_colors.append([overall_color] * 4)
 
     if not all_data_rows:
         fig = plt.figure(figsize=(11, 8.5))
@@ -414,11 +401,6 @@ def _draw_summary_page(pdf, title, subtitle, family, var_tuple_list, stats_df, s
         for j in range(4):
             table[(0, j)].get_text().set_color('white')
             table[(0, j)].get_text().set_weight('bold')
-
-        if r2_tracker and i == total_pages - 1:
-            last_row_idx = len(table_data) - 1
-            for j in range(4):
-                table[(last_row_idx, j)].get_text().set_weight('bold')
 
         pdf.savefig(fig)
         plt.close(fig)
