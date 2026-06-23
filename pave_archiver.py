@@ -2,7 +2,7 @@
 """
 PAVE-ARCHIVER: Unified Workspace Lifecycle Manager
 ==================================================
-VERSION: 3.4.0 (Pagination Engine & N/A Scrubbing)
+VERSION: 3.4.3 (Granular Stats Debugging Engine)
 
 LIFECYCLE & REPORTING ARCHITECTURE:
 -----------------------------------
@@ -17,9 +17,8 @@ PHASE 1: Workspace Cleanup & Dashboard Harvesting
 PHASE 2: Historical Crawling & Long-Term Record Generation
    - Safely parses ragged CSVs to prevent Pandas Multi-Index shifting bugs.
    - SCENE MERGING: Strips GOES scene tags but PRESERVES channel tags.
-   - TABLE PAGINATION: Automatically detects massive variable lists (like DMW)
-     and cleanly spans them across multiple pages to prevent overflow.
-   - MATH FILTERING: Aggregation math aggressively drops N/As, Infs, and NaNs.
+   - TABLE PAGINATION: Cleanly spans variable lists across multiple pages (capped at 20 rows).
+   - DEBUG ENGINE: Traces string matching and data frames to pinpoint N/A dropouts.
 """
 
 import os
@@ -60,6 +59,9 @@ FILE_PATTERN = re.compile(
     r"^OR_(?P<prod>.+?)_G(?P<sat>\d{2})_(?P<var>.+?)_(?P<time>\d{14})_comparison\.png$"
 )
 
+# Global toggle for deep logging configuration
+DEBUG_STATS_MODE = False
+
 # ==========================================
 # UTILITY: SCENE PARSING & FILTERING
 # ==========================================
@@ -70,20 +72,13 @@ def clean_product_name(prod_str):
     """Normalizes wild GOES namings by stripping L1b/L2 prefixes, mode, and scene tags, but PRESERVING the channel."""
     clean = str(prod_str)
 
-    # 1. Extract channel if present (e.g., from -M6C13)
     ch_match = re.search(r'-M\d+(C\d+)', clean, flags=re.IGNORECASE)
     ch_suffix = f"_{ch_match.group(1).upper()}" if ch_match else ""
 
-    # 2. Strip standard prefixes
     clean = re.sub(r'^(ABI-L[12][a-zA-Z]?-|I_ABI-L[12][a-zA-Z]?-|I_)', '', clean, flags=re.IGNORECASE)
-
-    # 3. Strip Mode (and Channel) from the base string so it cleanly ends with the scene
     clean = re.sub(r'-M\d+(C\d+)?$', '', clean, flags=re.IGNORECASE)
-
-    # 4. Strip Scene Tags (F, C, M1, M2)
     clean = re.sub(r'(F|C|M1|M2)$', '', clean, flags=re.IGNORECASE)
 
-    # 5. Recombine the normalized base product with the isolated channel
     return f"{clean.strip().upper()}{ch_suffix}"
 
 def extract_run_datetime(path):
@@ -220,7 +215,6 @@ def process_workspace(workspace, args, log):
 
     active_families = set()
 
-    # 1. Derive the product family directly from the workspace folder name
     try:
         parts = workspace.name.split('_')
         base_product = parts[0]
@@ -237,7 +231,6 @@ def process_workspace(workspace, args, log):
     except Exception as e:
         log.debug(f"Could not parse workspace name for family: {e}")
 
-    # Fallback: Scan the validation directory to catch anything else
     val_dir = workspace / "validation"
     if val_dir.exists():
         for f in val_dir.rglob("*_comparison.png"):
@@ -247,12 +240,10 @@ def process_workspace(workspace, args, log):
                 fam = get_family_for_product(norm_prod)
                 active_families.add(fam if fam else norm_prod)
 
-    # 2. Harvest Dashboard if requested
     if args.clean_validation:
         dash_dir = Path(args.dashboard).resolve() if args.dashboard else workspace / "dashboard"
         harvest_dashboard(workspace, dash_dir, log)
 
-    # 3. Archive
     core_folders = ["prem", "gccs", "collocation", "logs"]
     if args.clean_validation: core_folders.append("validation")
     if args.clean_glance: core_folders.append("glance")
@@ -270,8 +261,10 @@ def process_workspace(workspace, args, log):
 # ==========================================
 
 def get_variable_stats(stats_df, prod, sat=None, var=None):
-    """Extracts and averages the target metrics, perfectly mapping scenes to their base product stats and safely ignoring N/A values."""
+    """Extracts and averages target metrics with a deep diagnostic tracing engine for validation."""
     if stats_df is None or stats_df.empty:
+        if DEBUG_STATS_MODE:
+            print(f"[STATS_ASSEMBLY_DEBUG] Query abandoned for '{prod}': Base database dataframe is empty.")
         return np.nan, np.nan, np.nan
 
     clean_target_prod = clean_product_name(prod)
@@ -285,20 +278,31 @@ def get_variable_stats(stats_df, prod, sat=None, var=None):
         subset = subset[subset['Sat'].astype(str).str.strip() == str(sat).strip()]
 
     if subset.empty:
+        if DEBUG_STATS_MODE:
+            print(f"[STATS_ASSEMBLY_DEBUG] Lookup Match Failure -> Zero entries fetched for Key: '{clean_target_prod}', Var: '{var}', Sat: '{sat or 'ALL'}'")
         return np.nan, np.nan, np.nan
 
-    # BULLETPROOF MATH FILTERING: Aggressively convert to float, then kill Infs and NaNs
     def clean_series(series):
         s = pd.to_numeric(series, errors='coerce')
         return s.replace([np.inf, -np.inf], np.nan).dropna()
 
-    r2_vals = clean_series(subset[subset['Metric'].str.contains('r-squared', case=False, na=False)]['Mean'])
-    err_vals = clean_series(subset[subset['Metric'].str.contains('mean abs error', case=False, na=False)]['Mean'])
-    range_vals = clean_series(subset[subset['Metric'].str.contains('range', case=False, na=False)]['Max'])
+    r2_rows = subset[subset['Metric'].str.contains('r-squared', case=False, na=False)]
+    err_rows = subset[subset['Metric'].str.contains('mean abs error', case=False, na=False)]
+    range_rows = subset[subset['Metric'].str.contains('range', case=False, na=False)]
+
+    r2_vals = clean_series(r2_rows['Mean'])
+    err_vals = clean_series(err_rows['Mean'])
+    range_vals = clean_series(range_rows['Max'])
 
     avg_r2 = r2_vals.mean() if not r2_vals.empty else np.nan
     avg_err = err_vals.mean() if not err_vals.empty else np.nan
     max_range = range_vals.max() if not range_vals.empty else np.nan
+
+    if DEBUG_STATS_MODE:
+        print(f"[STATS_ASSEMBLY_DEBUG] Mapping -> {clean_target_prod} | Variable: {var} | Satellite Scope: {sat or 'COMBINED'}")
+        print(f"  |-> CSV Row Counts Found: R2 Rows={len(r2_rows)}, MAE Rows={len(err_rows)}, Range Rows={len(range_rows)}")
+        print(f"  |-> Purged Mathematical Arrays: Valid_R2={list(r2_vals)}, Valid_MAE={list(err_vals)}, Valid_Range={list(range_vals)}")
+        print(f"  |-> Final Floating Outputs: Avg_R2={avg_r2}, Avg_MAE={avg_err}, Max_Range={max_range}")
 
     return avg_r2, avg_err, max_range
 
@@ -312,10 +316,13 @@ def _draw_summary_page(pdf, title, subtitle, family, var_tuple_list, stats_df, s
     r2_tracker = []
     err_tracker = []
 
-    # CONDENSE SCENES: Collapse the incoming tuple list into unique base variables
     unique_vars = set()
     for prod, var in var_tuple_list:
         unique_vars.add((clean_product_name(prod), var))
+
+    if DEBUG_STATS_MODE:
+        print(f"\n[STATS_ASSEMBLY_DEBUG] === Beginning Rendering Evaluation Matrix for Table: '{title}' ===")
+        print(f"[STATS_ASSEMBLY_DEBUG] Isolated unique layout items discovered: {sorted(list(unique_vars))}")
 
     for (clean_prod, var) in sorted(list(unique_vars), key=lambda x: (x[0], x[1])):
         avg_r2, avg_err, val_range = get_variable_stats(stats_df, clean_prod, sat=sat_filter, var=var)
@@ -356,8 +363,7 @@ def _draw_summary_page(pdf, title, subtitle, family, var_tuple_list, stats_df, s
         plt.close(fig)
         return
 
-    # PAGINATION ENGINE: Split the rows into manageable chunks to prevent barcode squishing
-    MAX_ROWS_PER_PAGE = 30
+    MAX_ROWS_PER_PAGE = 20
     total_pages = max(1, (len(all_data_rows) - 1) // MAX_ROWS_PER_PAGE + 1)
 
     for i in range(total_pages):
@@ -370,7 +376,6 @@ def _draw_summary_page(pdf, title, subtitle, family, var_tuple_list, stats_df, s
         fig.text(0.5, 0.90, title, ha='center', va='center', fontsize=26, weight='bold')
         fig.text(0.5, 0.83, f"Product Family: {family}", ha='center', va='center', fontsize=20)
 
-        # Inject dynamic page numbering into the subtitle if needed
         page_subtitle = subtitle + (f" | Page {i+1} of {total_pages}" if total_pages > 1 else "")
         fig.text(0.5, 0.78, page_subtitle, ha='center', va='center', fontsize=16, color='gray')
 
@@ -384,14 +389,12 @@ def _draw_summary_page(pdf, title, subtitle, family, var_tuple_list, stats_df, s
         table.auto_set_font_size(False)
         table.set_fontsize(10)
 
-        # Scale cell height safely depending on how many rows ended up on this specific page
         table.scale(1, min(1.8, 40 / len(table_data)))
 
         for j in range(4):
             table[(0, j)].get_text().set_color('white')
             table[(0, j)].get_text().set_weight('bold')
 
-        # Bold the OVERALL AVERAGE row if it rendered on the current chunk
         if r2_tracker and i == total_pages - 1:
             last_row_idx = len(table_data) - 1
             for j in range(4):
@@ -513,6 +516,7 @@ def run_recorder(dashboard_dir, record_dir, stats_df, active_families, log):
         log.info(f"Successfully generated/updated {updated_count} PDF records.")
 
 def main():
+    global DEBUG_STATS_MODE
     parser = argparse.ArgumentParser(description="PAVE-ARCHIVER: Unified Workspace Lifecycle Manager")
     parser.add_argument("workspaces", nargs="+", help="Paths to PAVE workspace directories to archive")
 
@@ -521,6 +525,7 @@ def main():
 
     parser.add_argument("--dashboard", type=str, help="Optional: Shared path to aggregate all dashboard comparison images globally")
     parser.add_argument("--record", type=str, help="Optional: Trigger PDF generation and output artifacts to this path")
+    parser.add_argument("--debug-stats", action="store_true", help="Activate deep text and tracking diagnostic logs for summary CSV parsing math")
 
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
     parser.add_argument("-q", "--quiet", action="store_true", help="Restrict logging to warnings/errors")
@@ -530,6 +535,10 @@ def main():
     log_level = "VERBOSE" if args.verbose else "QUIET" if args.quiet else "INFO"
     log = Logger(log_level)
     setup_interrupt_handler(log)
+
+    if args.debug_stats:
+        DEBUG_STATS_MODE = True
+        log.info("[DEBUG ENGINE ACTIVATED] Statistics query paths will dump to stdout.")
 
     master_stats_list = []
     active_families = set()
@@ -570,17 +579,22 @@ def main():
 
                     for row in reader:
                         if len(row) >= 10:
-                            parsed_data.append(row[:10])
+                            cleaned_row = []
+                            for idx, val in enumerate(row[:10]):
+                                val_str = str(val).strip()
+                                if idx in [5, 6, 7, 8]:
+                                    if re.match(r'^\s*(n/?a|none|nan|null)\s*$', val_str, re.IGNORECASE):
+                                        cleaned_row.append('')
+                                    else:
+                                        cleaned_row.append(val_str)
+                                else:
+                                    cleaned_row.append(val_str)
+                            parsed_data.append(cleaned_row)
 
                 if parsed_data:
                     df = pd.DataFrame(parsed_data, columns=columns_to_keep)
 
                     for numeric_col in ['Mean', 'Max']:
-                        # Add a proactive string wipe just in case 'nan' or 'N/A' gets parsed as a raw string
-                        df[numeric_col] = df[numeric_col].replace(
-                            to_replace=[r'^\s*n/?a\s*$', r'^\s*none\s*$', r'^\s*nan\s*$'],
-                            value=np.nan, regex=True, flags=re.IGNORECASE
-                        )
                         df[numeric_col] = pd.to_numeric(df[numeric_col], errors='coerce')
 
                     df['Sat'] = df['Sat'].astype(str).str.replace('G', '', case=False).str.zfill(2)
@@ -590,8 +604,10 @@ def main():
                 log.debug(f"Failed to safely parse ragged CSV {sf.name}: {e}")
 
         if master_stats_list:
-            log.info(f"Successfully loaded {len(stat_files)} recent statistical records.")
             combined_stats_df = pd.concat(master_stats_list, ignore_index=True)
+            if DEBUG_STATS_MODE:
+                print(f"[STATS_ASSEMBLY_DEBUG] Master database generated. Unique rows: {len(combined_stats_df)}")
+                print(f"[STATS_ASSEMBLY_DEBUG] Active Product tags discovered in database: {list(combined_stats_df['Product'].unique())}")
         else:
             log.warn("No historical stats files found! PDF tables will render as N/A.")
             combined_stats_df = None
