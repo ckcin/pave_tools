@@ -2,7 +2,7 @@
 """
 PAVE-ARCHIVER: Unified Workspace Lifecycle Manager
 ==================================================
-VERSION: 3.7.0 (Removed Overall Average Row)
+VERSION: 3.8.0 (Strict Per-Channel PDF Isolation)
 
 LIFECYCLE & REPORTING ARCHITECTURE:
 -----------------------------------
@@ -17,7 +17,8 @@ PHASE 1: Workspace Cleanup & Dashboard Harvesting
 
 PHASE 2: Historical Crawling & Long-Term Record Generation
    - Safely parses ragged CSVs to prevent Pandas Multi-Index shifting bugs.
-   - SCENE MERGING: Strips GOES scene tags but PRESERVES channel tags.
+   - SCENE MERGING & CHANNEL ISOLATION: Forces channels to separate into distinct PDFs
+     (e.g. DMW_C08 vs DMW_C10) regardless of upstream utility grouping logic.
    - TABLE PAGINATION: Cleanly spans variable lists across multiple pages (capped at 20 rows).
    - DEBUG ENGINE: Traces string matching and data frames ONLY when --debug is explicitly passed.
 """
@@ -73,11 +74,12 @@ def clean_product_name(prod_str):
     """Normalizes wild GOES namings by stripping L1b/L2 prefixes, mode, and scene tags, but PRESERVING the channel."""
     clean = str(prod_str)
 
-    ch_match = re.search(r'-M\d+(C\d+)', clean, flags=re.IGNORECASE)
+    # Make mode optional in case a product is named ABI-L2-DMWF-C08 instead of -M6C08
+    ch_match = re.search(r'-(?:M\d+)?(C\d+)', clean, flags=re.IGNORECASE)
     ch_suffix = f"_{ch_match.group(1).upper()}" if ch_match else ""
 
     clean = re.sub(r'^(ABI-L[12][a-zA-Z]?-|I_ABI-L[12][a-zA-Z]?-|I_)', '', clean, flags=re.IGNORECASE)
-    clean = re.sub(r'-M\d+(C\d+)?$', '', clean, flags=re.IGNORECASE)
+    clean = re.sub(r'-(?:M\d+)?(C\d+)?$', '', clean, flags=re.IGNORECASE)
     clean = re.sub(r'(F|C|M1|M2)$', '', clean, flags=re.IGNORECASE)
 
     return f"{clean.strip().upper()}{ch_suffix}"
@@ -242,9 +244,20 @@ def process_workspace(workspace, args, log):
                 ch_tag = f"_C{p[2:]}"
                 break
 
-        norm_prod = clean_product_name(base_product) + ch_tag
-        fam = get_family_for_product(norm_prod)
-        active_families.add(fam if fam else norm_prod)
+        norm_prod = clean_product_name(base_product)
+
+        # Guardrail: Check if a channel tag naturally embedded itself in the parsed name
+        ch_match = re.search(r'(_C\d{2})$', norm_prod)
+        if ch_match and not ch_tag:
+            ch_tag = ch_match.group(1)
+
+        # Isolate the base name from the channel to ensure utility grouping doesn't accidentally squash it
+        base_norm = re.sub(r'_C\d{2}$', '', norm_prod)
+        fam = get_family_for_product(base_norm)
+        base_family = fam if fam else base_norm
+
+        # Explicitly force the channel tag back onto the resolved family name!
+        active_families.add(f"{base_family}{ch_tag}")
     except Exception as e:
         log.debug(f"Could not parse workspace name for family: {e}")
 
@@ -254,8 +267,15 @@ def process_workspace(workspace, args, log):
             m = FILE_PATTERN.search(f.name)
             if m:
                 norm_prod = clean_product_name(m.group('prod'))
-                fam = get_family_for_product(norm_prod)
-                active_families.add(fam if fam else norm_prod)
+
+                ch_match = re.search(r'(_C\d{2})$', norm_prod)
+                ch_tag = ch_match.group(1) if ch_match else ""
+
+                base_norm = re.sub(r'_C\d{2}$', '', norm_prod)
+                fam = get_family_for_product(base_norm)
+                base_family = fam if fam else base_norm
+
+                active_families.add(f"{base_family}{ch_tag}")
 
     if args.clean_validation:
         dash_dir = Path(args.dashboard).resolve() if args.dashboard else workspace / "dashboard"
@@ -486,8 +506,16 @@ def run_recorder(dashboard_dir, record_dir, stats_df, active_families, log):
         prod, sat, var, time_str = match.group('prod'), match.group('sat'), match.group('var'), match.group('time')
 
         norm_prod = clean_product_name(prod)
-        fam = get_family_for_product(norm_prod)
-        family = fam if fam else norm_prod
+
+        ch_match = re.search(r'(_C\d{2})$', norm_prod)
+        ch_tag = ch_match.group(1) if ch_match else ""
+
+        base_norm = re.sub(r'_C\d{2}$', '', norm_prod)
+        fam = get_family_for_product(base_norm)
+        base_family = fam if fam else base_norm
+
+        # Explicitly force the channel tag back onto the resolved family name!
+        family = f"{base_family}{ch_tag}"
 
         full_time_int = int(time_str)
 
