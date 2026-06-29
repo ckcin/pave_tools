@@ -2,13 +2,14 @@
 """
 JUDGE-PAVE: Quality Gate Verdict Engine
 =======================================
-VERSION: 1.2.0 (Outlier Filename Tracing)
+VERSION: 1.3.0 (Ragged CSV Parsing Fix)
 """
 
 import argparse
 import pandas as pd
 import numpy as np
 import sys
+import csv
 from pathlib import Path
 from pave_utils import Logger, setup_interrupt_handler
 
@@ -38,7 +39,8 @@ class PaveJudge:
 
     def _judge_science(self):
         """
-        Tiered Science Logic (v1.2.0):
+        Tiered Science Logic (v1.3.0):
+        - Dynamically parses ragged CSVs to prevent 'Expected X fields' crashing.
         - Scans alternating T/V pairs (Start Time / Value) starting at index 10.
         - FAIL: Any single data point < SCI_FAIL_LIMIT (0.900).
         - FAIL: Product-wide average (all points) < SCI_PASS_THRESHOLD (0.990).
@@ -51,9 +53,19 @@ class PaveJudge:
             return {}
 
         try:
-            # Read once with automatic column detection
+            # RAGGED CSV FIX: Find the max columns in the file, then force names so Pandas doesn't crash
+            with open(self.stats_file, 'r') as f:
+                reader = csv.reader(f)
+                max_cols = max([len(row) for row in reader] + [14]) # Guard against empty/short files
+
+            col_names = ['Product', 'Variable', 'Sat', 'Metric', 'Count', 'Min', 'Max', 'Mean', 'Median', 'NaN_Count']
+            for i in range(10, max_cols):
+                col_names.append(f"TS_{i}")
+
             df = pd.read_csv(
                 self.stats_file,
+                names=col_names,
+                skiprows=1, # Skip the broken 14-field hardcoded header
                 skipinitialspace=True,
                 low_memory=False
             )
@@ -64,8 +76,6 @@ class PaveJudge:
         if df.empty:
             return {}
 
-        # 0:Product, 1:Variable, 2:Sat, 3:Metric, 4:Count, 5:Min, 6:Max, 7:Mean, 8:Median, 9:NaN, 10:T1, 11:V1...
-        df = df.rename(columns={0: 'Product', 1: 'Variable', 2: 'Sat', 3: 'Metric'})
         df['Metric'] = df['Metric'].astype(str).str.lower().str.strip()
         df_r2 = df[df['Metric'].str.contains('r-squared|r2', case=False, na=False)]
 
@@ -83,12 +93,14 @@ class PaveJudge:
                 sat = str(row['Sat'])
                 prod_dsn = str(row['Product'])
 
-                # Extract paired arrays of Timestamps and Values
+                # Extract paired arrays of Timestamps and Values starting at the 10th index
                 times = row.iloc[10::2].values
                 vals = row.iloc[11::2].values
 
                 for t, v in zip(times, vals):
-                    if pd.isna(v): continue
+                    if pd.isna(v) or str(v).strip().lower() in ['nan', 'n/a', 'none']:
+                        continue
+
                     try:
                         val_float = float(v)
                     except (ValueError, TypeError):
