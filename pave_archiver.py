@@ -2,7 +2,7 @@
 """
 PAVE-ARCHIVER: Unified Workspace Lifecycle Manager
 ==================================================
-VERSION: 3.8.0 (Strict Per-Channel PDF Isolation)
+VERSION: 3.9.0 (Artifact Parsing Bridge & Unknown_DOY Fix)
 
 LIFECYCLE & REPORTING ARCHITECTURE:
 -----------------------------------
@@ -57,18 +57,36 @@ except ImportError:
     def setup_interrupt_handler(log=None): pass
     def get_family_for_product(prod): return prod.upper()
 
-FILE_PATTERN = re.compile(
-    r"^OR_(?P<prod>.+?)_G(?P<sat>\d{2})_(?P<var>.+?)_(?P<time>\d{14})_comparison\.png$"
-)
-
-# Global toggle for deep logging configuration
-DEBUG_STATS_MODE = False
 
 # ==========================================
 # UTILITY: SCENE PARSING & FILTERING
 # ==========================================
 
-PARENT_TIME_PATTERN = re.compile(r"OR_(?P<dsn>.+?)_G(?P<sat>\d{2}).*?_s(?P<time>\d{14})")
+FILE_PATTERN = re.compile(
+    r"^OR_(?P<prod>.+?)_G(?P<sat>\d{2})_(?P<var>.+?)_(?P<time>\d{14})_comparison\.png$"
+)
+PARENT_TIME_PATTERN = re.compile(
+    r"^OR_(?P<dsn>.+?)_G(?P<sat>\d{2}).*?_s(?P<time>\d{14})"
+)
+
+# Global toggle for deep logging configuration
+DEBUG_STATS_MODE = False
+
+def parse_artifact_info(filepath):
+    """Extracts product, sat, variable, and time_str bridging the filename and parent folder context."""
+    # 1. Check if it's already the Dashboard format (e.g. OR_Rad_G19_DQF_20261650103568_comparison.png)
+    m_file = FILE_PATTERN.search(filepath.name)
+    if m_file:
+        return m_file.group('prod'), m_file.group('sat'), m_file.group('var'), m_file.group('time')
+
+    # 2. Check if it's the raw Validation format (e.g. DQF_comparison.png inside an OR_... folder)
+    m_var = re.search(r"^(?P<var>.+?)_comparison\.png$", filepath.name)
+    m_parent = PARENT_TIME_PATTERN.search(filepath.parent.name)
+
+    if m_var and m_parent:
+        return m_parent.group('dsn'), m_parent.group('sat'), m_var.group('var'), m_parent.group('time')
+
+    return None, None, None, None
 
 def clean_product_name(prod_str):
     """Normalizes wild GOES namings by stripping L1b/L2 prefixes, mode, and scene tags, but PRESERVING the channel."""
@@ -85,23 +103,13 @@ def clean_product_name(prod_str):
     return f"{clean.strip().upper()}{ch_suffix}"
 
 def extract_run_datetime(path):
-    """Parse a comparison artifact timestamp from the file name or its parent folder."""
-    match = FILE_PATTERN.search(path.name)
-    if match:
+    """Parse a comparison artifact timestamp from the parsed context bridge."""
+    _, _, _, time_str = parse_artifact_info(path)
+    if time_str:
         try:
-            time_str = match.group('time')[:13]
-            return datetime.strptime(time_str, "%Y%j%H%M%S")
+            return datetime.strptime(time_str[:13], "%Y%j%H%M%S")
         except ValueError:
             pass
-
-    match = PARENT_TIME_PATTERN.search(path.parent.name)
-    if match:
-        try:
-            time_str = match.group('time')[:13]
-            return datetime.strptime(time_str, "%Y%j%H%M%S")
-        except ValueError:
-            pass
-
     return None
 
 def get_recent_run_dates(paths, max_dates=3):
@@ -147,12 +155,8 @@ def harvest_dashboard(workspace, dash_dir, log):
     unmatched_files = []
 
     for f in filtered_files:
-        m = FILE_PATTERN.search(f.name)
-        if m:
-            dsn = m.group('prod')
-            sat = m.group('sat')
-            var_name = m.group('var')
-            time_str = m.group('time')
+        dsn, sat, var_name, time_str = parse_artifact_info(f)
+        if dsn and sat and var_name and time_str:
             time_int = int(time_str)
             yyyyddd = time_str[:7]
 
@@ -246,17 +250,14 @@ def process_workspace(workspace, args, log):
 
         norm_prod = clean_product_name(base_product)
 
-        # Guardrail: Check if a channel tag naturally embedded itself in the parsed name
         ch_match = re.search(r'(_C\d{2})$', norm_prod)
         if ch_match and not ch_tag:
             ch_tag = ch_match.group(1)
 
-        # Isolate the base name from the channel to ensure utility grouping doesn't accidentally squash it
         base_norm = re.sub(r'_C\d{2}$', '', norm_prod)
         fam = get_family_for_product(base_norm)
         base_family = fam if fam else base_norm
 
-        # Explicitly force the channel tag back onto the resolved family name!
         active_families.add(f"{base_family}{ch_tag}")
     except Exception as e:
         log.debug(f"Could not parse workspace name for family: {e}")
@@ -264,9 +265,9 @@ def process_workspace(workspace, args, log):
     val_dir = workspace / "validation"
     if val_dir.exists():
         for f in val_dir.rglob("*_comparison.png"):
-            m = FILE_PATTERN.search(f.name)
-            if m:
-                norm_prod = clean_product_name(m.group('prod'))
+            prod, _, _, _ = parse_artifact_info(f)
+            if prod:
+                norm_prod = clean_product_name(prod)
 
                 ch_match = re.search(r'(_C\d{2})$', norm_prod)
                 ch_tag = ch_match.group(1) if ch_match else ""
@@ -281,7 +282,6 @@ def process_workspace(workspace, args, log):
         dash_dir = Path(args.dashboard).resolve() if args.dashboard else workspace / "dashboard"
         harvest_dashboard(workspace, dash_dir, log)
 
-    # Nuke the massive IP tarballs before archiving starts
     purge_ip_tarballs(workspace, log)
 
     core_folders = ["prem", "gccs", "collocation", "logs"]
@@ -500,10 +500,8 @@ def run_recorder(dashboard_dir, record_dir, stats_df, active_families, log):
     matched_count = 0
 
     for f in filtered_files:
-        match = FILE_PATTERN.search(f.name)
-        if not match: continue
-
-        prod, sat, var, time_str = match.group('prod'), match.group('sat'), match.group('var'), match.group('time')
+        prod, sat, var, time_str = parse_artifact_info(f)
+        if not prod: continue
 
         norm_prod = clean_product_name(prod)
 
@@ -514,7 +512,6 @@ def run_recorder(dashboard_dir, record_dir, stats_df, active_families, log):
         fam = get_family_for_product(base_norm)
         base_family = fam if fam else base_norm
 
-        # Explicitly force the channel tag back onto the resolved family name!
         family = f"{base_family}{ch_tag}"
 
         full_time_int = int(time_str)
